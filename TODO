@@ -1,0 +1,7 @@
+TODO
+- Have servers sign all messages with long-term keys
+- Do everything over TLS
+- Deduplicate data:
+    * store only one copy of each message
+    * send only one copy of each message back to client
+
