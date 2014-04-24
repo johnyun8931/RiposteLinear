@@ -1,29 +1,32 @@
 package main
 
-import "log"
-import "net/http"
-import "net/rpc"
+import (
+  "log"
+  "net"
+  "os/exec"
+)
 
-import "./mailserver"
+import (
+  "henrycg/email/utils"
+)
 
 func main() {
-  slot_table := new(mailserver.SlotTable)
-  rpc.Register(slot_table)
-  rpc.HandleHTTP()
-  err := http.ListenAndServe(":8080", nil)
-  if err != nil {
-    log.Fatal("Error:", err.Error())
+  var servers = utils.AllServers()
+
+  var procs []*exec.Cmd = make([]*exec.Cmd, len(servers))
+  for i := range servers {
+    _, port, err := net.SplitHostPort(servers[i])
+    log.Printf("Starting server: ", servers[i])
+    if err != nil {
+      log.Fatal("Oh no!")
+      return
+    }
+    procs[i] = exec.Command("server/server", port)
+    procs[i].Start()
+  }
+
+  for i := 0; i<len(servers); i++ {
+    procs[i].Wait()
   }
 }
-
-/*
-func getHandler(w http.ResponseWriter, r *http.Request, slot_table mailserver.SlotTable) {
-  var idx = rand.Intn(mailserver.NUM_SLOTS)
-  var slot *mailserver.SlotData = &slot_table.Entries[idx]
-  slot.Mutex.Lock()
-  slot.Is_filled = true
-  slot.Mutex.Unlock()
-  log.Printf("Connection from %v closed.", r.RemoteAddr)
-}
-*/
 
