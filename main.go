@@ -22,11 +22,17 @@ func main() {
       return
     }
     procs[i] = exec.Command("server/server", port)
-    procs[i].Start()
+    err = procs[i].Start()
+    if err != nil {
+      log.Printf("Process ", i, " error: ", err.Error())
+    }
   }
 
   for i := 0; i<len(servers); i++ {
-    procs[i].Wait()
+    err := procs[i].Wait()
+    if err != nil {
+      log.Printf("Process ", i, " error: ", err.Error())
+    }
   }
 }
 
