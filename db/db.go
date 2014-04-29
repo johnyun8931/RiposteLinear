@@ -4,6 +4,7 @@ import (
   "errors"
   "log"
   "math"
+  "net/rpc"
 
   "henrycg/email/utils"
 )
@@ -63,17 +64,25 @@ func (t *SlotTable) Upload(args *UploadArgs, reply *UploadReply) error {
   var prep PrepareArgs
   var err error
   prep.queries = args.Query
-  prep.uuid, err = utils.RandomInt64(math.MaxInt64)
 
+  prep.uuid, err = utils.RandomInt64(math.MaxInt64)
   if err != nil {
     return err
   }
 
+  t.processQuery(args.Query[0])
+  return nil
+}
+
+func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   t.pendingMutex.Lock()
-  t.pending[prep.uuid] = prep
+  t.pending[prep.uuid] = *prep
   t.pendingMutex.Unlock()
 
-  t.processQuery(args.Query[0])
+  // XXX check if good
+  isGood := true
+
+  reply.okay = isGood
   return nil
 }
 
@@ -81,6 +90,39 @@ func (t *SlotTable) DumpTable(_ *int, reply *DumpReply) error {
   t.entriesMutex.Lock()
   reply.Entries = t.entries
   t.entriesMutex.Unlock()
+  return nil
+}
+
+func (t *SlotTable) connectToServer(client **rpc.Client, serverAddr string, c chan int) {
+  var err error
+  *client, err = rpc.DialHTTP("tcp", serverAddr)
+
+  if err == nil {
+    c <- 1
+  } else {
+    c <- -1
+  }
+}
+
+func (t *SlotTable) InitializeLeader() error {
+  if !t.isLeader() {
+    return errors.New("only valid for leader")
+  }
+
+  c := make(chan int, NUM_SERVERS)
+  servers := utils.AllServers()
+  for i := 0; i < NUM_SERVERS; i++ {
+    go t.connectToServer(&t.rpcClients[i], servers[i], c)
+  }
+
+  // Wait for all connections
+  for i := 0; i < NUM_SERVERS; i++ {
+
+    if <-c != 1 {
+      return errors.New("Connection failed")
+    }
+  }
+
   return nil
 }
 

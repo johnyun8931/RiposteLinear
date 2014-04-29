@@ -1,6 +1,9 @@
 package db
 
-import "sync"
+import (
+  "net/rpc"
+  "sync"
+)
 
 // Number of "dimensions" for PIR scheme
 const NUM_DIMENSIONS = 3
@@ -55,11 +58,14 @@ type PrepareArgs struct {
 
 type PrepareReply struct {
   // VOTE: YES/NO
+  okay bool
 }
 
 type CommitArgs struct {
   // COMMIT
   // uuid
+  uuid int64
+  commit bool
 }
 
 type CommitReply struct {
@@ -76,5 +82,7 @@ type SlotTable struct {
 
   pending map[int64]PrepareArgs
   pendingMutex sync.Mutex
+
+  rpcClients [NUM_SERVERS]*rpc.Client
 }
 
