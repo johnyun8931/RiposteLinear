@@ -1,6 +1,7 @@
 package main
 
 import (
+  "fmt"
   "net/rpc"
   "log"
 
@@ -21,29 +22,6 @@ func randomVector(lst []bool) error {
   return nil
 }
 
-
-/*
-func tryDownload(client *rpc.Client) {
-  var downArgs db.DownloadArgs
-
-  idx, err := utils.RandomInt(db.NUM_SLOTS)
-  if err != nil {
-    log.Fatal("Error:", err)
-  }
-  downArgs.RequestedSlot = idx
-  log.Printf("Request slot", idx)
-
-  var downRes db.DownloadReply
-  err = client.Call("SlotTable.Download", downArgs, &downRes)
-  if err != nil {
-    log.Fatal("Error:", err)
-  }
-
-  log.Printf("Got message!", downRes)
-
-}
-*/
-
 func initializeUploadArgs(args []db.UploadArgs, msg_bit []int) error {
   var randVecs [db.NUM_DIMENSIONS][db.NUM_SLOTS]bool
 
@@ -56,6 +34,10 @@ func initializeUploadArgs(args []db.UploadArgs, msg_bit []int) error {
   }
 
   for i := 0; i < db.NUM_SERVERS; i++ {
+    randomVector(args[i].XCoords[:])
+    randomVector(args[i].YCoords[:])
+    randomVector(args[i].ZCoords[:])
+    /*
     copy(args[i].XCoords[:], randVecs[0][:])
     copy(args[i].YCoords[:], randVecs[1][:])
     copy(args[i].ZCoords[:], randVecs[2][:])
@@ -74,6 +56,7 @@ func initializeUploadArgs(args []db.UploadArgs, msg_bit []int) error {
       bit := args[i].ZCoords[msg_bit[2]]
       args[i].ZCoords[msg_bit[2]] = !bit
     }
+    */
   }
 
   return nil
@@ -90,14 +73,27 @@ func tryUpload(client *rpc.Client, args db.UploadArgs) {
   log.Printf("Got message!", upRes)
 }
 
-func runClient(server string, args db.UploadArgs, c chan int) {
+func tryDumpTable(client *rpc.Client) db.DumpReply {
+  var tab db.DumpReply
+  err := client.Call("SlotTable.DumpTable", 0, &tab)
+  if err != nil {
+    log.Fatal("Error:", err)
+  }
+
+  return tab
+}
+
+func runClient(server string, args db.UploadArgs, tab *db.DumpReply, c chan int) {
   client, err := rpc.DialHTTP("tcp", server)
   if err != nil {
     log.Fatal("Could not connect:", err)
   }
 
   tryUpload(client, args)
+  log.Printf("Done uploading")
+  *tab = tryDumpTable(client)
 
+  log.Printf("Done")
   c <- 1
 }
 
@@ -115,15 +111,41 @@ func main() {
     return
   }
 
-
+  var tables [db.NUM_SERVERS]db.DumpReply
   c := make(chan int, utils.NumServers())
   servers := utils.AllServers()
   for i := range servers {
-    go runClient(servers[i], args[i], c)
+    go runClient(servers[i], args[i], &tables[i], c)
   }
 
   for i := 0; i<len(servers); i++ {
     <-c
+  }
+
+  //var plaintext [db.NUM_SLOTS][db.NUM_SLOTS][db.NUM_SLOTS]bool
+  for i := 0; i<db.NUM_SLOTS; i++ {
+    for j := 0; j<db.NUM_SLOTS; j++ {
+      for k := 0; k<db.NUM_SLOTS; k++ {
+        /*
+        bit := false
+        for serv := 0; serv<db.NUM_SERVERS; serv++ {
+          if tables[serv].Entries[i][j][k].Bit {
+            bit = !bit
+          }
+        }
+        */
+        var b int
+        if (tables[0].Entries[i][j][k].Bit) {
+          b = 1
+        } else {
+          b = 0
+        }
+        fmt.Printf("%d", b)
+      }
+      fmt.Printf("\n")
+    }
+      fmt.Printf("\n")
+      fmt.Printf("\n")
   }
 }
 

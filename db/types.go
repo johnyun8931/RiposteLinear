@@ -7,7 +7,7 @@ const NUM_DIMENSIONS = 3
 const NUM_SERVERS = 1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const NUM_SLOTS int = 1 << 8
+const NUM_SLOTS int = 1 << 4
 
 type SlotContents struct {
   Bit bool
@@ -20,6 +20,11 @@ type UploadArgs struct {
 }
 
 type UploadReply struct {
+  Magic int
+}
+
+type DumpReply struct {
+  Entries [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
 }
 
 /*

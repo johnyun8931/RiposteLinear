@@ -1,6 +1,7 @@
 package main
 
 import (
+  "io"
   "log"
   "net"
   "os/exec"
@@ -9,6 +10,15 @@ import (
 import (
   "henrycg/email/utils"
 )
+
+func readAll(p io.ReadCloser) {
+  var str [1024]byte
+  for {
+    log.Printf("here!")
+    p.Read(str[:])
+    log.Printf("> ", str)
+  }
+}
 
 func main() {
   var servers = utils.AllServers()
@@ -22,6 +32,10 @@ func main() {
       return
     }
     procs[i] = exec.Command("server/server", port)
+    stdout, err := procs[i].StdoutPipe()
+    stderr, err := procs[i].StderrPipe()
+    go readAll(stdout)
+    go readAll(stderr)
     err = procs[i].Start()
     if err != nil {
       log.Printf("Process ", i, " error: ", err.Error())

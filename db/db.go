@@ -20,6 +20,14 @@ func (t *SlotTable) Upload(args *UploadArgs, reply *UploadReply) error {
 
   t.Mutex.Unlock()
 
+  reply.Magic = 5
+  return nil
+}
+
+func (t *SlotTable) DumpTable(_ *int, reply *DumpReply) error {
+  t.Mutex.Lock()
+  reply.Entries = t.Entries
+  t.Mutex.Unlock()
   return nil
 }
 
