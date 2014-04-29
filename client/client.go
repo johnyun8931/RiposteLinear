@@ -9,24 +9,11 @@ import (
   "henrycg/email/utils"
 )
 
-func randomVector(lst []bool) error {
-  for i := 0; i<db.NUM_SLOTS; i++ {
-    bit, err := utils.RandomInt(1)
-    if err != nil {
-      log.Fatal("error: ", err)
-      return err
-    }
-    lst[i] = (bit != 0)
-  }
-
-  return nil
-}
-
-func initializeUploadArgs(args []db.UploadArgs, msg_bit []int) error {
+func initializeUploadArgs(args *db.UploadArgs, msg_bit []int) error {
   var randVecs [db.NUM_DIMENSIONS][db.NUM_SLOTS]bool
 
   for dim := 0; dim < db.NUM_DIMENSIONS; dim++ {
-    err := randomVector(randVecs[dim][:])
+    err := utils.RandomVector(randVecs[dim][:])
     if err != nil {
       log.Fatal("Error: ", err)
       return err
@@ -34,43 +21,43 @@ func initializeUploadArgs(args []db.UploadArgs, msg_bit []int) error {
   }
 
   for i := 0; i < db.NUM_SERVERS; i++ {
+    /*
     randomVector(args[i].XCoords[:])
     randomVector(args[i].YCoords[:])
     randomVector(args[i].ZCoords[:])
-    /*
-    copy(args[i].XCoords[:], randVecs[0][:])
-    copy(args[i].YCoords[:], randVecs[1][:])
-    copy(args[i].ZCoords[:], randVecs[2][:])
+    */
+
+    copy(args.Query[i].XCoords[:], randVecs[0][:])
+    copy(args.Query[i].YCoords[:], randVecs[1][:])
+    copy(args.Query[i].ZCoords[:], randVecs[2][:])
 
     if (i & 1) == 0 {
-      bit := args[i].XCoords[msg_bit[0]]
-      args[i].XCoords[msg_bit[0]] = !bit
+      args.Query[i].XCoords[msg_bit[0]] = !args.Query[i].XCoords[msg_bit[0]]
     }
 
     if (i & 2) == 0 {
-      bit := args[i].YCoords[msg_bit[1]]
-      args[i].YCoords[msg_bit[1]] = !bit
+      args.Query[i].YCoords[msg_bit[1]] = !args.Query[i].YCoords[msg_bit[1]]
     }
 
     if (i & 4) == 0 {
-      bit := args[i].ZCoords[msg_bit[2]]
-      args[i].ZCoords[msg_bit[2]] = !bit
+      args.Query[i].ZCoords[msg_bit[2]] = !args.Query[i].ZCoords[msg_bit[2]]
     }
-    */
   }
 
   return nil
 }
 
-func tryUpload(client *rpc.Client, args db.UploadArgs) {
+func tryUpload(client *rpc.Client, args db.UploadArgs) error {
   var upRes db.UploadReply
 
   err := client.Call("SlotTable.Upload", args, &upRes)
   if err != nil {
     log.Fatal("Error:", err)
+    return err
   }
 
   log.Printf("Got message!", upRes)
+  return nil
 }
 
 func tryDumpTable(client *rpc.Client) db.DumpReply {
@@ -89,7 +76,10 @@ func runClient(server string, args db.UploadArgs, tab *db.DumpReply, c chan int)
     log.Fatal("Could not connect:", err)
   }
 
-  tryUpload(client, args)
+  err = tryUpload(client, args)
+  if err != nil {
+    log.Fatal("Upload error", err)
+  }
   log.Printf("Done uploading")
   *tab = tryDumpTable(client)
 
@@ -98,14 +88,15 @@ func runClient(server string, args db.UploadArgs, tab *db.DumpReply, c chan int)
 }
 
 func main() {
+  var err error
   var msg_bit [db.NUM_DIMENSIONS]int
 
-  msg_bit[0] = 1
-  msg_bit[1] = 2
-  msg_bit[2] = 3
+  msg_bit[0], err = utils.RandomInt(db.NUM_SLOTS)
+  msg_bit[1], err = utils.RandomInt(db.NUM_SLOTS)
+  msg_bit[2], err = utils.RandomInt(db.NUM_SLOTS)
 
-  var args [db.NUM_SERVERS]db.UploadArgs
-  err := initializeUploadArgs(args[:], msg_bit[:])
+  var args db.UploadArgs
+  err = initializeUploadArgs(&args, msg_bit[:])
   if err != nil {
     log.Fatal("error: ", err)
     return
@@ -115,7 +106,7 @@ func main() {
   c := make(chan int, utils.NumServers())
   servers := utils.AllServers()
   for i := range servers {
-    go runClient(servers[i], args[i], &tables[i], c)
+    go runClient(servers[0], args, &tables[i], c)
   }
 
   for i := 0; i<len(servers); i++ {
@@ -126,16 +117,17 @@ func main() {
   for i := 0; i<db.NUM_SLOTS; i++ {
     for j := 0; j<db.NUM_SLOTS; j++ {
       for k := 0; k<db.NUM_SLOTS; k++ {
-        /*
+
         bit := false
+        //bit = tables[0].Entries[i][j][k].Bit
         for serv := 0; serv<db.NUM_SERVERS; serv++ {
           if tables[serv].Entries[i][j][k].Bit {
             bit = !bit
           }
         }
-        */
+
         var b int
-        if (tables[0].Entries[i][j][k].Bit) {
+        if (bit) {
           b = 1
         } else {
           b = 0

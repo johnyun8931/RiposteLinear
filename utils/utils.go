@@ -3,6 +3,7 @@ package utils
 import (
   "crypto/rand"
   "math/big"
+//  "log"
 )
 
 func AllServers() []string {
@@ -22,7 +23,7 @@ func NumServers() int {
   return len(AllServers())
 }
 
-func RandomInt(max int) (int, error) {
+func RandomInt64(max int64) (int64, error) {
   var bigMax *big.Int = big.NewInt(int64(max))
   var out *big.Int
   var err error
@@ -31,7 +32,24 @@ func RandomInt(max int) (int, error) {
     return 0, err
   }
 
-  return int(out.Int64()), nil
+  return out.Int64(), nil
+}
+
+func RandomInt(max int) (int, error) {
+  num, err := RandomInt64(int64(max))
+  return int(num), err
+}
+
+func RandomVector(lst []bool) error {
+  for i := 0; i < len(lst); i++ {
+    bit, err := RandomInt(2)
+    if err != nil {
+      return err
+    }
+    lst[i] = (bit != 0)
+  }
+
+  return nil
 }
 
 

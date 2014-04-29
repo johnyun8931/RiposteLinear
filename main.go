@@ -1,10 +1,12 @@
 package main
 
 import (
+  "fmt"
   "io"
   "log"
   "net"
   "os/exec"
+  "strconv"
 )
 
 import (
@@ -14,9 +16,8 @@ import (
 func readAll(p io.ReadCloser) {
   var str [1024]byte
   for {
-    log.Printf("here!")
     p.Read(str[:])
-    log.Printf("> ", str)
+    fmt.Printf("> %s", str)
   }
 }
 
@@ -31,7 +32,7 @@ func main() {
       log.Fatal("Oh no!")
       return
     }
-    procs[i] = exec.Command("server/server", port)
+    procs[i] = exec.Command("server/server", strconv.Itoa(i), port)
     stdout, err := procs[i].StdoutPipe()
     stderr, err := procs[i].StderrPipe()
     go readAll(stdout)
