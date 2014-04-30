@@ -14,8 +14,8 @@ import (
 )
 
 func readAll(p io.ReadCloser) {
-  var str [1024]byte
   for {
+    var str [1024]byte
     p.Read(str[:])
     fmt.Printf("> %s", str)
   }

@@ -21,7 +21,7 @@ func main() {
 
   idx,err := strconv.Atoi(os.Args[1])
   if err != nil {
-    log.Fatal("Invalid index: ", os.Args[1])
+    log.Fatal("Invalid index: %s", os.Args[1])
     return
   }
 
@@ -34,7 +34,7 @@ func main() {
 
   rpc.Register(slot_table)
   rpc.HandleHTTP()
-  log.Printf("Server ", idx, " is listening at :", port)
+  log.Printf("Server %d is listening at %s", idx, port)
 
   http.ListenAndServe(net.JoinHostPort("", port), nil)
 }

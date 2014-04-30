@@ -65,7 +65,7 @@ func (t *SlotTable) submitPrepares() {
     // If we're starting to merge, then the marker down
     // the pipeline
     if queries == beginMergeMarker {
-      commitReqs <-CommitArgs
+      commitReqs <-CommitArgs{}
       continue
     }
 
@@ -103,9 +103,9 @@ func (t *SlotTable) submitPrepares() {
       }
     }
 
-    var okay bool
+    okay := true
     for i:=0; i<NUM_SERVERS; i++ {
-      log.Printf("Got reply ", i, replies[i].Okay)
+      log.Printf("Got reply %d %d", i, replies[i].Okay)
       okay = (okay && replies[i].Okay)
     }
 
@@ -120,7 +120,7 @@ func (t *SlotTable) submitCommits() {
   for {
     com := <-commitReqs
     if com == beginMergeMarkerCommit {
-      sendMergeRequest()
+      t.sendMergeRequest()
     }
     log.Printf("Send COMMIT %d", com.Uuid)
 
@@ -151,13 +151,20 @@ func (t *SlotTable) submitCommits() {
   }
 }
 
+func (t *SlotTable) mergeWorker() {
+  for {
+    time.Sleep(5*time.Second)
+    t.sendMergeRequest()
+  }
+}
+
 func (t *SlotTable) sendMergeRequest() {
   // Call each server and ask for their data
   // Send out COMMIT request
   c := make(chan error, NUM_SERVERS)
   var replies [NUM_SERVERS]DumpReply
   for i:=0; i<NUM_SERVERS; i++ {
-    go func(, reply *DumpReply, i int, c chan error) {
+    go func(reply *DumpReply, i int, c chan error) {
       err := t.rpcClients[i].Call("SlotTable.DumpTable", 0, reply)
       if err != nil {
         c <- err
@@ -176,13 +183,34 @@ func (t *SlotTable) sendMergeRequest() {
     }
   }
 
+  t.revealCleartext(replies)
+  t.entriesMutex.Lock()
+  t.entries = new(
+  t.entriesMutex.Unlock()
+
   log.Printf("Done MERGE")
+
+  t.State = State_AcceptUpload
 }
 
 func (t *SlotTable) revealCleartext(tables [NUM_SERVERS]DumpReply) {
+  t.plainMutex.Lock()
+  defer t.plainMutex.Unlock()
+
   // XOR all of the tables together and save 
   // it in the plaintext table
-  blah
+  for i := 0; i<NUM_SLOTS; i++ {
+    for j := 0; j<NUM_SLOTS; j++ {
+      for k := 0; k<NUM_SLOTS; k++ {
+        t.plain[i][j][k].Bit = false
+        for serv := 0; serv<NUM_SERVERS; serv++ {
+          if (t.entries[i][j][k].Bit) {
+            t.plain[i][j][k].Bit = !t.plain[i][j][k].Bit
+          }
+        }
+      }
+    }
+  }
 }
 
 func (t *SlotTable) beginMerge() {
@@ -238,9 +266,17 @@ func (t *SlotTable) Commit(com *CommitArgs, reply *CommitReply) error {
 }
 
 func (t *SlotTable) DumpTable(_ *int, reply *DumpReply) error {
+  log.Printf("Dumping table %d\n", t.ServerIdx)
   t.entriesMutex.Lock()
   reply.Entries = t.entries
   t.entriesMutex.Unlock()
+  return nil
+}
+
+func (t *SlotTable) DumpPlaintext(_ *int, reply *DumpReply) error {
+  t.plainMutex.Lock()
+  reply.Entries = t.plain
+  t.plainMutex.Unlock()
   return nil
 }
 
@@ -249,6 +285,7 @@ func (t *SlotTable) DumpTable(_ *int, reply *DumpReply) error {
  */
 
 func (t *SlotTable) processQuery(query InsertQuery) error {
+  log.Printf("Processing query %d", t.ServerIdx)
   t.entriesMutex.Lock()
   for i := 0; i < NUM_SLOTS; i++ {
     for j := 0; j < NUM_SLOTS; j++ {
@@ -310,6 +347,7 @@ func (t *SlotTable) Initialize(*int, *int) error {
   if (t.isLeader()) {
     go t.submitPrepares()
     go t.submitCommits()
+    go t.mergeWorker()
     go func(t *SlotTable) {
       // HACK wait until other servers have started
       time.Sleep(500*time.Millisecond)

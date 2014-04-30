@@ -1,8 +1,11 @@
 TODO
 - Have servers sign all messages with long-term keys
+- Have client encrypt messages sent to servers
 - Do everything over TLS
 - Deduplicate data:
     * store only one copy of each message
     * send only one copy of each message back to client
-- Allow many messages in a single bucket
 - Encryption
+- Use signatures to prevent the leader from selectively dropping
+  messages in such a way that it can trick other servers into 
+  revealing information to it

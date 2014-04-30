@@ -3,7 +3,6 @@ package utils
 import (
   "crypto/rand"
   "math/big"
-//  "log"
 )
 
 func AllServers() []string {
@@ -51,5 +50,4 @@ func RandomVector(lst []bool) error {
 
   return nil
 }
-
 

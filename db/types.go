@@ -88,6 +88,9 @@ type SlotTable struct {
   entries [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
   entriesMutex sync.Mutex
 
+  plain [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
+  plainMutex sync.Mutex
+
   rpcClients [NUM_SERVERS]*rpc.Client
 }
 

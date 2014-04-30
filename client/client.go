@@ -108,7 +108,6 @@ func main() {
   leader := servers[0]
   runClient(leader, args, &table)
 
-  //var plaintext [db.NUM_SLOTS][db.NUM_SLOTS][db.NUM_SLOTS]bool
   for i := 0; i<db.NUM_SLOTS; i++ {
     for j := 0; j<db.NUM_SLOTS; j++ {
       for k := 0; k<db.NUM_SLOTS; k++ {
@@ -122,8 +121,8 @@ func main() {
       }
       fmt.Printf("\n")
     }
-      fmt.Printf("\n")
-      fmt.Printf("\n")
+    fmt.Printf("\n")
+    fmt.Printf("\n")
   }
 }
 
