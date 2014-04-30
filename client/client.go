@@ -70,21 +70,22 @@ func tryDumpTable(client *rpc.Client) db.DumpReply {
   return tab
 }
 
-func runClient(server string, args db.UploadArgs, tab *db.DumpReply, c chan int) {
+func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
   client, err := rpc.DialHTTP("tcp", server)
   if err != nil {
     log.Fatal("Could not connect:", err)
+    return
   }
 
   err = tryUpload(client, args)
   if err != nil {
     log.Fatal("Upload error", err)
+    return
   }
   log.Printf("Done uploading")
   *tab = tryDumpTable(client)
 
   log.Printf("Done")
-  c <- 1
 }
 
 func main() {
@@ -102,32 +103,17 @@ func main() {
     return
   }
 
-  var tables [db.NUM_SERVERS]db.DumpReply
-  c := make(chan int, utils.NumServers())
+  var table db.DumpReply
   servers := utils.AllServers()
-  for i := range servers {
-    go runClient(servers[0], args, &tables[i], c)
-  }
-
-  for i := 0; i<len(servers); i++ {
-    <-c
-  }
+  leader := servers[0]
+  runClient(leader, args, &table)
 
   //var plaintext [db.NUM_SLOTS][db.NUM_SLOTS][db.NUM_SLOTS]bool
   for i := 0; i<db.NUM_SLOTS; i++ {
     for j := 0; j<db.NUM_SLOTS; j++ {
       for k := 0; k<db.NUM_SLOTS; k++ {
-
-        bit := false
-        //bit = tables[0].Entries[i][j][k].Bit
-        for serv := 0; serv<db.NUM_SERVERS; serv++ {
-          if tables[serv].Entries[i][j][k].Bit {
-            bit = !bit
-          }
-        }
-
         var b int
-        if (bit) {
+        if (table.Entries[i][j][k].Bit) {
           b = 1
         } else {
           b = 0

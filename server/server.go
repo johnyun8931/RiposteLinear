@@ -7,6 +7,7 @@ import (
   "net/rpc"
   "os"
   "strconv"
+  "time"
 )
 
 import (
@@ -29,13 +30,17 @@ func main() {
   slot_table := new(db.SlotTable)
   slot_table.ServerIdx = idx
   slot_table.State = db.State_AcceptUpload
+
   rpc.Register(slot_table)
   rpc.HandleHTTP()
   log.Printf("Server ", idx, " is listening at :", port)
 
-  err = http.ListenAndServe(net.JoinHostPort("", port), nil)
+  go http.ListenAndServe(net.JoinHostPort("", port), nil)
+
+  err = slot_table.OpenConnections()
   if err != nil {
-    log.Fatal("Error:", err.Error())
+    log.Fatal("Could not initialize table", err)
+    return
   }
 }
 

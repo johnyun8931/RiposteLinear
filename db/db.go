@@ -9,6 +9,10 @@ import (
   "henrycg/email/utils"
 )
 
+var (
+  incomingReqs = make(chan [NUM_SERVERS]InsertQuery, REQ_BUFFER_SIZE)
+)
+
 func (t *SlotTable) isLeader() bool {
   return (t.ServerIdx == 0)
 }
@@ -61,17 +65,50 @@ func (t *SlotTable) Upload(args *UploadArgs, reply *UploadReply) error {
     return errors.New("Not accepting uploads")
   }
 
-  var prep PrepareArgs
-  var err error
-  prep.queries = args.Query
-
-  prep.uuid, err = utils.RandomInt64(math.MaxInt64)
-  if err != nil {
-    return err
-  }
-
-  t.processQuery(args.Query[0])
+  log.Printf("Leng buffer: ", len(incomingReqs))
+  incomingReqs<- args.Query
+  reply.Magic = 5
   return nil
+}
+
+func (t *SlotTable) HandleIncomingUploads() {
+  log.Printf("Handling start!")
+  for {
+    log.Printf("Handling!")
+    var err error
+    var prep PrepareArgs
+    prep.queries = <-incomingReqs
+    prep.uuid, err = utils.RandomInt64(math.MaxInt64)
+    if err != nil {
+      log.Printf("error in random")
+      continue
+    }
+
+    c := make(chan int, NUM_SERVERS)
+    var replies [NUM_SERVERS]PrepareReply
+    for i:=0; i<NUM_SERVERS; i++ {
+      go func(prep *PrepareArgs, reply *PrepareReply, i int, c chan int) {
+        err := t.rpcClients[i].Call("SlotTable.Prepare", prep, reply)
+        if err != nil {
+          c <- -1
+        } else {
+          c <- 1
+        }
+      }(&prep, &replies[i], i, c)
+    }
+
+    var r int
+    for i:=0; i<NUM_SERVERS; i++ {
+      r = <-c
+      if r != 1 {
+        log.Fatal("Error in prepare!")
+      }
+    }
+
+    for i:=0; i<NUM_SERVERS; i++ {
+      log.Printf("Got reply ", i, replies[i].okay)
+    }
+  }
 }
 
 func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
@@ -104,22 +141,19 @@ func (t *SlotTable) connectToServer(client **rpc.Client, serverAddr string, c ch
   }
 }
 
-func (t *SlotTable) InitializeLeader() error {
-  if !t.isLeader() {
-    return errors.New("only valid for leader")
-  }
+func (t *SlotTable) OpenConnections() error {
+  if t.isLeader() {
+    c := make(chan int, NUM_SERVERS)
+    servers := utils.AllServers()
+    for i := 0; i < NUM_SERVERS; i++ {
+      go t.connectToServer(&t.rpcClients[i], servers[i], c)
+    }
 
-  c := make(chan int, NUM_SERVERS)
-  servers := utils.AllServers()
-  for i := 0; i < NUM_SERVERS; i++ {
-    go t.connectToServer(&t.rpcClients[i], servers[i], c)
-  }
-
-  // Wait for all connections
-  for i := 0; i < NUM_SERVERS; i++ {
-
-    if <-c != 1 {
-      return errors.New("Connection failed")
+    // Wait for all connections
+    for i := 0; i < NUM_SERVERS; i++ {
+      if <-c != 1 {
+        return errors.New("Connection failed")
+      }
     }
   }
 

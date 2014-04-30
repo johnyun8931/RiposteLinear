@@ -12,6 +12,9 @@ const NUM_SERVERS = 1 << NUM_DIMENSIONS
 // Size of a side of the data array
 const NUM_SLOTS int = 1 << 2
 
+// Number of upload requests to buffer
+const REQ_BUFFER_SIZE int = 48
+
 type DbState int
 const (
   State_AcceptUpload = iota
@@ -77,11 +80,11 @@ type SlotTable struct {
   ServerIdx int
   State DbState
 
-  entries [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
-  entriesMutex sync.Mutex
-
   pending map[int64]PrepareArgs
   pendingMutex sync.Mutex
+
+  entries [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
+  entriesMutex sync.Mutex
 
   rpcClients [NUM_SERVERS]*rpc.Client
 }
