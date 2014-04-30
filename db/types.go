@@ -18,6 +18,8 @@ const REQ_BUFFER_SIZE int = 48
 type DbState int
 const (
   State_AcceptUpload = iota
+  State_PrepareForMerge = iota
+  State_Merge = iota
 )
 
 type SlotContents struct {
@@ -55,20 +57,20 @@ type DownloadReply struct {
 
 type PrepareArgs struct {
   // TODO Dont need to send all stuff
-  uuid int64
-  queries [NUM_SERVERS]InsertQuery
+  Uuid int64
+  Queries [NUM_SERVERS]InsertQuery
 }
 
 type PrepareReply struct {
   // VOTE: YES/NO
-  okay bool
+  Okay bool
 }
 
 type CommitArgs struct {
   // COMMIT
   // uuid
-  uuid int64
-  commit bool
+  Uuid int64
+  Commit bool
 }
 
 type CommitReply struct {

@@ -32,7 +32,7 @@ func main() {
       log.Fatal("Oh no!")
       return
     }
-    procs[i] = exec.Command("server/server", strconv.Itoa(i), port)
+    procs[i] = exec.Command("./server", strconv.Itoa(i), port)
     stdout, err := procs[i].StdoutPipe()
     stderr, err := procs[i].StderrPipe()
     go readAll(stdout)
