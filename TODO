@@ -9,3 +9,7 @@ TODO
 - Use signatures to prevent the leader from selectively dropping
   messages in such a way that it can trick other servers into 
   revealing information to it
+- ZKP of client correctness
+- Proof of security:
+    * if server tampers with one bit, can it detect where the 
+      error showed up later?

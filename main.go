@@ -27,7 +27,7 @@ func main() {
   var procs []*exec.Cmd = make([]*exec.Cmd, len(servers))
   for i := range servers {
     _, port, err := net.SplitHostPort(servers[i])
-    log.Printf("Starting server: ", servers[i])
+    log.Printf("Starting server: %s", servers[i])
     if err != nil {
       log.Fatal("Oh no!")
       return

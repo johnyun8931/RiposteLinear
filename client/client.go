@@ -62,7 +62,7 @@ func tryUpload(client *rpc.Client, args db.UploadArgs) error {
 
 func tryDumpTable(client *rpc.Client) db.DumpReply {
   var tab db.DumpReply
-  err := client.Call("SlotTable.DumpTable", 0, &tab)
+  err := client.Call("SlotTable.DumpPlaintext", 0, &tab)
   if err != nil {
     log.Fatal("Error:", err)
   }

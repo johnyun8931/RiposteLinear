@@ -15,11 +15,14 @@ const NUM_SLOTS int = 1 << 2
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
 
+type BitMatrix [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
+
 type DbState int
 const (
   State_AcceptUpload = iota
   State_PrepareForMerge = iota
   State_Merge = iota
+  State_AcceptPlaintext = iota
 )
 
 type SlotContents struct {
@@ -41,7 +44,7 @@ type UploadReply struct {
 }
 
 type DumpReply struct {
-  Entries [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
+  Entries BitMatrix
 }
 
 /*
@@ -58,7 +61,7 @@ type DownloadReply struct {
 type PrepareArgs struct {
   // TODO Dont need to send all stuff
   Uuid int64
-  Queries [NUM_SERVERS]InsertQuery
+  Query InsertQuery
 }
 
 type PrepareReply struct {
@@ -78,6 +81,14 @@ type CommitReply struct {
   // uuid
 }
 
+type PlaintextArgs struct {
+  Plaintext BitMatrix
+}
+
+type PlaintextReply struct {
+  // Nothing
+}
+
 type SlotTable struct {
   ServerIdx int
   State DbState
@@ -85,10 +96,10 @@ type SlotTable struct {
   pending map[int64]PrepareArgs
   pendingMutex sync.Mutex
 
-  entries [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
+  entries BitMatrix
   entriesMutex sync.Mutex
 
-  plain [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
+  plain BitMatrix
   plainMutex sync.Mutex
 
   rpcClients [NUM_SERVERS]*rpc.Client

@@ -69,21 +69,21 @@ func (t *SlotTable) submitPrepares() {
       continue
     }
 
-    var err error
-    var prep PrepareArgs
-    prep.Queries = queries
-    prep.Uuid, err = utils.RandomInt64(math.MaxInt64)
+    uuid, err := utils.RandomInt64(math.MaxInt64)
     if err != nil {
       log.Printf("error in random")
       continue
     }
 
-    log.Printf("Send PREPARE %d", prep.Uuid)
+    log.Printf("Send PREPARE %d", uuid)
 
     // Send out PREPARE request
     c := make(chan error, NUM_SERVERS)
     var replies [NUM_SERVERS]PrepareReply
     for i:=0; i<NUM_SERVERS; i++ {
+      var prep PrepareArgs
+      prep.Uuid = uuid
+      prep.Query = queries[i]
       go func(prep *PrepareArgs, reply *PrepareReply, i int, c chan error) {
         err := t.rpcClients[i].Call("SlotTable.Prepare", prep, reply)
         if err != nil {
@@ -109,9 +109,9 @@ func (t *SlotTable) submitPrepares() {
       okay = (okay && replies[i].Okay)
     }
 
-    log.Printf("Done PREPARE %d", prep.Uuid)
+    log.Printf("Done PREPARE %d", uuid)
 
-    commitArgs := CommitArgs{prep.Uuid, okay}
+    commitArgs := CommitArgs{uuid, okay}
     commitReqs <- commitArgs
   }
 }
@@ -183,34 +183,52 @@ func (t *SlotTable) sendMergeRequest() {
     }
   }
 
-  t.revealCleartext(replies)
-  t.entriesMutex.Lock()
-  t.entries = new(
-  t.entriesMutex.Unlock()
+  var parg PlaintextArgs
+  parg.Plaintext = revealCleartext(replies)
+
+  c = make(chan error, NUM_SERVERS)
+  for i:=0; i<NUM_SERVERS; i++ {
+    go func(i int, c chan error) {
+      var p_reply PlaintextReply
+      err := t.rpcClients[i].Call("SlotTable.StorePlaintext", &parg, &p_reply)
+      if err != nil {
+        c <- err
+      } else {
+        c <- nil
+      }
+    }(i, c)
+  }
+
+  // Wait for responses
+  for i:=0; i<NUM_SERVERS; i++ {
+    r = <-c
+    if r != nil {
+      log.Fatal("Error in plaintext: ", r)
+    }
+  }
 
   log.Printf("Done MERGE")
-
-  t.State = State_AcceptUpload
 }
 
-func (t *SlotTable) revealCleartext(tables [NUM_SERVERS]DumpReply) {
-  t.plainMutex.Lock()
-  defer t.plainMutex.Unlock()
+func revealCleartext(tables [NUM_SERVERS]DumpReply) BitMatrix {
+  var b BitMatrix
 
   // XOR all of the tables together and save 
   // it in the plaintext table
   for i := 0; i<NUM_SLOTS; i++ {
     for j := 0; j<NUM_SLOTS; j++ {
       for k := 0; k<NUM_SLOTS; k++ {
-        t.plain[i][j][k].Bit = false
+        b[i][j][k].Bit = false
         for serv := 0; serv<NUM_SERVERS; serv++ {
-          if (t.entries[i][j][k].Bit) {
-            t.plain[i][j][k].Bit = !t.plain[i][j][k].Bit
+          if (tables[serv].Entries[i][j][k].Bit) {
+            b[i][j][k].Bit = !b[i][j][k].Bit
           }
         }
       }
     }
   }
+
+  return b
 }
 
 func (t *SlotTable) beginMerge() {
@@ -235,7 +253,7 @@ func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   t.pendingMutex.Unlock()
 
   // XXX check if good
-  isGood := t.validateUpload(prep.Queries[t.ServerIdx])
+  isGood := t.validateUpload(prep.Query)
 
   reply.Okay = isGood
   return nil
@@ -260,7 +278,21 @@ func (t *SlotTable) Commit(com *CommitArgs, reply *CommitReply) error {
   }
 
   // Update the database with the query
-  t.processQuery(val.Queries[t.ServerIdx])
+  t.processQuery(val.Query)
+
+  return nil
+}
+
+func (t *SlotTable) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) error {
+  t.plainMutex.Lock()
+  t.plain = com.Plaintext
+  t.plainMutex.Unlock()
+
+  t.entriesMutex.Lock()
+  t.entries = *new([NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents)
+  t.entriesMutex.Unlock()
+
+  t.State = State_AcceptUpload
 
   return nil
 }
@@ -299,6 +331,7 @@ func (t *SlotTable) processQuery(query InsertQuery) error {
   }
 
   t.entriesMutex.Unlock()
+  t.debugTable()
   return nil
 }
 
@@ -358,6 +391,36 @@ func (t *SlotTable) Initialize(*int, *int) error {
     }(t)
   }
   return nil
+}
+
+func (t *SlotTable) debugTable() {
+  f := func(data [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents) {
+    // it in the plaintext table
+    for i := 0; i<NUM_SLOTS; i++ {
+      for j := 0; j<NUM_SLOTS; j++ {
+        for k := 0; k<NUM_SLOTS; k++ {
+          var b int
+          if data[i][j][k].Bit {
+            b = 1
+          } else {
+            b = 0
+          }
+          fmt.Printf("%d", b)
+        }
+        fmt.Printf ("\n")
+      }
+      fmt.Printf ("\n\n")
+    }
+  }
+  fmt.Printf("---- Table ----\n")
+  t.entriesMutex.Lock()
+  f(t.entries)
+  t.entriesMutex.Unlock()
+  fmt.Printf("---- Plain ----\n")
+  t.plainMutex.Lock()
+  f(t.plain)
+  t.plainMutex.Unlock()
+  fmt.Printf("---------------\n")
 }
 
 /*
