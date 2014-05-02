@@ -3,7 +3,6 @@ package main
 import (
   "log"
   "net"
-  "net/http"
   "net/rpc"
   "os"
   "strconv"
@@ -11,6 +10,7 @@ import (
 
 import (
   "henrycg/email/db"
+  "henrycg/email/utils"
 )
 
 func main() {
@@ -33,9 +33,11 @@ func main() {
   go slot_table.Initialize(&a, &a)
 
   rpc.Register(slot_table)
-  rpc.HandleHTTP()
+  //rpc.HandleHTTP()
+  addr := net.JoinHostPort("", port)
+  utils.ListenAndServe(addr, idx, idx == 0)
   log.Printf("Server %d is listening at %s", idx, port)
 
-  http.ListenAndServe(net.JoinHostPort("", port), nil)
+  //http.ListenAndServe(addr, nil)
 }
 

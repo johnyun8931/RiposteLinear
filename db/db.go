@@ -346,7 +346,7 @@ func (t *SlotTable) validateUpload(query InsertQuery) bool {
 
 func (t *SlotTable) connectToServer(client **rpc.Client, serverAddr string, c chan int) {
   var err error
-  *client, err = rpc.DialHTTP("tcp", serverAddr)
+  *client, err = utils.DialHTTPWithTLS("tcp", serverAddr, t.ServerIdx, 0)
 
   if err == nil {
     c <- 1

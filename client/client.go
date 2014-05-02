@@ -71,7 +71,7 @@ func tryDumpTable(client *rpc.Client) db.DumpReply {
 }
 
 func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
-  client, err := rpc.DialHTTP("tcp", server)
+  client, err := utils.DialHTTPWithTLS("tcp", server, -1, 0)
   if err != nil {
     log.Fatal("Could not connect:", err)
     return
