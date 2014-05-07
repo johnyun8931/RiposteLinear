@@ -1,6 +1,7 @@
 package main
 
 import (
+  "crypto/tls"
   "log"
   "net"
   "net/rpc"
@@ -35,7 +36,15 @@ func main() {
   rpc.Register(slot_table)
   //rpc.HandleHTTP()
   addr := net.JoinHostPort("", port)
-  utils.ListenAndServe(addr, idx, idx == 0)
+
+  var certs []tls.Certificate
+
+  // If we are not the leader, only allow 
+  // connections from the leader
+  if idx > 0 {
+    certs = utils.LeaderCertificate
+  }
+  utils.ListenAndServe(addr, idx, certs)
   log.Printf("Server %d is listening at %s", idx, port)
 
   //http.ListenAndServe(addr, nil)

@@ -300,6 +300,7 @@ fPA/ukH8ZPhNANIgCMd4vw9rdMXUHLdACg==
 }
 
 var ServerCertificates []tls.Certificate
+var LeaderCertificate []tls.Certificate
 
 func init() {
   var err error
@@ -312,5 +313,7 @@ func init() {
       log.Fatal("Could not load certficate #", i, err)
     }
   }
+
+  LeaderCertificate = ServerCertificates[0:1]
 }
 

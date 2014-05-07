@@ -1,6 +1,7 @@
 package db
 
 import (
+  "crypto/tls"
   "errors"
   "fmt"
   "log"
@@ -344,9 +345,10 @@ func (t *SlotTable) validateUpload(query InsertQuery) bool {
  * Initialization
  */
 
-func (t *SlotTable) connectToServer(client **rpc.Client, serverAddr string, c chan int) {
+func (t *SlotTable) connectToServer(client **rpc.Client, serverAddr string, remoteIdx int, c chan int) {
   var err error
-  *client, err = utils.DialHTTPWithTLS("tcp", serverAddr, t.ServerIdx, 0)
+  certs := []tls.Certificate{utils.ServerCertificates[remoteIdx]}
+  *client, err = utils.DialHTTPWithTLS("tcp", serverAddr, t.ServerIdx, certs)
 
   if err == nil {
     c <- 1
@@ -363,7 +365,7 @@ func (t *SlotTable) openConnections() error {
   c := make(chan int, NUM_SERVERS)
   servers := utils.AllServers()
   for i := 0; i < NUM_SERVERS; i++ {
-    go t.connectToServer(&t.rpcClients[i], servers[i], c)
+    go t.connectToServer(&t.rpcClients[i], servers[i], i, c)
   }
 
   // Wait for all connections

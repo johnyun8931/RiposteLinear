@@ -2,6 +2,8 @@ package utils
 
 import (
   "crypto/tls"
+  "crypto/x509"
+  "errors"
   "log"
   "net"
   "net/rpc"
@@ -9,13 +11,13 @@ import (
 
 /* For running RPC over TLS. */
 
-func ListenAndServe(address string, key_idx int, is_leader bool) {
+func ListenAndServe(address string, keyIdx int, acceptCerts []tls.Certificate) {
   var config tls.Config
-  if !is_leader {
+  if len(acceptCerts) > 0 {
     config.ClientAuth = tls.RequireAnyClientCert
   }
   config.InsecureSkipVerify = true
-  config.Certificates = []tls.Certificate{ServerCertificates[key_idx]}
+  config.Certificates = []tls.Certificate{ServerCertificates[keyIdx]}
 
   l, err := tls.Listen("tcp", address, &config)
   if err != nil {
@@ -51,13 +53,16 @@ func handleOneClient(conn net.Conn) {
     return
   }
 
+  state := tlscon.ConnectionState()
+  log.Printf("Certs", state.PeerCertificates)
+
   log.Printf("Handshake OK")
 
   rpc.ServeConn(conn)
 }
 
 func DialHTTPWithTLS(network, address string,
-    client_idx int, server_idx int) (*rpc.Client, error) {
+    client_idx int, acceptCerts []tls.Certificate) (*rpc.Client, error) {
   var config tls.Config
   config.InsecureSkipVerify = true
 
@@ -73,7 +78,29 @@ func DialHTTPWithTLS(network, address string,
 
   state := conn.ConnectionState()
   log.Printf("State: \n", state.PeerCertificates)
+  if len(acceptCerts) > 0 && !validateCert(acceptCerts, state.PeerCertificates[0]) {
+    return nil, errors.New("Invalid certificate")
+  }
 
   return rpc.NewClient(conn), nil
+}
+
+func validateCert(acceptCerts []tls.Certificate, present *x509.Certificate) bool {
+  for i := 0; i < len(acceptCerts); i++ {
+    if acceptCerts[i].Leaf == nil {
+      certs, err := x509.ParseCertificates(acceptCerts[i].Certificate[0])
+      if err != nil {
+        log.Printf("Could not parse cert:", err)
+        return false
+      }
+
+      acceptCerts[i].Leaf = certs[0]
+    }
+
+    if acceptCerts[i].Leaf.Equal(present) {
+      return true
+    }
+  }
+  return false
 }
 
