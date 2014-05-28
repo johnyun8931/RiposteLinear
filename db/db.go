@@ -403,9 +403,8 @@ func (t *SlotTable) debugTable() {
           b = 0
         }
         fmt.Printf("%d", b)
-        fmt.Printf ("\n")
       }
-      fmt.Printf ("\n\n")
+      fmt.Printf ("\n")
     }
   }
   fmt.Printf("---- Table ----\n")
