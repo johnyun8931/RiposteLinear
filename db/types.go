@@ -6,7 +6,7 @@ import (
 )
 
 // Number of "dimensions" for PIR scheme
-const NUM_DIMENSIONS = 3
+const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
@@ -15,7 +15,7 @@ const NUM_SLOTS int = 1 << 2
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
 
-type BitMatrix [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents
+type BitMatrix [NUM_SLOTS][NUM_SLOTS]SlotContents
 
 type DbState int
 const (
@@ -36,7 +36,6 @@ type UploadArgs struct {
 type InsertQuery struct {
   XCoords [NUM_SLOTS]bool
   YCoords [NUM_SLOTS]bool
-  ZCoords [NUM_SLOTS]bool
 }
 
 type UploadReply struct {

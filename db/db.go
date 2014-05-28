@@ -218,12 +218,10 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) BitMatrix {
   // it in the plaintext table
   for i := 0; i<NUM_SLOTS; i++ {
     for j := 0; j<NUM_SLOTS; j++ {
-      for k := 0; k<NUM_SLOTS; k++ {
-        b[i][j][k].Bit = false
-        for serv := 0; serv<NUM_SERVERS; serv++ {
-          if (tables[serv].Entries[i][j][k].Bit) {
-            b[i][j][k].Bit = !b[i][j][k].Bit
-          }
+      b[i][j].Bit = false
+      for serv := 0; serv<NUM_SERVERS; serv++ {
+        if (tables[serv].Entries[i][j].Bit) {
+          b[i][j].Bit = !b[i][j].Bit
         }
       }
     }
@@ -290,7 +288,7 @@ func (t *SlotTable) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) er
   t.plainMutex.Unlock()
 
   t.entriesMutex.Lock()
-  t.entries = *new([NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents)
+  t.entries = *new([NUM_SLOTS][NUM_SLOTS]SlotContents)
   t.entriesMutex.Unlock()
 
   t.State = State_AcceptUpload
@@ -322,11 +320,9 @@ func (t *SlotTable) processQuery(query InsertQuery) error {
   t.entriesMutex.Lock()
   for i := 0; i < NUM_SLOTS; i++ {
     for j := 0; j < NUM_SLOTS; j++ {
-      for k := 0; k < NUM_SLOTS; k++ {
-        flip := query.XCoords[i] || query.YCoords[j] || query.ZCoords[k]
-        if flip {
-          t.entries[i][j][k].Bit = !(t.entries[i][j][k].Bit)
-        }
+      flip := query.XCoords[i] || query.YCoords[j]
+      if flip {
+        t.entries[i][j].Bit = !(t.entries[i][j].Bit)
       }
     }
   }
@@ -396,19 +392,17 @@ func (t *SlotTable) Initialize(*int, *int) error {
 }
 
 func (t *SlotTable) debugTable() {
-  f := func(data [NUM_SLOTS][NUM_SLOTS][NUM_SLOTS]SlotContents) {
+  f := func(data [NUM_SLOTS][NUM_SLOTS]SlotContents) {
     // it in the plaintext table
     for i := 0; i<NUM_SLOTS; i++ {
       for j := 0; j<NUM_SLOTS; j++ {
-        for k := 0; k<NUM_SLOTS; k++ {
-          var b int
-          if data[i][j][k].Bit {
-            b = 1
-          } else {
-            b = 0
-          }
-          fmt.Printf("%d", b)
+        var b int
+        if data[i][j].Bit {
+          b = 1
+        } else {
+          b = 0
         }
+        fmt.Printf("%d", b)
         fmt.Printf ("\n")
       }
       fmt.Printf ("\n\n")

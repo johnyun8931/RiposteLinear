@@ -29,7 +29,6 @@ func initializeUploadArgs(args *db.UploadArgs, msg_bit []int) error {
 
     copy(args.Query[i].XCoords[:], randVecs[0][:])
     copy(args.Query[i].YCoords[:], randVecs[1][:])
-    copy(args.Query[i].ZCoords[:], randVecs[2][:])
 
     if (i & 1) == 0 {
       args.Query[i].XCoords[msg_bit[0]] = !args.Query[i].XCoords[msg_bit[0]]
@@ -37,10 +36,6 @@ func initializeUploadArgs(args *db.UploadArgs, msg_bit []int) error {
 
     if (i & 2) == 0 {
       args.Query[i].YCoords[msg_bit[1]] = !args.Query[i].YCoords[msg_bit[1]]
-    }
-
-    if (i & 4) == 0 {
-      args.Query[i].ZCoords[msg_bit[2]] = !args.Query[i].ZCoords[msg_bit[2]]
     }
   }
 
@@ -95,7 +90,6 @@ func main() {
 
   msg_bit[0], err = utils.RandomInt(db.NUM_SLOTS)
   msg_bit[1], err = utils.RandomInt(db.NUM_SLOTS)
-  msg_bit[2], err = utils.RandomInt(db.NUM_SLOTS)
 
   var args db.UploadArgs
   err = initializeUploadArgs(&args, msg_bit[:])
@@ -111,16 +105,13 @@ func main() {
 
   for i := 0; i<db.NUM_SLOTS; i++ {
     for j := 0; j<db.NUM_SLOTS; j++ {
-      for k := 0; k<db.NUM_SLOTS; k++ {
-        var b int
-        if (table.Entries[i][j][k].Bit) {
-          b = 1
-        } else {
-          b = 0
-        }
-        fmt.Printf("%d", b)
+      var b int
+      if (table.Entries[i][j].Bit) {
+        b = 1
+      } else {
+        b = 0
       }
-      fmt.Printf("\n")
+      fmt.Printf("%d", b)
     }
     fmt.Printf("\n")
     fmt.Printf("\n")
