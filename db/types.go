@@ -35,6 +35,9 @@ type SlotContents struct {
   Message [SLOT_LENGTH]byte
 }
 
+type CommitRow [TABLE_WIDTH]group.Element
+type CommitCol [TABLE_WIDTH]group.Element
+
 type EncryptedInsertQuery struct {
   SenderPublicKey [32]byte
   Nonce [24]byte
@@ -48,8 +51,11 @@ type UploadArgs struct {
 type InsertQuery struct {
   XCoords [TABLE_WIDTH]bool
   YCoords [TABLE_HEIGHT]SlotContents
-  XCommits [TABLE_WIDTH]group.Element
-  YCommits [TABLE_HEIGHT]group.Element
+
+  XCommits CommitRow
+  XpCommits CommitRow
+  YCommits CommitCol
+  YpCommits CommitCol
 }
 
 type UploadReply struct {
