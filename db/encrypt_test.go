@@ -28,3 +28,20 @@ func TestEncryptGood(t *testing.T) {
   }
 }
 
+func TestEncryptBad(t *testing.T) {
+  for i := 0 ; i < utils.NumServers(); i++ {
+    var q InsertQuery
+    utils.RandomVector(q.XCoords[:])
+
+    enc, err := EncryptQuery(i, q)
+    if err != nil {
+      t.Fatal("Could not encrypt")
+    }
+
+    _, err = DecryptQuery((i+1)%utils.NumServers(), enc)
+    if err == nil {
+      t.Fail()
+    }
+  }
+}
+

@@ -6,11 +6,9 @@ package utils
  */
 
 import (
-  "crypto/rand"
   "crypto/tls"
+  "encoding/hex"
   "log"
-
-  "code.google.com/p/go.crypto/nacl/box"
 )
 
 var serverPublicKeys = [...]string {
@@ -302,14 +300,53 @@ fPA/ukH8ZPhNANIgCMd4vw9rdMXUHLdACg==
 `,
 }
 
-var ServerBoxPublicKeys []*[32]byte
-var ServerBoxPrivateKeys []*[32]byte
+var serverBoxPublicHex = [...]string {
+  "25e7a9139b43eb5d6ef39a5069d597d6b9d353bd5fbae3f3df3d316d5c61bc5c",
+  "077e8ae1bfb51ab8b8e76df4ee29ec0902b3777bef1c5d6b82697f53c54d2504",
+  "7f14438b4092f8d478beffcc610a295331350752efcb4790366d864ba7fbd511",
+  "354743620132eb5de8686e62570850015bd2f26532802e2cfd63afd7ef480377",
+  "6632f896d0751a3f4bf96da84d8bb3a24d41de6074c1a1b83022526f68fba755",
+  "acf3aeb872d324acdf819c4b44495044f01ba14d4a3718cc881a77779d105d19",
+  "28494083f96f10ab2311d03befa6e55f7ba98ccecf08cb976d573dcdca4c6166",
+  "b31a6715e5f7a01b70e3bb303ebb00a65564fb331274349e821fd788db9a555b",
+  "fcf7183219816a2a28d8c4a169b12ab336717e0f3a998415670a2eec80dfe31c",
+}
+
+var serverBoxPrivateHex = [...]string {
+  "464b531592c58a12652b0dd9a3325c59c0e48a2f3dd31aaec81b1e892f07e9a9",
+  "f8c86766dac706e8900c0eca59ef6212dee9a4c32ef4b115d9f11f225bc48379",
+  "f62d683d3681985913a50f62412ee90115351b8e0636356e44005e9f2d9870ab",
+  "52fc8e19e54bd654fbc30f080cb29dabba2ca6a187ecb216609d007d26030e53",
+  "f4cd1678e76c21bcbfa4c74cbfc81400f8fba240692c80e5afe9594a859187db",
+  "a32a99f819355dcbfee58439c4fffacad22e6835f2066bbf8a5878e7cf92b375",
+  "f9272567e991c5a2edd08d201e8d9991f3a6519b46b1680e13c06b9907b3e27f",
+  "42708fe3599f675feb648bd4205527efc1626d6f630d83422e56f439fe24749a",
+  "00f17096c80fd24abc4a05d2b6e40b2a525ef66b8e982777c37b470c43efe146",
+}
 
 var ServerCertificates []tls.Certificate
 var LeaderCertificate []tls.Certificate
+var ServerBoxPublicKeys []*[32]byte
+var ServerBoxPrivateKeys []*[32]byte
+
+func stringToArray(s string) *[32]byte {
+  arr := new([32]byte)
+  key, err := hex.DecodeString(s)
+  if err != nil {
+    log.Fatal("Could not create key:", err)
+  }
+
+  if len(key) != 32 {
+    log.Fatal("Incorrect key len")
+  }
+
+  copy((*arr)[:], key)
+  return arr
+}
 
 func init() {
-  nServers := len(serverPublicKeys)
+  nServers := 8
+
   var err error
   ServerCertificates = make([]tls.Certificate, nServers)
   ServerBoxPublicKeys = make([]*[32]byte, nServers)
@@ -322,11 +359,8 @@ func init() {
       log.Fatal("Could not load certficate #%v %v", i, err)
     }
 
-    ServerBoxPublicKeys[i], ServerBoxPrivateKeys[i], err =
-        box.GenerateKey(rand.Reader)
-    if err != nil {
-      log.Fatal("Could not create public key #%v: %v", i, err)
-    }
+    ServerBoxPublicKeys[i] = stringToArray(serverBoxPublicHex[i])
+    ServerBoxPrivateKeys[i] = stringToArray(serverBoxPrivateHex[i])
   }
 
   LeaderCertificate = ServerCertificates[0:1]

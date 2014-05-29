@@ -1,7 +1,6 @@
 package db
 
 import (
-  "log"
   "bytes"
   "crypto/rand"
   "errors"
@@ -33,17 +32,27 @@ func EncryptQuery(serverIdx int, query InsertQuery) (EncryptedInsertQuery, error
 
   myPublicKey, myPrivateKey, err := box.GenerateKey(rand.Reader)
 
-  log.Printf("len %v", len(buf.Bytes()))
-
   out.SenderPublicKey = *myPublicKey
   out.Nonce = nonce
   out.Ciphertext = box.Seal(nil, buf.Bytes(), &nonce, serverPublicKey, myPrivateKey)
+
+  /*
+  log.Printf("pk   %v", out.SenderPublicKey)
+  log.Printf("nc   %v", out.Nonce)
+  log.Printf("ct   %v", out.Ciphertext)
+  */
 
   return out, nil
 }
 
 func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (InsertQuery, error) {
-  serverPrivateKey := utils.ServerBoxPublicKeys[serverIdx]
+  serverPrivateKey := utils.ServerBoxPrivateKeys[serverIdx]
+
+  /*
+  log.Printf("pk   %v", enc.SenderPublicKey)
+  log.Printf("nc   %v", enc.Nonce)
+  log.Printf("ct   %v", enc.Ciphertext)
+  */
 
   var buf []byte
   buf, okay := box.Open(nil, enc.Ciphertext, &enc.Nonce,
@@ -54,7 +63,6 @@ func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (InsertQuery, error) 
     return query, errors.New("Could not decrypt")
   }
 
-  log.Printf("len %v", len(buf))
   dec := gob.NewDecoder(bytes.NewBuffer(buf))
   err := dec.Decode(&query)
   if err != nil {

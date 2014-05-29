@@ -241,12 +241,12 @@ func (t *SlotTable) beginMerge() {
  */
 
 func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
-
   // XXX check if good
   query, err := DecryptQuery(t.ServerIdx, prep.Query)
   if err == nil {
     reply.Okay = t.validateUpload(query)
   } else {
+    log.Printf("Error in decryption: ", err)
     reply.Okay = false
   }
 
