@@ -216,13 +216,10 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) BitMatrix {
 
   // XOR all of the tables together and save 
   // it in the plaintext table
-  for i := 0; i<NUM_SLOTS; i++ {
-    for j := 0; j<NUM_SLOTS; j++ {
-      b[i][j].Bit = false
+  for i := 0; i<TABLE_WIDTH; i++ {
+    for j := 0; j<TABLE_HEIGHT; j++ {
       for serv := 0; serv<NUM_SERVERS; serv++ {
-        if (tables[serv].Entries[i][j].Bit) {
-          b[i][j].Bit = !b[i][j].Bit
-        }
+        b[i][j] = AddSlots(b[i][j], tables[serv].Entries[i][j])
       }
     }
   }
@@ -288,7 +285,7 @@ func (t *SlotTable) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) er
   t.plainMutex.Unlock()
 
   t.entriesMutex.Lock()
-  t.entries = *new([NUM_SLOTS][NUM_SLOTS]SlotContents)
+  t.entries = *new([TABLE_WIDTH][TABLE_HEIGHT]SlotContents)
   t.entriesMutex.Unlock()
 
   t.State = State_AcceptUpload
@@ -318,11 +315,10 @@ func (t *SlotTable) DumpPlaintext(_ *int, reply *DumpReply) error {
 func (t *SlotTable) processQuery(query InsertQuery) error {
   log.Printf("Processing query %d", t.ServerIdx)
   t.entriesMutex.Lock()
-  for i := 0; i < NUM_SLOTS; i++ {
-    for j := 0; j < NUM_SLOTS; j++ {
-      flip := query.XCoords[i] || query.YCoords[j]
-      if flip {
-        t.entries[i][j].Bit = !(t.entries[i][j].Bit)
+  for i := 0; i < TABLE_WIDTH; i++ {
+    if query.XCoords[i] {
+      for j := 0; j < TABLE_HEIGHT; j++ {
+        t.entries[i][j] = AddSlots(t.entries[i][j], query.YCoords[j])
       }
     }
   }
@@ -392,17 +388,11 @@ func (t *SlotTable) Initialize(*int, *int) error {
 }
 
 func (t *SlotTable) debugTable() {
-  f := func(data [NUM_SLOTS][NUM_SLOTS]SlotContents) {
+  f := func(data [TABLE_WIDTH][TABLE_HEIGHT]SlotContents) {
     // it in the plaintext table
-    for i := 0; i<NUM_SLOTS; i++ {
-      for j := 0; j<NUM_SLOTS; j++ {
-        var b int
-        if data[i][j].Bit {
-          b = 1
-        } else {
-          b = 0
-        }
-        fmt.Printf("%d", b)
+    for i := 0; i<TABLE_WIDTH; i++ {
+      for j := 0; j<TABLE_HEIGHT; j++ {
+        fmt.Printf("%v", data[i][j].Message)
       }
       fmt.Printf ("\n")
     }
