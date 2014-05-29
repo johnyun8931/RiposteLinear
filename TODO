@@ -5,3 +5,5 @@ TODO
   revealing information to it
 - ZKP of client correctness
 
+PERFORMANCE
+- Batch exponentiation and verification

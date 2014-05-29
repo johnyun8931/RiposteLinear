@@ -13,10 +13,10 @@ import (
 )
 
 var (
-  incomingReqs = make(chan [NUM_SERVERS]InsertQuery, REQ_BUFFER_SIZE)
+  incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
   commitReqs = make(chan CommitArgs, REQ_BUFFER_SIZE)
 
-  beginMergeMarker [NUM_SERVERS]InsertQuery
+  beginMergeMarker [NUM_SERVERS]EncryptedInsertQuery
   beginMergeMarkerCommit CommitArgs
 )
 
@@ -65,7 +65,7 @@ func (t *SlotTable) submitPrepares() {
 
     // If we're starting to merge, then the marker down
     // the pipeline
-    if queries == beginMergeMarker {
+    if queries[0].Ciphertext == nil {
       commitReqs <-CommitArgs{}
       continue
     }
@@ -241,17 +241,22 @@ func (t *SlotTable) beginMerge() {
  */
 
 func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
-  t.pendingMutex.Lock()
-  if t.pending == nil {
-    t.pending = map[int64]PrepareArgs{}
-  }
-  t.pending[prep.Uuid] = *prep
-  t.pendingMutex.Unlock()
 
   // XXX check if good
-  isGood := t.validateUpload(prep.Query)
+  query, err := DecryptQuery(t.ServerIdx, prep.Query)
+  if err == nil {
+    reply.Okay = t.validateUpload(query)
+  } else {
+    reply.Okay = false
+  }
 
-  reply.Okay = isGood
+  t.pendingMutex.Lock()
+  if t.pending == nil {
+    t.pending = map[int64]InsertQuery{}
+  }
+  t.pending[prep.Uuid] = query
+  t.pendingMutex.Unlock()
+
   return nil
 }
 
@@ -274,7 +279,7 @@ func (t *SlotTable) Commit(com *CommitArgs, reply *CommitReply) error {
   }
 
   // Update the database with the query
-  t.processQuery(val.Query)
+  t.processQuery(val)
 
   return nil
 }

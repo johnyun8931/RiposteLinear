@@ -6,8 +6,11 @@ package utils
  */
 
 import (
+  "crypto/rand"
   "crypto/tls"
   "log"
+
+  "code.google.com/p/go.crypto/nacl/box"
 )
 
 var serverPublicKeys = [...]string {
@@ -299,18 +302,30 @@ fPA/ukH8ZPhNANIgCMd4vw9rdMXUHLdACg==
 `,
 }
 
+var ServerBoxPublicKeys []*[32]byte
+var ServerBoxPrivateKeys []*[32]byte
+
 var ServerCertificates []tls.Certificate
 var LeaderCertificate []tls.Certificate
 
 func init() {
+  nServers := len(serverPublicKeys)
   var err error
-  ServerCertificates = make([]tls.Certificate, len(serverPublicKeys))
-  for i := 0; i<len(serverPublicKeys); i++ {
+  ServerCertificates = make([]tls.Certificate, nServers)
+  ServerBoxPublicKeys = make([]*[32]byte, nServers)
+  ServerBoxPrivateKeys = make([]*[32]byte, nServers)
+  for i := 0; i<nServers; i++ {
     ServerCertificates[i], err = tls.X509KeyPair(
       []byte(serverPublicKeys[i]),
       []byte(serverSecretKeys[i]))
     if err != nil {
-      log.Fatal("Could not load certficate #", i, err)
+      log.Fatal("Could not load certficate #%v %v", i, err)
+    }
+
+    ServerBoxPublicKeys[i], ServerBoxPrivateKeys[i], err =
+        box.GenerateKey(rand.Reader)
+    if err != nil {
+      log.Fatal("Could not create public key #%v: %v", i, err)
     }
   }
 

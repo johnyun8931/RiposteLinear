@@ -33,8 +33,14 @@ type SlotContents struct {
   Message [SLOT_LENGTH]byte
 }
 
+type EncryptedInsertQuery struct {
+  SenderPublicKey [32]byte
+  Nonce [24]byte
+  Ciphertext []byte
+}
+
 type UploadArgs struct {
-  Query [NUM_SERVERS]InsertQuery
+  Query [NUM_SERVERS]EncryptedInsertQuery
 }
 
 type InsertQuery struct {
@@ -64,7 +70,7 @@ type DownloadReply struct {
 type PrepareArgs struct {
   // TODO Dont need to send all stuff
   Uuid int64
-  Query InsertQuery
+  Query EncryptedInsertQuery
 }
 
 type PrepareReply struct {
@@ -96,7 +102,7 @@ type SlotTable struct {
   ServerIdx int
   State DbState
 
-  pending map[int64]PrepareArgs
+  pending map[int64]InsertQuery
   pendingMutex sync.Mutex
 
   entries BitMatrix
