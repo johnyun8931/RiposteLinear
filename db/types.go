@@ -3,6 +3,8 @@ package db
 import (
   "net/rpc"
   "sync"
+
+  "henrycg/zkp/group"
 )
 
 // Number of "dimensions" for PIR scheme
@@ -46,6 +48,8 @@ type UploadArgs struct {
 type InsertQuery struct {
   XCoords [TABLE_WIDTH]bool
   YCoords [TABLE_HEIGHT]SlotContents
+  XCommits [TABLE_WIDTH]group.Element
+  YCommits [TABLE_HEIGHT]group.Element
 }
 
 type UploadReply struct {

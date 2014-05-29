@@ -8,12 +8,20 @@ import (
 
   "henrycg/email/db"
   "henrycg/email/utils"
+  "henrycg/zkp/group"
 )
 
 func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
     msg db.SlotContents) error {
   var randVecsX [db.TABLE_WIDTH]bool
   var randVecsY [db.TABLE_HEIGHT]db.SlotContents
+
+  /*
+  var CommitX  [db.TABLE_WIDTH]group.Element
+  var CommitXp [db.TABLE_WIDTH]group.Element
+  var CommitY  [db.TABLE_HEIGHT]group.Element
+  var CommitYp [db.TABLE_HEIGHT]group.Element
+  */
 
   utils.RandomVector(randVecsX[:])
   randomVectorMsg(randVecsY[:])

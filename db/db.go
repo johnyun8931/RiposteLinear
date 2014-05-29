@@ -240,6 +240,8 @@ func (t *SlotTable) beginMerge() {
  * Handle Updates
  */
 
+
+
 func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   // XXX check if good
   query, err := DecryptQuery(t.ServerIdx, prep.Query)
