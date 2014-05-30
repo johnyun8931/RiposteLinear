@@ -6,6 +6,7 @@ TODO
 - Accountability: protocol to identify a bad user/server
 - ZKP of client correctness
 - Allow for colluding servers
+- Pass the big structs with pointers
 
 PERFORMANCE
 - Batch exponentiation and verification

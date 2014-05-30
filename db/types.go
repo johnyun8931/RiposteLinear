@@ -5,6 +5,7 @@ import (
   "sync"
 
   "henrycg/zkp/group"
+  "henrycg/zkp/schnorr"
 )
 
 // Number of "dimensions" for PIR scheme
@@ -53,9 +54,10 @@ type InsertQuery struct {
   YCoords [TABLE_HEIGHT]SlotContents
 
   XCommits CommitRow
-  XpCommits CommitRow
   YCommits CommitCol
-  YpCommits CommitCol
+
+  XProof schnorr.ManyEvidence
+  YProof schnorr.ManyEvidence
 }
 
 type UploadReply struct {

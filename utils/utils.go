@@ -3,7 +3,11 @@ package utils
 import (
   "crypto/rand"
   "math/big"
+
+  "henrycg/zkp/group"
 )
+
+var CommonCurve = group.CurveP256()
 
 func AllServers() []string {
   return []string {

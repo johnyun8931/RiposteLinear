@@ -8,7 +8,6 @@ import (
 
   "code.google.com/p/go.crypto/nacl/box"
   "henrycg/email/utils"
-  "henrycg/zkp/group"
 )
 
 // XXX This is a terrible way to implement this functionality.
@@ -74,6 +73,3 @@ func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (InsertQuery, error) 
 
 }
 
-func init() {
-  gob.Register(group.CurveElement{})
-}
