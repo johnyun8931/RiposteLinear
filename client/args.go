@@ -17,10 +17,10 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   // Get blinding values and proofs for X and Y coords
   // Each element of these vectors is h^{r_i} for 
   // randomness r_i.
-  stX, _, evX := createCommitVector(db.TABLE_WIDTH, xIdx)
-  stXp, _, evXp := createCommitVector(db.TABLE_WIDTH, xIdx)
-  stY, _, evY := createCommitVector(db.TABLE_HEIGHT, yIdx)
-  stYp, _, evYp := createCommitVector(db.TABLE_HEIGHT, yIdx)
+  stX, secX := createCommitVector(db.TABLE_WIDTH, xIdx)
+  stXp, secXp := createCommitVector(db.TABLE_WIDTH, xIdx)
+  stY, secY := createCommitVector(db.TABLE_HEIGHT, yIdx)
+  stYp, secYp := createCommitVector(db.TABLE_HEIGHT, yIdx)
 
   // Create random values for secret sharing
   var randVecsX [db.TABLE_WIDTH]bool
@@ -76,6 +76,20 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
     commitYp[i] = curve.Mul(curve.Pow(curve.GeneratorG(), mp), commitYp[i])
   }
 
+  // Replace flipped items in the statement
+  //   at xIdx, will have commitX[i]  = g^{x-x'} h^r
+  //                      commitXp[i] = g^{x'-x} h^r 
+  //   at yIdx, will have commitY[i]  = g^{y-y'} h^r
+  //                      commitYp[i] = g^{y'-y} h^r 
+
+  Bogus fill this in!!!
+
+  // Prove
+  evX := schnorr.ManyProve(curve, stX, secX)
+  evXp := schnorr.ManyProve(curve, stXp, secXp)
+  evY := schnorr.ManyProve(curve, stY, secY)
+  evYp := schnorr.ManyProve(curve, stYp, secYp)
+
   for i := 0; i < db.NUM_SERVERS; i++ {
     var plainQuery db.InsertQuery
 
@@ -90,12 +104,12 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
     plainQuery.XProof = evX
     plainQuery.YProof = evY
 
-    if (i & 1) == 0 {
+    if (i & 1) > 0 {
       plainQuery.XCoords = randVecsXp
       plainQuery.XProof = evXp
     }
 
-    if (i & 2) == 0 {
+    if (i & 2) > 0 {
       plainQuery.YCoords = randVecsYp
       plainQuery.YProof = evYp
     }
@@ -111,7 +125,7 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
 }
 
 func createCommitVector(num, bogusIdx int) (
-  schnorr.ManyStatement, schnorr.ManyWitness, schnorr.ManyEvidence) {
+  schnorr.ManyStatement, schnorr.ManyWitness) {
   var st schnorr.ManyStatement
   var wit schnorr.ManyWitness
 
@@ -127,8 +141,8 @@ func createCommitVector(num, bogusIdx int) (
 
 //  st.GtoXs[bogusIdx].X = bogusValue
 
-  ev := schnorr.ManyProve(curve, st, wit)
-  return st, wit, ev
+  //ev := schnorr.ManyProve(curve, st, wit)
+  return st, wit
 }
 
 
