@@ -1,7 +1,9 @@
 package db
 
 import (
+  "bytes"
   "crypto/tls"
+  "encoding/gob"
   "errors"
   "fmt"
   "log"
@@ -48,7 +50,7 @@ func (t *SlotTable) Upload(args *UploadArgs, reply *UploadReply) error {
   }
 
   log.Printf("Got upload request")
-  log.Printf("Request:", args)
+  //log.Printf("Request:", args)
 
   if t.State != State_AcceptUpload {
     return errors.New("Not accepting uploads")
@@ -104,15 +106,14 @@ func (t *SlotTable) submitPrepares() {
       }
     }
 
-    okay := true
-    for i:=0; i<NUM_SERVERS; i++ {
-      log.Printf("Got reply %d %d", i, replies[i].Okay)
-      okay = (okay && replies[i].Okay)
-    }
-
     log.Printf("Done PREPARE %d", uuid)
 
-    commitArgs := CommitArgs{uuid, okay}
+    var commitArgs CommitArgs
+    commitArgs.Uuid = uuid
+    for i:=0; i<NUM_SERVERS; i++ {
+      commitArgs.Signatures[i] = replies[i].Signature
+    }
+
     commitReqs <- commitArgs
   }
 }
@@ -120,7 +121,7 @@ func (t *SlotTable) submitPrepares() {
 func (t *SlotTable) submitCommits() {
   for {
     com := <-commitReqs
-    if com == beginMergeMarkerCommit {
+    if com.Uuid == beginMergeMarkerCommit.Uuid {
       t.sendMergeRequest()
     }
     log.Printf("Send COMMIT %d", com.Uuid)
@@ -244,19 +245,24 @@ func (t *SlotTable) beginMerge() {
 
 func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   // XXX check if good
+  okay := true
   query, err := DecryptQuery(t.ServerIdx, prep.Query)
   if err == nil {
-    reply.Okay = t.validateUpload(query)
+    okay = t.validateUpload(query)
   } else {
     log.Printf("Error in decryption: ", err)
-    reply.Okay = false
+    okay = false
+  }
+
+  if okay {
+    reply.Signature = t.signCommits(prep.Uuid, query)
   }
 
   t.pendingMutex.Lock()
   if t.pending == nil {
     t.pending = map[int64]InsertQuery{}
   }
-  t.pending[prep.Uuid] = query
+  t.pending[prep.Uuid] = *query
   t.pendingMutex.Unlock()
 
   return nil
@@ -276,12 +282,13 @@ func (t *SlotTable) Commit(com *CommitArgs, reply *CommitReply) error {
   t.pendingMutex.Unlock()
 
   // If we don't need to commit the entry
-  if !com.Commit {
+  okay := validateSignatures(&val, com)
+  if !okay {
     return nil
   }
 
   // Update the database with the query
-  t.processQuery(val)
+  t.processQuery(&val)
 
   return nil
 }
@@ -319,7 +326,7 @@ func (t *SlotTable) DumpPlaintext(_ *int, reply *DumpReply) error {
  * Actual DB manipulation
  */
 
-func (t *SlotTable) processQuery(query InsertQuery) error {
+func (t *SlotTable) processQuery(query *InsertQuery) error {
   log.Printf("Processing query %d", t.ServerIdx)
   t.entriesMutex.Lock()
   for i := 0; i < TABLE_WIDTH; i++ {
@@ -411,6 +418,33 @@ func (t *SlotTable) debugTable() {
   fmt.Printf("---------------\n")
 }
 
+func serializeCommits(uuid int64, query *InsertQuery) []byte {
+  var buf bytes.Buffer
+  enc := gob.NewEncoder(&buf)
+  enc.Encode(uuid)
+  enc.Encode(query.XCommits)
+  enc.Encode(query.XpCommits)
+  enc.Encode(query.YCommits)
+  enc.Encode(query.YpCommits)
+  return buf.Bytes()
+}
+
+func (t *SlotTable) signCommits(uuid int64, query *InsertQuery) utils.EcdsaSignature {
+  msg := serializeCommits(uuid, query)
+  return utils.EcdsaSign(t.ServerIdx, msg)
+}
+
+func validateSignatures(query *InsertQuery, com *CommitArgs) bool {
+  msg := serializeCommits(com.Uuid, query)
+  for i := 0; i<NUM_SERVERS; i++ {
+    if !utils.EcdsaVerify(i, msg, com.Signatures[i]) {
+      log.Printf("Got invalid sig from server %v", i)
+      return false
+    }
+  }
+  return true
+}
+
 /*
 func (t *SlotTable) Download(args *DownloadArgs, reply *DownloadReply) error {
   log.Printf("Got download request")
@@ -433,3 +467,6 @@ func (t *SlotTable) Download(args *DownloadArgs, reply *DownloadReply) error {
 }
 */
 
+func init() {
+  beginMergeMarkerCommit.Uuid = 0
+}

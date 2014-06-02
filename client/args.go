@@ -3,6 +3,7 @@ package main
 import (
   "crypto/rand"
   "log"
+  "math/big"
 
   "henrycg/email/db"
   "henrycg/email/utils"
@@ -28,6 +29,21 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   var randVecsY [db.TABLE_HEIGHT]db.SlotContents
   var randVecsYp [db.TABLE_HEIGHT]db.SlotContents
 
+  var xSecrets [db.TABLE_WIDTH]*big.Int
+  var xpSecrets [db.TABLE_WIDTH]*big.Int
+  var ySecrets [db.TABLE_HEIGHT]*big.Int
+  var ypSecrets [db.TABLE_HEIGHT]*big.Int
+
+  for i:=0; i<db.TABLE_WIDTH; i++ {
+    xSecrets[i] = secX.Xs[i].X
+    xpSecrets[i] = secXp.Xs[i].X
+  }
+
+  for i:=0; i<db.TABLE_HEIGHT; i++ {
+    ySecrets[i] = secY.Xs[i].X
+    ypSecrets[i] = secYp.Xs[i].X
+  }
+
   utils.RandomVector(randVecsX[:])
   randomVectorMsg(randVecsY[:])
 
@@ -36,7 +52,6 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   copy(randVecsYp[:], randVecsY[:])
 
   // Compute the differing bit position
-
   xStar := !randVecsX[xIdx]
   yStar := db.AddSlots(msg, randVecsY[yIdx])
   randVecsXp[xIdx] = xStar
@@ -97,7 +112,6 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   stY.GtoXs[yIdx].X = curve.Mul(commitY[yIdx], curve.Inverse(gToYp))
   stYp.GtoXs[yIdx].X = curve.Mul(commitYp[yIdx], curve.Inverse(gToY))
 
-
   // Prove
   evX := schnorr.ManyProve(curve, stX, secX)
   evXp := schnorr.ManyProve(curve, stXp, secXp)
@@ -118,13 +132,18 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
     plainQuery.XProof = evXp
     plainQuery.YProof = evYp
 
+    plainQuery.XSecrets = xSecrets
+    plainQuery.YSecrets = ySecrets
+
     if (i & 1) > 0 {
       plainQuery.XCoords = randVecsXp
+      plainQuery.XSecrets = xpSecrets
       plainQuery.XProof = evX
     }
 
     if (i & 2) > 0 {
       plainQuery.YCoords = randVecsYp
+      plainQuery.YSecrets = ypSecrets
       plainQuery.YProof = evY
     }
 

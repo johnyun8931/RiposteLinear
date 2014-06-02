@@ -1,9 +1,11 @@
 package db
 
 import (
+  "math/big"
   "net/rpc"
   "sync"
 
+  "henrycg/email/utils"
   "henrycg/zkp/group"
   "henrycg/zkp/schnorr"
 )
@@ -53,6 +55,9 @@ type InsertQuery struct {
   XCoords [TABLE_WIDTH]bool
   YCoords [TABLE_HEIGHT]SlotContents
 
+  XSecrets [TABLE_WIDTH]*big.Int
+  YSecrets [TABLE_HEIGHT]*big.Int
+
   XCommits CommitRow
   XpCommits CommitRow
   YCommits CommitCol
@@ -89,14 +94,14 @@ type PrepareArgs struct {
 
 type PrepareReply struct {
   // VOTE: YES/NO
-  Okay bool
+  Signature utils.EcdsaSignature
 }
 
 type CommitArgs struct {
   // COMMIT
   // uuid
   Uuid int64
-  Commit bool
+  Signatures [NUM_SERVERS]utils.EcdsaSignature
 }
 
 type CommitReply struct {

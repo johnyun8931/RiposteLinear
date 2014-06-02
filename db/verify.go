@@ -3,35 +3,36 @@ package db
 import (
   "log"
 
+  "henrycg/zkp/group"
   "henrycg/zkp/schnorr"
   "henrycg/email/utils"
 )
 
 var curve = utils.CommonCurve
 
-func (t *SlotTable) validateUpload(query InsertQuery) bool {
+func (t *SlotTable) validateUpload(query *InsertQuery) bool {
   // Server 0: X,  Y
   // Server 1: X', Y
   // Server 2: X,  Y'
   // Server 3: X', Y'
   // Recreate proof statement and verify it
 
-  xValid := xProofIsValid(t, query)
-  yValid := yProofIsValid(t, query)
+  // XXX Should short-circuit these checks for efficiency!
+  xComValid := t.xCommitIsValid(query)
+  yComValid := t.yCommitIsValid(query)
+  xValid := t.xProofIsValid(query)
+  yValid := t.yProofIsValid(query)
+  log.Printf("X com is valid? %v", xComValid)
+  log.Printf("Y com is valid? %v", xComValid)
   log.Printf("XProof is valid? %v", xValid)
   log.Printf("YProof is valid? %v", yValid)
 
-  // XXX bogus for now
-  return true
+  return xValid && yValid && xComValid && yComValid
 }
 
-func xProofIsValid(t *SlotTable, query InsertQuery) bool {
+func (t *SlotTable) xProofIsValid(query *InsertQuery) bool {
   var st schnorr.ManyStatement
   st.GtoXs = make([]schnorr.Statement, TABLE_WIDTH)
-
-  // XXX TODO: make sure that commitment vector is valid
-  // -- i.e., verify the opening of the commitment C(X)
-  // matches the X that the client sent
 
   invG := curve.Inverse(curve.GeneratorG())
   for i:=0; i<TABLE_WIDTH; i++ {
@@ -54,13 +55,9 @@ func xProofIsValid(t *SlotTable, query InsertQuery) bool {
   return schnorr.ManyVerify(curve, st, query.XProof)
 }
 
-func yProofIsValid(t *SlotTable, query InsertQuery) bool {
+func (t *SlotTable) yProofIsValid(query *InsertQuery) bool {
   var st schnorr.ManyStatement
   st.GtoXs = make([]schnorr.Statement, TABLE_HEIGHT)
-
-  // XXX TODO: make sure that commitment vector is valid
-  // -- i.e., verify the opening of the commitment C(X)
-  // matches the X that the client sent
 
   for i:=0; i<TABLE_HEIGHT; i++ {
     st.GtoXs[i].G = curve.GeneratorH()
@@ -80,4 +77,56 @@ func yProofIsValid(t *SlotTable, query InsertQuery) bool {
   }
 
   return schnorr.ManyVerify(curve, st, query.YProof)
+}
+
+func (t *SlotTable) xCommitIsValid(query *InsertQuery) bool {
+  g := curve.GeneratorG()
+  h := curve.GeneratorH()
+
+  var truth []group.Element
+  if t.ServerIdx & 1 > 0 {
+    // Have X'
+    truth = query.XpCommits[:]
+  } else {
+    // Have X
+    truth = query.XCommits[:]
+  }
+
+  for i:=0; i<TABLE_WIDTH; i++ {
+    com := curve.Pow(h, query.XSecrets[i])
+    if query.XCoords[i] {
+      com = curve.Mul(g, com)
+    }
+
+    if !curve.AreEqual(com, truth[i]) {
+      return false
+    }
+  }
+
+  return true
+}
+
+func (t *SlotTable) yCommitIsValid(query *InsertQuery) bool {
+  g := curve.GeneratorG()
+  h := curve.GeneratorH()
+
+  var truth []group.Element
+  if t.ServerIdx & 2 > 0 {
+    // Have Y'
+    truth = query.YpCommits[:]
+  } else {
+    // Have Y
+    truth = query.YCommits[:]
+  }
+
+  for i:=0; i<TABLE_HEIGHT; i++ {
+    com := curve.Pow(h, query.YSecrets[i])
+    com = curve.Mul(com, curve.Pow(g, utils.HashString(query.YCoords[i].Message[:])))
+
+    if !curve.AreEqual(com, truth[i]) {
+      return false
+    }
+  }
+
+  return true
 }

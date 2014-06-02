@@ -45,7 +45,7 @@ func EncryptQuery(serverIdx int, query InsertQuery) (EncryptedInsertQuery, error
   return out, nil
 }
 
-func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (InsertQuery, error) {
+func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (*InsertQuery, error) {
   serverPrivateKey := utils.ServerBoxPrivateKeys[serverIdx]
 
   /*
@@ -58,7 +58,7 @@ func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (InsertQuery, error) 
   buf, okay := box.Open(nil, enc.Ciphertext, &enc.Nonce,
       &enc.SenderPublicKey, serverPrivateKey)
 
-  var query InsertQuery
+  query := new(InsertQuery)
   if !okay {
     return query, errors.New("Could not decrypt")
   }
