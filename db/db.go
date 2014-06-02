@@ -155,7 +155,7 @@ func (t *SlotTable) submitCommits() {
 
 func (t *SlotTable) mergeWorker() {
   for {
-    time.Sleep(5*time.Second)
+    time.Sleep(20*time.Second)
     t.sendMergeRequest()
   }
 }
@@ -426,6 +426,7 @@ func serializeCommits(uuid int64, query *InsertQuery) []byte {
   enc.Encode(query.XpCommits)
   enc.Encode(query.YCommits)
   enc.Encode(query.YpCommits)
+  //log.Printf("Signing: %v", buf.Bytes())
   return buf.Bytes()
 }
 
@@ -436,13 +437,16 @@ func (t *SlotTable) signCommits(uuid int64, query *InsertQuery) utils.EcdsaSigna
 
 func validateSignatures(query *InsertQuery, com *CommitArgs) bool {
   msg := serializeCommits(com.Uuid, query)
+  okay := true
   for i := 0; i<NUM_SERVERS; i++ {
     if !utils.EcdsaVerify(i, msg, com.Signatures[i]) {
-      log.Printf("Got invalid sig from server %v", i)
-      return false
+      //log.Printf("Got invalid sig from server %v [%v]", i, com.Signatures[i])
+      okay = false
+    } else {
+      //log.Printf("Got good sig from server %v [%v]", i, com.Signatures[i])
     }
   }
-  return true
+  return okay
 }
 
 /*

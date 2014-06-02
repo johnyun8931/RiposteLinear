@@ -15,8 +15,8 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 1 << 3
-const TABLE_HEIGHT int = 1 << 2
+const TABLE_WIDTH int = 1 << 4
+const TABLE_HEIGHT int = 1 << 3
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
