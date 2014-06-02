@@ -2,8 +2,6 @@ package main
 
 import (
   "crypto/rand"
-  "crypto/sha256"
-  "math/big"
   "log"
 
   "henrycg/email/db"
@@ -19,54 +17,87 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   // Get blinding values and proofs for X and Y coords
   // Each element of these vectors is h^{r_i} for 
   // randomness r_i.
-  stX, _, evX := createVectorProof(db.TABLE_WIDTH, xIdx)
-  stY, _, evY := createVectorProof(db.TABLE_HEIGHT, yIdx)
+  stX, _, evX := createCommitVector(db.TABLE_WIDTH, xIdx)
+  stXp, _, evXp := createCommitVector(db.TABLE_WIDTH, xIdx)
+  stY, _, evY := createCommitVector(db.TABLE_HEIGHT, yIdx)
+  stYp, _, evYp := createCommitVector(db.TABLE_HEIGHT, yIdx)
 
   // Create random values for secret sharing
   var randVecsX [db.TABLE_WIDTH]bool
+  var randVecsXp [db.TABLE_WIDTH]bool
   var randVecsY [db.TABLE_HEIGHT]db.SlotContents
+  var randVecsYp [db.TABLE_HEIGHT]db.SlotContents
 
   utils.RandomVector(randVecsX[:])
   randomVectorMsg(randVecsY[:])
 
+  // XXX this is not as space-efficient as it could be...
+  copy(randVecsXp[:], randVecsX[:])
+  copy(randVecsYp[:], randVecsY[:])
+
   // Compute the differing bit position
+
   xStar := !randVecsX[xIdx]
-  yStar := db.AddSlots(randVecsY[yIdx], msg)
+  yStar := db.AddSlots(msg, randVecsY[yIdx])
+  randVecsXp[xIdx] = xStar
+  randVecsYp[yIdx] = yStar
 
   // Compute commits to X and Y
   var commitX db.CommitRow
+  var commitXp db.CommitRow
   var commitY db.CommitCol
+  var commitYp db.CommitCol
+
+  // Set the bogus commit to be:
+  //    g^{bit_i} h^{r_i} / g^{bit'_i}
 
   // Compute g^{bit_i} h^{r_i}
   for i := 0; i<db.TABLE_WIDTH; i++ {
     commitX[i] = stX.GtoXs[i].X
+    commitXp[i] = stXp.GtoXs[i].X
+
     if randVecsX[i] {
       commitX[i] = curve.Mul(curve.GeneratorG(), commitX[i])
+    }
+
+    if randVecsXp[i] {
+      commitXp[i] = curve.Mul(curve.GeneratorG(), commitXp[i])
     }
   }
 
   for i := 0; i<db.TABLE_HEIGHT; i++ {
     commitY[i] = stY.GtoXs[i].X
-    m := hashString(randVecsY[i].Message[:])
+    commitYp[i] = stYp.GtoXs[i].X
+
+    m := utils.HashString(randVecsY[i].Message[:])
     commitY[i] = curve.Mul(curve.Pow(curve.GeneratorG(), m), commitY[i])
+
+    mp := utils.HashString(randVecsYp[i].Message[:])
+    commitYp[i] = curve.Mul(curve.Pow(curve.GeneratorG(), mp), commitYp[i])
   }
 
   for i := 0; i < db.NUM_SERVERS; i++ {
     var plainQuery db.InsertQuery
 
-    copy(plainQuery.XCoords[:], randVecsX[:])
-    copy(plainQuery.YCoords[:], randVecsY[:])
-    copy(plainQuery.XCommits[:], commitX[:])
-    copy(plainQuery.YCommits[:], commitY[:])
+    plainQuery.XCoords = randVecsX
+    plainQuery.YCoords = randVecsY
+
+    plainQuery.XCommits = commitX
+    plainQuery.XpCommits = commitXp
+    plainQuery.YCommits = commitY
+    plainQuery.YpCommits = commitYp
+
     plainQuery.XProof = evX
     plainQuery.YProof = evY
 
     if (i & 1) == 0 {
-      plainQuery.XCoords[xIdx] = xStar
+      plainQuery.XCoords = randVecsXp
+      plainQuery.XProof = evXp
     }
 
     if (i & 2) == 0 {
-      plainQuery.YCoords[yIdx] = yStar
+      plainQuery.YCoords = randVecsYp
+      plainQuery.YProof = evYp
     }
 
     var err error
@@ -79,7 +110,7 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   return nil
 }
 
-func createVectorProof(num, bogusIdx int) (
+func createCommitVector(num, bogusIdx int) (
   schnorr.ManyStatement, schnorr.ManyWitness, schnorr.ManyEvidence) {
   var st schnorr.ManyStatement
   var wit schnorr.ManyWitness
@@ -93,6 +124,8 @@ func createVectorProof(num, bogusIdx int) (
     st.GtoXs[i].G = curve.GeneratorH()
     st.GtoXs[i].X = curve.Pow(st.GtoXs[i].G, wit.Xs[i].X)
   }
+
+//  st.GtoXs[bogusIdx].X = bogusValue
 
   ev := schnorr.ManyProve(curve, st, wit)
   return st, wit, ev
@@ -117,10 +150,5 @@ func boolToInt(b bool) int64 {
   } else {
     return 0
   }
-}
-
-func hashString(b []byte) *big.Int {
-  h := sha256.Sum224(b)
-  return new(big.Int).SetBytes(h[:])
 }
 

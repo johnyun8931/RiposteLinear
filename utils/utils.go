@@ -1,6 +1,7 @@
 package utils
 
 import (
+  "crypto/sha256"
   "crypto/rand"
   "math/big"
 
@@ -55,5 +56,10 @@ func RandomVector(lst []bool) error {
   }
 
   return nil
+}
+
+func HashString(b []byte) *big.Int {
+  h := sha256.Sum224(b)
+  return new(big.Int).SetBytes(h[:])
 }
 

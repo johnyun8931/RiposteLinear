@@ -54,7 +54,9 @@ type InsertQuery struct {
   YCoords [TABLE_HEIGHT]SlotContents
 
   XCommits CommitRow
+  XpCommits CommitRow
   YCommits CommitCol
+  YpCommits CommitCol
 
   XProof schnorr.ManyEvidence
   YProof schnorr.ManyEvidence

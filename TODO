@@ -1,5 +1,6 @@
 TODO
-- Have client encrypt messages sent to servers
+- Have servers send signature on commits back to the leader
+  to ensure that the client send the same stuff to each server
 - Use signatures to prevent the leader from selectively dropping
   messages in such a way that it can trick other servers into 
   revealing information to it

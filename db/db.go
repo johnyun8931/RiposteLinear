@@ -335,10 +335,6 @@ func (t *SlotTable) processQuery(query InsertQuery) error {
   return nil
 }
 
-func (t *SlotTable) validateUpload(query InsertQuery) bool {
-  // XXX bogus for now
-  return true
-}
 
 /***********
  * Initialization
