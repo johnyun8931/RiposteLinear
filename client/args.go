@@ -80,9 +80,23 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   //   at xIdx, will have commitX[i]  = g^{x-x'} h^r
   //                      commitXp[i] = g^{x'-x} h^r 
   //   at yIdx, will have commitY[i]  = g^{y-y'} h^r
-  //                      commitYp[i] = g^{y'-y} h^r 
+  //                      commitYp[i] = g^{y'-y} h^r
+  gInv := curve.Inverse(curve.GeneratorG())
+  g := curve.GeneratorG()
+  if randVecsX[xIdx] {
+    stX.GtoXs[xIdx].X = curve.Mul(stX.GtoXs[xIdx].X, g)
+    stXp.GtoXs[xIdx].X = curve.Mul(stXp.GtoXs[xIdx].X, gInv)
+  }
+  if randVecsXp[xIdx] {
+    stX.GtoXs[xIdx].X = curve.Mul(stX.GtoXs[xIdx].X, gInv)
+    stXp.GtoXs[xIdx].X = curve.Mul(stXp.GtoXs[xIdx].X, g)
+  }
 
-  Bogus fill this in!!!
+  gToY := curve.Pow(curve.GeneratorG(), utils.HashString(randVecsY[yIdx].Message[:]))
+  gToYp := curve.Pow(curve.GeneratorG(), utils.HashString(randVecsYp[yIdx].Message[:]))
+  stY.GtoXs[yIdx].X = curve.Mul(commitY[yIdx], curve.Inverse(gToYp))
+  stYp.GtoXs[yIdx].X = curve.Mul(commitYp[yIdx], curve.Inverse(gToY))
+
 
   // Prove
   evX := schnorr.ManyProve(curve, stX, secX)
@@ -101,17 +115,17 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
     plainQuery.YCommits = commitY
     plainQuery.YpCommits = commitYp
 
-    plainQuery.XProof = evX
-    plainQuery.YProof = evY
+    plainQuery.XProof = evXp
+    plainQuery.YProof = evYp
 
     if (i & 1) > 0 {
       plainQuery.XCoords = randVecsXp
-      plainQuery.XProof = evXp
+      plainQuery.XProof = evX
     }
 
     if (i & 2) > 0 {
       plainQuery.YCoords = randVecsYp
-      plainQuery.YProof = evYp
+      plainQuery.YProof = evY
     }
 
     var err error
