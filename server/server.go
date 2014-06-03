@@ -7,6 +7,8 @@ import (
   "net"
   "net/rpc"
   "os"
+  "os/signal"
+  "runtime/pprof"
   "strconv"
 )
 
@@ -16,8 +18,8 @@ import (
 )
 
 func main() {
-  if len(os.Args) != 3 {
-    log.Fatal("Usage: ", os.Args[0], " [index] [port]")
+  if len(os.Args) < 3 || len(os.Args) > 4 {
+    log.Fatal("Usage: ", os.Args[0], " [index] [port] [--profile]")
     return
   }
 
@@ -25,6 +27,32 @@ func main() {
   if err != nil {
     log.Fatal("Invalid index: %s", os.Args[1])
     return
+  }
+
+  if len(os.Args) > 3 {
+    if os.Args[3] == "--profile" {
+      f, err := os.Create(fmt.Sprintf("server-%v.prof", idx))
+      if err != nil {
+        log.Fatal(err)
+      }
+      pprof.StartCPUProfile(f)
+
+      // Stop when process exits
+      defer pprof.StopCPUProfile()
+
+      // Stop on ^C
+      c := make(chan os.Signal, 1)
+      signal.Notify(c, os.Interrupt)
+      go func(){
+        for _ = range c {
+          // sig is a ^C, handle it
+          pprof.StopCPUProfile()
+          os.Exit(0)
+        }
+      }()
+    } else {
+      log.Fatal("Invalid profile flag")
+    }
   }
 
   port := os.Args[2]
@@ -50,4 +78,3 @@ func main() {
 
   //http.ListenAndServe(addr, nil)
 }
-
