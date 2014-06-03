@@ -325,7 +325,7 @@ var serverBoxPrivateHex = [...]string {
 }
 
 var ServerCertificates []tls.Certificate
-var LeaderCertificate []tls.Certificate
+var LeaderCertificate tls.Certificate
 var ServerBoxPublicKeys []*[32]byte
 var ServerBoxPrivateKeys []*[32]byte
 
@@ -351,6 +351,7 @@ func init() {
   ServerCertificates = make([]tls.Certificate, nServers)
   ServerBoxPublicKeys = make([]*[32]byte, nServers)
   ServerBoxPrivateKeys = make([]*[32]byte, nServers)
+
   for i := 0; i<nServers; i++ {
     ServerCertificates[i], err = tls.X509KeyPair(
       []byte(serverPublicKeys[i]),
@@ -363,6 +364,6 @@ func init() {
     ServerBoxPrivateKeys[i] = stringToArray(serverBoxPrivateHex[i])
   }
 
-  LeaderCertificate = ServerCertificates[0:1]
+  LeaderCertificate = ServerCertificates[0]
 }
 

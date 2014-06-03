@@ -2,7 +2,8 @@ package main
 
 import (
   "crypto/rand"
-  "fmt"
+  "crypto/tls"
+//  "fmt"
   "net/rpc"
   "log"
 
@@ -35,7 +36,9 @@ func tryDumpTable(client *rpc.Client) db.DumpReply {
 
 func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
 
-  client, err := utils.DialHTTPWithTLS("tcp", server, -1, utils.LeaderCertificate)
+  certs := make([]tls.Certificate, 1)
+  certs[0] = utils.LeaderCertificate
+  client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
   if err != nil {
     log.Fatal("Could not connect:", err)
     return
@@ -47,7 +50,7 @@ func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
     return
   }
   log.Printf("Done uploading")
-  *tab = tryDumpTable(client)
+  //*tab = tryDumpTable(client)
 
   log.Printf("Done")
 }
@@ -81,11 +84,13 @@ func main() {
   leader := servers[0]
   runClient(leader, args, &table)
 
+  /*
   for i := 0; i<db.TABLE_WIDTH; i++ {
     for j := 0; j<db.TABLE_HEIGHT; j++ {
       fmt.Printf("%v", table.Entries[i][j].Message)
     }
     fmt.Printf("\n")
   }
+  */
 }
 

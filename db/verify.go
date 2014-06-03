@@ -10,7 +10,7 @@ import (
 
 var curve = utils.CommonCurve
 
-func (t *SlotTable) validateUpload(query *InsertQuery) bool {
+func ValidateUpload(serverIdx int, query *InsertQuery) bool {
   // Server 0: X,  Y
   // Server 1: X', Y
   // Server 2: X,  Y'
@@ -18,10 +18,10 @@ func (t *SlotTable) validateUpload(query *InsertQuery) bool {
   // Recreate proof statement and verify it
 
   // XXX Should short-circuit these checks for efficiency!
-  xComValid := t.xCommitIsValid(query)
-  yComValid := t.yCommitIsValid(query)
-  xValid := t.xProofIsValid(query)
-  yValid := t.yProofIsValid(query)
+  xComValid := xCommitIsValid(serverIdx, query)
+  yComValid := yCommitIsValid(serverIdx, query)
+  xValid := xProofIsValid(serverIdx, query)
+  yValid := yProofIsValid(serverIdx, query)
   log.Printf("X com is valid? %v", xComValid)
   log.Printf("Y com is valid? %v", xComValid)
   log.Printf("XProof is valid? %v", xValid)
@@ -30,14 +30,14 @@ func (t *SlotTable) validateUpload(query *InsertQuery) bool {
   return xValid && yValid && xComValid && yComValid
 }
 
-func (t *SlotTable) xProofIsValid(query *InsertQuery) bool {
+func xProofIsValid(serverIdx int, query *InsertQuery) bool {
   var st schnorr.ManyStatement
   st.GtoXs = make([]schnorr.Statement, TABLE_WIDTH)
 
   invG := curve.Inverse(curve.GeneratorG())
   for i:=0; i<TABLE_WIDTH; i++ {
     st.GtoXs[i].G = curve.GeneratorH()
-    if (t.ServerIdx & 1) > 0 {
+    if (serverIdx & 1) > 0 {
       // Has X'
       st.GtoXs[i].X = query.XCommits[i]
     } else {
@@ -55,13 +55,13 @@ func (t *SlotTable) xProofIsValid(query *InsertQuery) bool {
   return schnorr.ManyVerify(curve, st, query.XProof)
 }
 
-func (t *SlotTable) yProofIsValid(query *InsertQuery) bool {
+func yProofIsValid(serverIdx int, query *InsertQuery) bool {
   var st schnorr.ManyStatement
   st.GtoXs = make([]schnorr.Statement, TABLE_HEIGHT)
 
   for i:=0; i<TABLE_HEIGHT; i++ {
     st.GtoXs[i].G = curve.GeneratorH()
-    if (t.ServerIdx & 2) > 0 {
+    if (serverIdx & 2) > 0 {
       // Has Y'
       st.GtoXs[i].X = query.YCommits[i]
     } else {
@@ -79,12 +79,12 @@ func (t *SlotTable) yProofIsValid(query *InsertQuery) bool {
   return schnorr.ManyVerify(curve, st, query.YProof)
 }
 
-func (t *SlotTable) xCommitIsValid(query *InsertQuery) bool {
+func xCommitIsValid(serverIdx int, query *InsertQuery) bool {
   g := curve.GeneratorG()
   h := curve.GeneratorH()
 
   var truth []group.Element
-  if t.ServerIdx & 1 > 0 {
+  if serverIdx & 1 > 0 {
     // Have X'
     truth = query.XpCommits[:]
   } else {
@@ -106,12 +106,12 @@ func (t *SlotTable) xCommitIsValid(query *InsertQuery) bool {
   return true
 }
 
-func (t *SlotTable) yCommitIsValid(query *InsertQuery) bool {
+func yCommitIsValid(serverIdx int, query *InsertQuery) bool {
   g := curve.GeneratorG()
   h := curve.GeneratorH()
 
   var truth []group.Element
-  if t.ServerIdx & 2 > 0 {
+  if serverIdx & 2 > 0 {
     // Have Y'
     truth = query.YpCommits[:]
   } else {

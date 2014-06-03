@@ -3,7 +3,6 @@ package db
 import (
   "bytes"
   "crypto/tls"
-  "encoding/gob"
   "errors"
   "fmt"
   "log"
@@ -12,6 +11,7 @@ import (
   "time"
 
   "henrycg/email/utils"
+  "henrycg/zkp/group"
 )
 
 var (
@@ -212,8 +212,8 @@ func (t *SlotTable) sendMergeRequest() {
   log.Printf("Done MERGE")
 }
 
-func revealCleartext(tables [NUM_SERVERS]DumpReply) BitMatrix {
-  var b BitMatrix
+func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
+  b := new(BitMatrix)
 
   // XOR all of the tables together and save 
   // it in the plaintext table
@@ -248,7 +248,7 @@ func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   okay := true
   query, err := DecryptQuery(t.ServerIdx, prep.Query)
   if err == nil {
-    okay = t.validateUpload(query)
+    okay = ValidateUpload(t.ServerIdx, query)
   } else {
     log.Printf("Error in decryption: ", err)
     okay = false
@@ -299,7 +299,7 @@ func (t *SlotTable) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) er
   t.plainMutex.Unlock()
 
   t.entriesMutex.Lock()
-  t.entries = *new([TABLE_WIDTH][TABLE_HEIGHT]SlotContents)
+  t.entries = new(BitMatrix)
   t.entriesMutex.Unlock()
 
   t.State = State_AcceptUpload
@@ -398,6 +398,7 @@ func (t *SlotTable) Initialize(*int, *int) error {
 }
 
 func (t *SlotTable) debugTable() {
+  /*
   f := func(data [TABLE_WIDTH][TABLE_HEIGHT]SlotContents) {
     // it in the plaintext table
     for i := 0; i<TABLE_WIDTH; i++ {
@@ -416,17 +417,25 @@ func (t *SlotTable) debugTable() {
   f(t.plain)
   t.plainMutex.Unlock()
   fmt.Printf("---------------\n")
+  */
+  return
 }
 
 func serializeCommits(uuid int64, query *InsertQuery) []byte {
   var buf bytes.Buffer
-  enc := gob.NewEncoder(&buf)
-  enc.Encode(uuid)
-  enc.Encode(query.XCommits)
-  enc.Encode(query.XpCommits)
-  enc.Encode(query.YCommits)
-  enc.Encode(query.YpCommits)
-  //log.Printf("Signing: %v", buf.Bytes())
+  elementsToBytes(query.XCommits[:])
+  elementsToBytes(query.XpCommits[:])
+  elementsToBytes(query.YCommits[:])
+  elementsToBytes(query.YpCommits[:])
+  return buf.Bytes()
+}
+
+func elementsToBytes(elms []group.Element) []byte {
+  var buf bytes.Buffer
+  for i:=0; i<len(elms); i++ {
+    buf.Write(utils.CommonCurve.Marshal(elms[i]))
+  }
+
   return buf.Bytes()
 }
 
@@ -440,10 +449,10 @@ func validateSignatures(query *InsertQuery, com *CommitArgs) bool {
   okay := true
   for i := 0; i<NUM_SERVERS; i++ {
     if !utils.EcdsaVerify(i, msg, com.Signatures[i]) {
-      //log.Printf("Got invalid sig from server %v [%v]", i, com.Signatures[i])
+      log.Printf("Got invalid sig from server %v", i)
       okay = false
     } else {
-      //log.Printf("Got good sig from server %v [%v]", i, com.Signatures[i])
+      log.Printf("Got good sig from server %v", i)
     }
   }
   return okay
@@ -470,6 +479,16 @@ func (t *SlotTable) Download(args *DownloadArgs, reply *DownloadReply) error {
   return nil
 }
 */
+
+func NewSlotTable(serverIdx int) *SlotTable {
+  t := new(SlotTable)
+  t.entries = new(BitMatrix)
+  t.plain = new(BitMatrix)
+  t.ServerIdx = serverIdx
+  t.State = State_AcceptUpload
+
+  return t
+}
 
 func init() {
   beginMergeMarkerCommit.Uuid = 0

@@ -54,7 +54,7 @@ func handleOneClient(conn net.Conn) {
   }
 
   state := tlscon.ConnectionState()
-  log.Printf("Certs", state.PeerCertificates)
+  log.Printf("Certs %v", state.PeerCertificates)
 
   log.Printf("Handshake OK")
 
@@ -77,7 +77,7 @@ func DialHTTPWithTLS(network, address string,
   }
 
   state := conn.ConnectionState()
-  log.Printf("State: \n", state.PeerCertificates)
+  log.Printf("State: %v", state.PeerCertificates)
   if len(acceptCerts) > 0 && !validateCert(acceptCerts, state.PeerCertificates[0]) {
     return nil, errors.New("Invalid certificate")
   }

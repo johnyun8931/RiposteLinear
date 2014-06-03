@@ -15,14 +15,14 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 1 << 4
-const TABLE_HEIGHT int = 1 << 3
+const TABLE_WIDTH int = 1 << 10
+const TABLE_HEIGHT int = 1 << 10
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
 
 // Length of plaintext messages (in bytes)
-const SLOT_LENGTH int = 2
+const SLOT_LENGTH int = 1 << 1
 
 type BitMatrix [TABLE_WIDTH][TABLE_HEIGHT]SlotContents
 
@@ -72,7 +72,7 @@ type UploadReply struct {
 }
 
 type DumpReply struct {
-  Entries BitMatrix
+  Entries *BitMatrix
 }
 
 /*
@@ -110,7 +110,7 @@ type CommitReply struct {
 }
 
 type PlaintextArgs struct {
-  Plaintext BitMatrix
+  Plaintext *BitMatrix
 }
 
 type PlaintextReply struct {
@@ -124,10 +124,10 @@ type SlotTable struct {
   pending map[int64]InsertQuery
   pendingMutex sync.Mutex
 
-  entries BitMatrix
+  entries *BitMatrix
   entriesMutex sync.Mutex
 
-  plain BitMatrix
+  plain *BitMatrix
   plainMutex sync.Mutex
 
   rpcClients [NUM_SERVERS]*rpc.Client

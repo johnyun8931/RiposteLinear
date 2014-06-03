@@ -12,10 +12,10 @@ var CommonCurve = group.CurveP256()
 
 func AllServers() []string {
   return []string {
-    "localhost:8080",
-    "localhost:8081",
-    "localhost:8082",
-    "localhost:8083",
+    "localhost:9090",
+    "localhost:9091",
+    "localhost:9092",
+    "localhost:9093",
     /*
     "localhost:8084",
     "localhost:8085",

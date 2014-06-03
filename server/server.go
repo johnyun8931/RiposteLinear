@@ -2,6 +2,7 @@ package main
 
 import (
   "crypto/tls"
+  "fmt"
   "log"
   "net"
   "net/rpc"
@@ -27,13 +28,13 @@ func main() {
   }
 
   port := os.Args[2]
-  slot_table := new(db.SlotTable)
-  slot_table.ServerIdx = idx
-  slot_table.State = db.State_AcceptUpload
+  slotTable := db.NewSlotTable(idx)
   var a int
-  go slot_table.Initialize(&a, &a)
+  go slotTable.Initialize(&a, &a)
 
-  rpc.Register(slot_table)
+  log.SetPrefix(fmt.Sprintf("[Server %v] ", idx))
+
+  rpc.Register(slotTable)
   //rpc.HandleHTTP()
   addr := net.JoinHostPort("", port)
 
@@ -42,7 +43,7 @@ func main() {
   // If we are not the leader, only allow 
   // connections from the leader
   if idx > 0 {
-    certs = utils.LeaderCertificate
+    certs = append(certs, utils.LeaderCertificate)
   }
   utils.ListenAndServe(addr, idx, certs)
   log.Printf("Server %d is listening at %s", idx, port)
