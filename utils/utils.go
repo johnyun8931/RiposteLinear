@@ -14,9 +14,9 @@ func AllServers() []string {
   return []string {
     "localhost:9090",
     "localhost:9091",
+    /*
     "localhost:9092",
     "localhost:9093",
-    /*
     "localhost:8084",
     "localhost:8085",
     "localhost:8086",

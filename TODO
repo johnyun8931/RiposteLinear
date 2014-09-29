@@ -1,11 +1,11 @@
 TODO
+- Switch to curve25519
 - Have servers send signature on commits back to the leader
   to ensure that the client send the same stuff to each server
 - Use signatures to prevent the leader from selectively dropping
   messages in such a way that it can trick other servers into 
   revealing information to it
 - Accountability: protocol to identify a bad user/server
-- ZKP of client correctness
 - Allow for colluding servers
 - Pass the big structs with pointers
 

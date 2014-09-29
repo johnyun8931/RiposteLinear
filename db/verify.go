@@ -1,10 +1,10 @@
 package db
 
 import (
-  "log"
+//  "log"
 
-  "henrycg/zkp/group"
-  "henrycg/zkp/schnorr"
+//  "henrycg/zkp/group"
+//  "henrycg/zkp/schnorr"
   "henrycg/email/utils"
 )
 
@@ -18,6 +18,8 @@ func ValidateUpload(serverIdx int, query *InsertQuery) bool {
   // Recreate proof statement and verify it
 
   // XXX Should short-circuit these checks for efficiency!
+
+  /* XXX removing ZKPs for now
   xComValid := xCommitIsValid(serverIdx, query)
   yComValid := yCommitIsValid(serverIdx, query)
   xValid := xProofIsValid(serverIdx, query)
@@ -28,8 +30,11 @@ func ValidateUpload(serverIdx int, query *InsertQuery) bool {
   log.Printf("YProof is valid? %v", yValid)
 
   return xValid && yValid && xComValid && yComValid
+  */
+  return true
 }
 
+/* XXX removing ZKPs for now
 func xProofIsValid(serverIdx int, query *InsertQuery) bool {
   var st schnorr.ManyStatement
   st.GtoXs = make([]schnorr.Statement, TABLE_WIDTH)
@@ -130,3 +135,4 @@ func yCommitIsValid(serverIdx int, query *InsertQuery) bool {
 
   return true
 }
+*/

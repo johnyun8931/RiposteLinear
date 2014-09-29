@@ -36,3 +36,4 @@ func testOnce(t *testing.T, xIdx, yIdx int) {
     }
   }
 }
+

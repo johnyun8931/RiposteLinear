@@ -10,9 +10,13 @@ import (
   "net/rpc"
   "time"
 
+  "henrycg/email/prf"
   "henrycg/email/utils"
   "henrycg/zkp/group"
 )
+
+// Time to wait between merges (in seconds)
+const MERGE_TIME_DELAY time.Duration = 10
 
 var (
   incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
@@ -155,7 +159,7 @@ func (t *SlotTable) submitCommits() {
 
 func (t *SlotTable) mergeWorker() {
   for {
-    time.Sleep(20*time.Second)
+    time.Sleep(MERGE_TIME_DELAY*time.Second)
     t.sendMergeRequest()
   }
 }
@@ -217,9 +221,9 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
 
   // XOR all of the tables together and save 
   // it in the plaintext table
-  for i := 0; i<TABLE_WIDTH; i++ {
-    for j := 0; j<TABLE_HEIGHT; j++ {
-      for serv := 0; serv<NUM_SERVERS; serv++ {
+  for serv := 0; serv<NUM_SERVERS; serv++ {
+    for i := 0; i<TABLE_HEIGHT; i++ {
+      for j := 0; j<TABLE_WIDTH; j++ {
         b[i][j] = AddSlots(b[i][j], tables[serv].Entries[i][j])
       }
     }
@@ -255,7 +259,7 @@ func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   }
 
   if okay {
-    reply.Signature = t.signCommits(prep.Uuid, query)
+    //reply.Signature = t.signCommits(prep.Uuid, query)
   }
 
   t.pendingMutex.Lock()
@@ -329,15 +333,29 @@ func (t *SlotTable) DumpPlaintext(_ *int, reply *DumpReply) error {
 func (t *SlotTable) processQuery(query *InsertQuery) error {
   log.Printf("Processing query %d", t.ServerIdx)
   t.entriesMutex.Lock()
-  for i := 0; i < TABLE_WIDTH; i++ {
-    if query.XCoords[i] {
-      for j := 0; j < TABLE_HEIGHT; j++ {
-        t.entries[i][j] = AddSlots(t.entries[i][j], query.YCoords[j])
+  for i := 0; i < TABLE_HEIGHT; i++ {
+    // For each row, use key to generate PRF output for that row
+    p, err := prf.NewPrf(query.Keys[i])
+    if err != nil {
+      return err
+    }
+
+    rowBit := query.KeyMask[i]
+
+    var j uint64
+    for j = 0; j < uint64(TABLE_WIDTH); j++ {
+      prfOutput := EvaluatePrf(p, j)
+      t.entries[i][j] = AddSlots(t.entries[i][j], prfOutput)
+
+      // If row bitmask is set, then XOR in the message mask too
+      if rowBit {
+        t.entries[i][j] = AddSlots(t.entries[i][j], query.MessageMask[j])
       }
     }
   }
 
   t.entriesMutex.Unlock()
+  log.Printf("Done processing query %d", t.ServerIdx)
   t.debugTable()
   return nil
 }
@@ -399,10 +417,10 @@ func (t *SlotTable) Initialize(*int, *int) error {
 
 func (t *SlotTable) debugTable() {
   /*
-  f := func(data [TABLE_WIDTH][TABLE_HEIGHT]SlotContents) {
+  f := func(data [TABLE_HEIGHT][TABLE_WIDTH]SlotContents) {
     // it in the plaintext table
-    for i := 0; i<TABLE_WIDTH; i++ {
-      for j := 0; j<TABLE_HEIGHT; j++ {
+    for i := 0; i<TABLE_HEIGHT; i++ {
+      for j := 0; j<TABLE_WIDTH; j++ {
         fmt.Printf("%v", data[i][j].Message)
       }
       fmt.Printf ("\n")
@@ -410,17 +428,18 @@ func (t *SlotTable) debugTable() {
   }
   fmt.Printf("---- Table ----\n")
   t.entriesMutex.Lock()
-  f(t.entries)
+  f(*t.entries)
   t.entriesMutex.Unlock()
   fmt.Printf("---- Plain ----\n")
   t.plainMutex.Lock()
-  f(t.plain)
+  f(*t.plain)
   t.plainMutex.Unlock()
   fmt.Printf("---------------\n")
   */
   return
 }
 
+/* XXX removing ZKPs for now
 func serializeCommits(uuid int64, query *InsertQuery) []byte {
   var buf bytes.Buffer
   elementsToBytes(query.XCommits[:])
@@ -429,6 +448,7 @@ func serializeCommits(uuid int64, query *InsertQuery) []byte {
   elementsToBytes(query.YpCommits[:])
   return buf.Bytes()
 }
+*/
 
 func elementsToBytes(elms []group.Element) []byte {
   var buf bytes.Buffer
@@ -439,12 +459,16 @@ func elementsToBytes(elms []group.Element) []byte {
   return buf.Bytes()
 }
 
+/* XXX removing ZKPs for now
 func (t *SlotTable) signCommits(uuid int64, query *InsertQuery) utils.EcdsaSignature {
   msg := serializeCommits(uuid, query)
   return utils.EcdsaSign(t.ServerIdx, msg)
 }
+*/
 
 func validateSignatures(query *InsertQuery, com *CommitArgs) bool {
+  return true
+  /* XXX removing ZKPs for now
   msg := serializeCommits(com.Uuid, query)
   okay := true
   for i := 0; i<NUM_SERVERS; i++ {
@@ -456,6 +480,7 @@ func validateSignatures(query *InsertQuery, com *CommitArgs) bool {
     }
   }
   return okay
+  */
 }
 
 /*

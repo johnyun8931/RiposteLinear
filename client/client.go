@@ -1,7 +1,7 @@
 package main
 
 import (
-  "crypto/rand"
+  //"crypto/rand"
   "crypto/tls"
 //  "fmt"
   "net/rpc"
@@ -63,7 +63,7 @@ func main() {
   xIdx, err = utils.RandomInt(db.TABLE_WIDTH)
   yIdx, err = utils.RandomInt(db.TABLE_HEIGHT)
 
-  _, err = rand.Read(msg.Message[:])
+  msg, err = db.RandomSlot()
   if err != nil {
     log.Fatal("error: ", err)
     return

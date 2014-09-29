@@ -1,18 +1,19 @@
 package db
 
 import (
-  "math/big"
+//  "math/big"
   "net/rpc"
   "sync"
 
+  "henrycg/email/prf"
   "henrycg/email/utils"
-  "henrycg/zkp/group"
-  "henrycg/zkp/schnorr"
+//  "henrycg/zkp/group"
+//  "henrycg/zkp/schnorr"
 )
 
 // Number of "dimensions" for PIR scheme
 const NUM_DIMENSIONS = 2
-const NUM_SERVERS = 1 << NUM_DIMENSIONS
+const NUM_SERVERS = 2//1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
 const TABLE_WIDTH int = 1 << 6
@@ -22,9 +23,9 @@ const TABLE_HEIGHT int = 1 << 6
 const REQ_BUFFER_SIZE int = 48
 
 // Length of plaintext messages (in bytes)
-const SLOT_LENGTH int = 1 << 2
+const SLOT_LENGTH int = 9
 
-type BitMatrix [TABLE_WIDTH][TABLE_HEIGHT]SlotContents
+type BitMatrix [TABLE_HEIGHT][TABLE_WIDTH]SlotContents
 
 type DbState int
 const (
@@ -35,11 +36,8 @@ const (
 )
 
 type SlotContents struct {
-  Message [SLOT_LENGTH]byte
+  Message [SLOT_LENGTH]prf.Block
 }
-
-type CommitRow [TABLE_WIDTH]group.Element
-type CommitCol [TABLE_WIDTH]group.Element
 
 type EncryptedInsertQuery struct {
   SenderPublicKey [32]byte
@@ -52,19 +50,9 @@ type UploadArgs struct {
 }
 
 type InsertQuery struct {
-  XCoords [TABLE_WIDTH]bool
-  YCoords [TABLE_HEIGHT]SlotContents
-
-  XSecrets [TABLE_WIDTH]*big.Int
-  YSecrets [TABLE_HEIGHT]*big.Int
-
-  XCommits CommitRow
-  XpCommits CommitRow
-  YCommits CommitCol
-  YpCommits CommitCol
-
-  XProof schnorr.ManyEvidence
-  YProof schnorr.ManyEvidence
+  Keys [TABLE_HEIGHT]prf.Key
+  KeyMask [TABLE_HEIGHT]bool
+  MessageMask [TABLE_WIDTH]SlotContents
 }
 
 type UploadReply struct {

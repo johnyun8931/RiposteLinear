@@ -1,13 +1,14 @@
 package main
 
 import (
-  "crypto/rand"
   "log"
-  "math/big"
+//  "fmt"
+//  "math/big"
 
   "henrycg/email/db"
+  "henrycg/email/prf"
   "henrycg/email/utils"
-  "henrycg/zkp/schnorr"
+//  "henrycg/zkp/schnorr"
 )
 
 var curve = utils.CommonCurve
@@ -15,136 +16,47 @@ var curve = utils.CommonCurve
 func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
     msg db.SlotContents) error {
 
-  // Get blinding values and proofs for X and Y coords
-  // Each element of these vectors is h^{r_i} for 
-  // randomness r_i.
-  stX, secX := createCommitVector(db.TABLE_WIDTH, xIdx)
-  stXp, secXp := createCommitVector(db.TABLE_WIDTH, xIdx)
-  stY, secY := createCommitVector(db.TABLE_HEIGHT, yIdx)
-  stYp, secYp := createCommitVector(db.TABLE_HEIGHT, yIdx)
-
   // Create random values for secret sharing
-  var randVecsX [db.TABLE_WIDTH]bool
-  var randVecsXp [db.TABLE_WIDTH]bool
-  var randVecsY [db.TABLE_HEIGHT]db.SlotContents
-  var randVecsYp [db.TABLE_HEIGHT]db.SlotContents
+  var keys [db.TABLE_HEIGHT]prf.Key
+  var keysP [db.TABLE_HEIGHT]prf.Key
 
-  var xSecrets [db.TABLE_WIDTH]*big.Int
-  var xpSecrets [db.TABLE_WIDTH]*big.Int
-  var ySecrets [db.TABLE_HEIGHT]*big.Int
-  var ypSecrets [db.TABLE_HEIGHT]*big.Int
+  var keyMask [db.TABLE_HEIGHT]bool
+  var keyMaskP [db.TABLE_HEIGHT]bool
 
-  for i:=0; i<db.TABLE_WIDTH; i++ {
-    xSecrets[i] = secX.Xs[i].X
-    xpSecrets[i] = secXp.Xs[i].X
+  var msgMask [db.TABLE_WIDTH]db.SlotContents
+
+  randomVectorKeys(keys[:])
+  utils.RandomVector(keyMask[:])
+
+  copy(keyMaskP[:], keyMask[:])
+  copy(keysP[:], keys[:])
+
+  keyMaskP[yIdx] = !keyMask[yIdx]
+
+  var err error
+  keysP[yIdx], err = prf.NewKey()
+  if err != nil {
+    return err
   }
 
-  for i:=0; i<db.TABLE_HEIGHT; i++ {
-    ySecrets[i] = secY.Xs[i].X
-    ypSecrets[i] = secYp.Xs[i].X
-  }
-
-  utils.RandomVector(randVecsX[:])
-  randomVectorMsg(randVecsY[:])
-
-  // XXX this is not as space-efficient as it could be...
-  copy(randVecsXp[:], randVecsX[:])
-  copy(randVecsYp[:], randVecsY[:])
-
-  // Compute the differing bit position
-  xStar := !randVecsX[xIdx]
-  yStar := db.AddSlots(msg, randVecsY[yIdx])
-  randVecsXp[xIdx] = xStar
-  randVecsYp[yIdx] = yStar
-
-  // Compute commits to X and Y
-  var commitX db.CommitRow
-  var commitXp db.CommitRow
-  var commitY db.CommitCol
-  var commitYp db.CommitCol
-
-  // Set the bogus commit to be:
-  //    g^{bit_i} h^{r_i} / g^{bit'_i}
-
-  // Compute g^{bit_i} h^{r_i}
-  for i := 0; i<db.TABLE_WIDTH; i++ {
-    commitX[i] = stX.GtoXs[i].X
-    commitXp[i] = stXp.GtoXs[i].X
-
-    if randVecsX[i] {
-      commitX[i] = curve.Mul(curve.GeneratorG(), commitX[i])
-    }
-
-    if randVecsXp[i] {
-      commitXp[i] = curve.Mul(curve.GeneratorG(), commitXp[i])
-    }
-  }
-
+  /*
   for i := 0; i<db.TABLE_HEIGHT; i++ {
-    commitY[i] = stY.GtoXs[i].X
-    commitYp[i] = stYp.GtoXs[i].X
-
-    m := utils.HashString(randVecsY[i].Message[:])
-    commitY[i] = curve.Mul(curve.Pow(curve.GeneratorG(), m), commitY[i])
-
-    mp := utils.HashString(randVecsYp[i].Message[:])
-    commitYp[i] = curve.Mul(curve.Pow(curve.GeneratorG(), mp), commitYp[i])
+    fmt.Printf("%v\n\t%v\n\t%v\n\t%v\n\t%v\n", i, keyMask[i], keyMaskP[i], keys[i], keysP[i])
   }
+  */
 
-  // Replace flipped items in the statement
-  //   at xIdx, will have commitX[i]  = g^{x-x'} h^r
-  //                      commitXp[i] = g^{x'-x} h^r 
-  //   at yIdx, will have commitY[i]  = g^{y-y'} h^r
-  //                      commitYp[i] = g^{y'-y} h^r
-  gInv := curve.Inverse(curve.GeneratorG())
-  g := curve.GeneratorG()
-  if randVecsX[xIdx] {
-    stX.GtoXs[xIdx].X = curve.Mul(stX.GtoXs[xIdx].X, g)
-    stXp.GtoXs[xIdx].X = curve.Mul(stXp.GtoXs[xIdx].X, gInv)
-  }
-  if randVecsXp[xIdx] {
-    stX.GtoXs[xIdx].X = curve.Mul(stX.GtoXs[xIdx].X, gInv)
-    stXp.GtoXs[xIdx].X = curve.Mul(stXp.GtoXs[xIdx].X, g)
-  }
-
-  gToY := curve.Pow(curve.GeneratorG(), utils.HashString(randVecsY[yIdx].Message[:]))
-  gToYp := curve.Pow(curve.GeneratorG(), utils.HashString(randVecsYp[yIdx].Message[:]))
-  stY.GtoXs[yIdx].X = curve.Mul(commitY[yIdx], curve.Inverse(gToYp))
-  stYp.GtoXs[yIdx].X = curve.Mul(commitYp[yIdx], curve.Inverse(gToY))
-
-  // Prove
-  evX := schnorr.ManyProve(curve, stX, secX)
-  evXp := schnorr.ManyProve(curve, stXp, secXp)
-  evY := schnorr.ManyProve(curve, stY, secY)
-  evYp := schnorr.ManyProve(curve, stYp, secYp)
+  computeMessageMask(msgMask[:], keys[yIdx], keysP[yIdx], msg, xIdx)
 
   for i := 0; i < db.NUM_SERVERS; i++ {
     var plainQuery db.InsertQuery
 
-    plainQuery.XCoords = randVecsX
-    plainQuery.YCoords = randVecsY
-
-    plainQuery.XCommits = commitX
-    plainQuery.XpCommits = commitXp
-    plainQuery.YCommits = commitY
-    plainQuery.YpCommits = commitYp
-
-    plainQuery.XProof = evXp
-    plainQuery.YProof = evYp
-
-    plainQuery.XSecrets = xSecrets
-    plainQuery.YSecrets = ySecrets
+    plainQuery.MessageMask = msgMask
+    plainQuery.Keys = keys
+    plainQuery.KeyMask = keyMask
 
     if (i & 1) > 0 {
-      plainQuery.XCoords = randVecsXp
-      plainQuery.XSecrets = xpSecrets
-      plainQuery.XProof = evX
-    }
-
-    if (i & 2) > 0 {
-      plainQuery.YCoords = randVecsYp
-      plainQuery.YSecrets = ypSecrets
-      plainQuery.YProof = evY
+      plainQuery.Keys = keysP
+      plainQuery.KeyMask = keyMaskP
     }
 
     var err error
@@ -157,32 +69,36 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   return nil
 }
 
-func createCommitVector(num, bogusIdx int) (
-  schnorr.ManyStatement, schnorr.ManyWitness) {
-  var st schnorr.ManyStatement
-  var wit schnorr.ManyWitness
+func computeMessageMask(msgMask []db.SlotContents,
+    key prf.Key, keyP prf.Key,
+    msg db.SlotContents, xIdx int) error {
 
-  st.GtoXs = make([]schnorr.Statement, num)
-  wit.Xs = make([]schnorr.Witness, num)
-  wit.BogusIdx = bogusIdx
-
-  for i:= 0; i<num; i++ {
-    wit.Xs[i].X = curve.RandomExponent()
-    st.GtoXs[i].G = curve.GeneratorH()
-    st.GtoXs[i].X = curve.Pow(st.GtoXs[i].G, wit.Xs[i].X)
+  prfA, err := prf.NewPrf(key)
+  if err != nil {
+    return err
   }
 
-//  st.GtoXs[bogusIdx].X = bogusValue
+  prfB, err := prf.NewPrf(keyP)
+  if err != nil {
+    return err
+  }
 
-  //ev := schnorr.ManyProve(curve, st, wit)
-  return st, wit
+  var i uint64
+  for i = 0; i < uint64(db.TABLE_WIDTH); i++ {
+    msgA := db.EvaluatePrf(prfA, i)
+    msgB := db.EvaluatePrf(prfB, i)
+    msgMask[i] = db.AddSlots(msgA, msgB)
+  }
+
+  msgMask[xIdx] = db.AddSlots(msgMask[xIdx], msg)
+
+  return nil
 }
 
-
-func randomVectorMsg(lst []db.SlotContents) error {
+func randomVectorKeys(lst []prf.Key) error {
   var err error
   for i := 0; i < len(lst); i++ {
-    _, err = rand.Read(lst[i].Message[:])
+    lst[i], err = prf.NewKey()
     if err != nil {
       return err
     }
