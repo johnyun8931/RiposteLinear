@@ -2,22 +2,24 @@
 package prf
 
 import (
-  "crypto/aes"
-  "crypto/cipher"
   "crypto/rand"
   "encoding/binary"
   "errors"
+
+  "github.com/tang0th/go-chacha20"
 )
 
 // Length of PRF seed (in bytes)
 const KEY_LENGTH = 32
 
-type Key [KEY_LENGTH]byte
+const BLOCK_SIZE = 160
 
-type Block [aes.BlockSize]byte
+type Key [KEY_LENGTH]byte
+type Block [BLOCK_SIZE]byte
 
 type Prf struct {
-  block cipher.Block
+  Nonce []byte
+  Key []byte
 }
 
 func NewKey() (Key, error) {
@@ -32,19 +34,20 @@ func NewKey() (Key, error) {
 func NewPrf(k Key) (Prf, error) {
   p := new(Prf)
   var err error
-  p.block, err = aes.NewCipher(k[:])
+  p.Key = k[:]
+  p.Nonce = []byte{0,0,0,0,0,0,0,0}
   return *p, err
 }
 
 func (p *Prf) Evaluate(i uint64, j uint64) Block {
   //Encode val into 16-byte buffer
-  plaintext := make([]byte, aes.BlockSize)
+  plaintext := make([]byte, BLOCK_SIZE)
   binary.PutUvarint(plaintext, i)
   binary.PutUvarint(plaintext[8:], j)
 
-  // Evaluate AES using ECB mode on the integer
+  // Evaluate PRF on the integer
   ciphertext := make([]byte, len(plaintext))
-  p.block.Encrypt(ciphertext[:], plaintext[:])
+  chacha20.XORKeyStream8(ciphertext, plaintext, p.Nonce, p.Key)
 
   out := new(Block)
   copy(out[:], ciphertext[:])

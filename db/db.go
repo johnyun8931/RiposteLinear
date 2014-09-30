@@ -15,7 +15,7 @@ import (
 )
 
 // Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 10
+const MERGE_TIME_DELAY time.Duration = 90
 
 var (
   incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
@@ -64,6 +64,60 @@ func (t *SlotTable) Upload(args *UploadArgs, reply *UploadReply) error {
   return nil
 }
 
+func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
+  c chan [NUM_SERVERS]EncryptedInsertQuery, shouldMerge *bool) int {
+
+  // Read once, then read until we get to 
+  // the end
+
+  n := 0
+  appendOnce := func(queryList [NUM_SERVERS]EncryptedInsertQuery) {
+    fmt.Printf("Got one")
+    for i := 0; i < NUM_SERVERS; i++ {
+      (*preps)[i].Queries = append((*preps)[i].Queries, queryList[i])
+    }
+    n++
+  }
+
+  isEmpty := func(q [NUM_SERVERS]EncryptedInsertQuery) bool {
+    return q[0].Ciphertext == nil
+  }
+
+  first := <-c
+  if isEmpty(first) {
+    return n
+  } else {
+    appendOnce(first)
+  }
+
+  time.Sleep(5*time.Second)
+
+  *shouldMerge = false
+  fmt.Printf("Here!")
+  for {
+    select {
+      // Each element of incomingReqs has an array
+      // of queries -- one for each server
+      case queryList := <-c:
+        // If we're starting to merge, then the marker down
+        // the pipeline
+        if isEmpty(queryList) {
+          *shouldMerge = true
+          return n
+        } else {
+          appendOnce(queryList)
+        }
+        continue
+
+      default:
+        fmt.Printf("Done")
+        return n
+    }
+  }
+
+  return n
+}
+
 func (t *SlotTable) submitPrepares() {
   for {
     uuid, err := utils.RandomInt64(math.MaxInt64)
@@ -73,21 +127,16 @@ func (t *SlotTable) submitPrepares() {
     }
 
     var preps [NUM_SERVERS]PrepareArgs
-
-    // Each element of incomingReqs has an array
-    // of queries -- one for each server
-    queries := <-incomingReqs
-
-    // If we're starting to merge, then the marker down
-    // the pipeline
-    if queries[0].Ciphertext == nil {
-      commitReqs <-CommitArgs{}
-      continue
+    for i := 0; i < NUM_SERVERS; i++ {
+      preps[i].Uuid = uuid
+      preps[i].Queries = make([]EncryptedInsertQuery, 0)
     }
 
-    for i := 0; i < NUM_SERVERS; i++ {
-      preps[i].Queries = append(preps[i].Queries, queries[i])
-      preps[i].Uuid = uuid
+    var shouldMerge bool
+    n := readIncomingRequests(&preps, incomingReqs, &shouldMerge)
+    if n == 0 {
+      // Merge is starting, so send marker down pipeline
+      commitReqs <-beginMergeMarkerCommit
     }
 
     log.Printf("Send PREPARE %d", uuid)
@@ -126,8 +175,13 @@ func (t *SlotTable) submitPrepares() {
 
     var commitArgs CommitArgs
     commitArgs.Uuid = uuid
-
     commitReqs <- commitArgs
+
+    // If merge is beginning, send marker down
+    // the pipeline
+    if shouldMerge {
+      commitReqs <-beginMergeMarkerCommit
+    }
   }
 }
 
