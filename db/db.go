@@ -90,7 +90,7 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
     appendOnce(first)
   }
 
-  time.Sleep(1*time.Second)
+  //time.Sleep(1*time.Second)
 
   *shouldMerge = false
   fmt.Printf("Here!")
