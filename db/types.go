@@ -1,14 +1,10 @@
 package db
 
 import (
-//  "math/big"
   "net/rpc"
   "sync"
 
   "henrycg/email/prf"
-  "henrycg/email/utils"
-//  "henrycg/zkp/group"
-//  "henrycg/zkp/schnorr"
 )
 
 // Number of "dimensions" for PIR scheme
@@ -16,8 +12,8 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2//1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 1 << 6
-const TABLE_HEIGHT int = 1 << 6
+const TABLE_WIDTH int = 1 << 8
+const TABLE_HEIGHT int = 1 << 8
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
@@ -75,21 +71,19 @@ type DownloadReply struct {
 */
 
 type PrepareArgs struct {
-  // TODO Dont need to send all stuff
   Uuid int64
-  Query EncryptedInsertQuery
+  Queries []EncryptedInsertQuery
 }
 
 type PrepareReply struct {
   // VOTE: YES/NO
-  Signature utils.EcdsaSignature
+  Okay bool
 }
 
 type CommitArgs struct {
   // COMMIT
   // uuid
   Uuid int64
-  Signatures [NUM_SERVERS]utils.EcdsaSignature
 }
 
 type CommitReply struct {
@@ -109,7 +103,7 @@ type SlotTable struct {
   ServerIdx int
   State DbState
 
-  pending map[int64]InsertQuery
+  pending map[int64]([]*InsertQuery)
   pendingMutex sync.Mutex
 
   entries *BitMatrix

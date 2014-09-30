@@ -10,7 +10,6 @@ import (
   "net/rpc"
   "time"
 
-  "henrycg/email/prf"
   "henrycg/email/utils"
   "henrycg/zkp/group"
 )
@@ -67,6 +66,16 @@ func (t *SlotTable) Upload(args *UploadArgs, reply *UploadReply) error {
 
 func (t *SlotTable) submitPrepares() {
   for {
+    uuid, err := utils.RandomInt64(math.MaxInt64)
+    if err != nil {
+      log.Printf("error in random")
+      continue
+    }
+
+    var preps [NUM_SERVERS]PrepareArgs
+
+    // Each element of incomingReqs has an array
+    // of queries -- one for each server
     queries := <-incomingReqs
 
     // If we're starting to merge, then the marker down
@@ -76,10 +85,9 @@ func (t *SlotTable) submitPrepares() {
       continue
     }
 
-    uuid, err := utils.RandomInt64(math.MaxInt64)
-    if err != nil {
-      log.Printf("error in random")
-      continue
+    for i := 0; i < NUM_SERVERS; i++ {
+      preps[i].Queries = append(preps[i].Queries, queries[i])
+      preps[i].Uuid = uuid
     }
 
     log.Printf("Send PREPARE %d", uuid)
@@ -88,9 +96,6 @@ func (t *SlotTable) submitPrepares() {
     c := make(chan error, NUM_SERVERS)
     var replies [NUM_SERVERS]PrepareReply
     for i:=0; i<NUM_SERVERS; i++ {
-      var prep PrepareArgs
-      prep.Uuid = uuid
-      prep.Query = queries[i]
       go func(prep *PrepareArgs, reply *PrepareReply, i int, c chan error) {
         err := t.rpcClients[i].Call("SlotTable.Prepare", prep, reply)
         if err != nil {
@@ -98,7 +103,7 @@ func (t *SlotTable) submitPrepares() {
         } else {
           c <- nil
         }
-      }(&prep, &replies[i], i, c)
+      }(&preps[i], &replies[i], i, c)
     }
 
     // Wait for responses
@@ -110,13 +115,17 @@ func (t *SlotTable) submitPrepares() {
       }
     }
 
+    for i:=0; i<NUM_SERVERS; i++ {
+      if !replies[i].Okay {
+        log.Printf("Aborting commit")
+        continue
+      }
+    }
+
     log.Printf("Done PREPARE %d", uuid)
 
     var commitArgs CommitArgs
     commitArgs.Uuid = uuid
-    for i:=0; i<NUM_SERVERS; i++ {
-      commitArgs.Signatures[i] = replies[i].Signature
-    }
 
     commitReqs <- commitArgs
   }
@@ -214,6 +223,7 @@ func (t *SlotTable) sendMergeRequest() {
   }
 
   log.Printf("Done MERGE")
+  MemCleanup()
 }
 
 func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
@@ -245,28 +255,29 @@ func (t *SlotTable) beginMerge() {
  * Handle Updates
  */
 
-
-
 func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   // XXX check if good
   okay := true
-  query, err := DecryptQuery(t.ServerIdx, prep.Query)
-  if err == nil {
-    okay = ValidateUpload(t.ServerIdx, query)
-  } else {
-    log.Printf("Error in decryption: ", err)
-    okay = false
+
+  var err error
+  plainQueries := make([]*InsertQuery, len(prep.Queries))
+  for i := 0; i < len(prep.Queries); i++ {
+    plainQueries[i], err = DecryptQuery(t.ServerIdx, prep.Queries[i])
+    if err == nil {
+      okay = ValidateUpload(t.ServerIdx, plainQueries[i])
+    } else {
+      log.Printf("Error in decryption: ", err)
+      okay = false
+    }
   }
 
-  if okay {
-    //reply.Signature = t.signCommits(prep.Uuid, query)
-  }
+  reply.Okay = okay
 
   t.pendingMutex.Lock()
   if t.pending == nil {
-    t.pending = map[int64]InsertQuery{}
+    t.pending = map[int64]([]*InsertQuery){}
   }
-  t.pending[prep.Uuid] = *query
+  t.pending[prep.Uuid] = plainQueries
   t.pendingMutex.Unlock()
 
   return nil
@@ -285,14 +296,8 @@ func (t *SlotTable) Commit(com *CommitArgs, reply *CommitReply) error {
   delete(t.pending, com.Uuid)
   t.pendingMutex.Unlock()
 
-  // If we don't need to commit the entry
-  okay := validateSignatures(&val, com)
-  if !okay {
-    return nil
-  }
-
   // Update the database with the query
-  t.processQuery(&val)
+  t.processQuery(val)
 
   return nil
 }
@@ -303,13 +308,15 @@ func (t *SlotTable) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) er
   t.plainMutex.Unlock()
 
   t.entriesMutex.Lock()
-  t.entries = new(BitMatrix)
+  clearBitMatrix(t.entries)
   t.entriesMutex.Unlock()
 
   t.State = State_AcceptUpload
 
+  MemCleanup()
   return nil
 }
+
 
 func (t *SlotTable) DumpTable(_ *int, reply *DumpReply) error {
   log.Printf("Dumping table %d\n", t.ServerIdx)
@@ -323,40 +330,6 @@ func (t *SlotTable) DumpPlaintext(_ *int, reply *DumpReply) error {
   t.plainMutex.Lock()
   reply.Entries = t.plain
   t.plainMutex.Unlock()
-  return nil
-}
-
-/************
- * Actual DB manipulation
- */
-
-func (t *SlotTable) processQuery(query *InsertQuery) error {
-  log.Printf("Processing query %d", t.ServerIdx)
-  t.entriesMutex.Lock()
-  for i := 0; i < TABLE_HEIGHT; i++ {
-    // For each row, use key to generate PRF output for that row
-    p, err := prf.NewPrf(query.Keys[i])
-    if err != nil {
-      return err
-    }
-
-    rowBit := query.KeyMask[i]
-
-    var j uint64
-    for j = 0; j < uint64(TABLE_WIDTH); j++ {
-      prfOutput := EvaluatePrf(p, j)
-      t.entries[i][j] = AddSlots(t.entries[i][j], prfOutput)
-
-      // If row bitmask is set, then XOR in the message mask too
-      if rowBit {
-        t.entries[i][j] = AddSlots(t.entries[i][j], query.MessageMask[j])
-      }
-    }
-  }
-
-  t.entriesMutex.Unlock()
-  log.Printf("Done processing query %d", t.ServerIdx)
-  t.debugTable()
   return nil
 }
 
@@ -415,6 +388,18 @@ func (t *SlotTable) Initialize(*int, *int) error {
   return nil
 }
 
+func clearBitMatrix(data *BitMatrix) {
+  for i := 0; i<TABLE_HEIGHT; i++ {
+    for j := 0; j<TABLE_WIDTH; j++ {
+      for k := 0; k<SLOT_LENGTH; k++ {
+        for l := 0; l<len(data[i][j].Message[k]); l++ {
+          data[i][j].Message[k][l] = 0
+        }
+      }
+    }
+  }
+}
+
 func (t *SlotTable) debugTable() {
   /*
   f := func(data [TABLE_HEIGHT][TABLE_WIDTH]SlotContents) {
@@ -439,17 +424,6 @@ func (t *SlotTable) debugTable() {
   return
 }
 
-/* XXX removing ZKPs for now
-func serializeCommits(uuid int64, query *InsertQuery) []byte {
-  var buf bytes.Buffer
-  elementsToBytes(query.XCommits[:])
-  elementsToBytes(query.XpCommits[:])
-  elementsToBytes(query.YCommits[:])
-  elementsToBytes(query.YpCommits[:])
-  return buf.Bytes()
-}
-*/
-
 func elementsToBytes(elms []group.Element) []byte {
   var buf bytes.Buffer
   for i:=0; i<len(elms); i++ {
@@ -457,30 +431,6 @@ func elementsToBytes(elms []group.Element) []byte {
   }
 
   return buf.Bytes()
-}
-
-/* XXX removing ZKPs for now
-func (t *SlotTable) signCommits(uuid int64, query *InsertQuery) utils.EcdsaSignature {
-  msg := serializeCommits(uuid, query)
-  return utils.EcdsaSign(t.ServerIdx, msg)
-}
-*/
-
-func validateSignatures(query *InsertQuery, com *CommitArgs) bool {
-  return true
-  /* XXX removing ZKPs for now
-  msg := serializeCommits(com.Uuid, query)
-  okay := true
-  for i := 0; i<NUM_SERVERS; i++ {
-    if !utils.EcdsaVerify(i, msg, com.Signatures[i]) {
-      log.Printf("Got invalid sig from server %v", i)
-      okay = false
-    } else {
-      log.Printf("Got good sig from server %v", i)
-    }
-  }
-  return okay
-  */
 }
 
 /*
@@ -518,3 +468,4 @@ func NewSlotTable(serverIdx int) *SlotTable {
 func init() {
   beginMergeMarkerCommit.Uuid = 0
 }
+
