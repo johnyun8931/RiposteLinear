@@ -103,6 +103,8 @@ type SlotTable struct {
   ServerIdx int
   State DbState
 
+  ClientsServed int
+
   pending map[int64]([]*InsertQuery)
   pendingMutex sync.Mutex
 

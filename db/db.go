@@ -362,6 +362,7 @@ func (t *SlotTable) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) er
   t.plainMutex.Unlock()
 
   t.entriesMutex.Lock()
+  t.ClientsServed = 0
   clearBitMatrix(t.entries)
   t.entriesMutex.Unlock()
 
@@ -514,6 +515,7 @@ func NewSlotTable(serverIdx int) *SlotTable {
   t.entries = new(BitMatrix)
   t.plain = new(BitMatrix)
   t.ServerIdx = serverIdx
+  t.ClientsServed = 0
   t.State = State_AcceptUpload
 
   return t

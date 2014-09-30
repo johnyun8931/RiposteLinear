@@ -60,6 +60,8 @@ func (t *SlotTable) processQuery(queries []*InsertQuery) error {
     }
   }
 
+  t.ClientsServed += len(queries)
+  log.Printf("Clients served: %d", t.ClientsServed)
   t.entriesMutex.Unlock()
   log.Printf("Done processing query %d", t.ServerIdx)
   t.debugTable()
