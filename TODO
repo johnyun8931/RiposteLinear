@@ -1,13 +1,10 @@
 TODO
-- Switch to curve25519
-- Have servers send signature on commits back to the leader
-  to ensure that the client send the same stuff to each server
-- Use signatures to prevent the leader from selectively dropping
-  messages in such a way that it can trick other servers into 
-  revealing information to it
-- Accountability: protocol to identify a bad user/server
-- Allow for colluding servers
-- Pass the big structs with pointers
+- Implement ZKP (+ commit signing) with the CPIR version
+- Make better use of AES: generate entire table row in a stream
+  to reduce key changes
+- Use signatures to give a "receipt" to the client
+
 
 PERFORMANCE
-- Batch exponentiation and verification
+- Batch exponentiation and verification (??)
+- Switch to curve25519
