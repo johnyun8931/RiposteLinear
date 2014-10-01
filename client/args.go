@@ -85,9 +85,8 @@ func computeMessageMask(msgMask []db.SlotContents,
 
   var i uint64
   for i = 0; i < uint64(db.TABLE_WIDTH); i++ {
-    msgA := db.EvaluatePrf(prfA, i)
-    msgB := db.EvaluatePrf(prfB, i)
-    msgMask[i] = db.AddSlots(msgA, msgB)
+    prfA.Evaluate(i, msgMask[i].Message[:])
+    prfB.Evaluate(i, msgMask[i].Message[:])
   }
 
   msgMask[xIdx] = db.AddSlots(msgMask[xIdx], msg)

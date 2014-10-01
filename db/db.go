@@ -447,9 +447,7 @@ func clearBitMatrix(data *BitMatrix) {
   for i := 0; i<TABLE_HEIGHT; i++ {
     for j := 0; j<TABLE_WIDTH; j++ {
       for k := 0; k<SLOT_LENGTH; k++ {
-        for l := 0; l<len(data[i][j].Message[k]); l++ {
-          data[i][j].Message[k][l] = 0
-        }
+        data[i][j].Message[k] = 0
       }
     }
   }

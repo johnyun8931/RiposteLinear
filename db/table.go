@@ -29,8 +29,7 @@ func (t *SlotTable) processRow(row_idx int, queries []*InsertQuery, done chan er
   var i uint64
   for i = 0; i < uint64(TABLE_WIDTH); i++ {
     for j := 0; j < len(queries); j++ {
-      prfOutput := EvaluatePrf(prfs[j], i)
-      t.entries[row_idx][i] = AddSlots(t.entries[row_idx][i], prfOutput)
+      prfs[j].Evaluate(i, t.entries[row_idx][i].Message[:])
 
       // If row bitmask is set, then XOR in the message mask too
       if rowBits[j] {

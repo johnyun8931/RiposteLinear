@@ -2,10 +2,11 @@
 package prf
 
 import (
+  "encoding/binary"
+
   "crypto/aes"
   "crypto/cipher"
   "crypto/rand"
-  "encoding/binary"
   "errors"
 )
 
@@ -13,8 +14,6 @@ import (
 const KEY_LENGTH = 32
 
 type Key [KEY_LENGTH]byte
-
-type Block [aes.BlockSize]byte
 
 type Prf struct {
   block cipher.Block
@@ -30,24 +29,23 @@ func NewKey() (Key, error) {
 }
 
 func NewPrf(k Key) (Prf, error) {
-  p := new(Prf)
+  var p Prf
   var err error
   p.block, err = aes.NewCipher(k[:])
-  return *p, err
+  return p, err
 }
 
-func (p *Prf) Evaluate(i uint64, j uint64) Block {
-  //Encode val into 16-byte buffer
-  plaintext := make([]byte, aes.BlockSize)
-  binary.PutUvarint(plaintext, i)
-  binary.PutUvarint(plaintext[8:], j)
+func (p *Prf) Evaluate(block_idx uint64, to_encrypt []byte) {
+  // IV is all zeros (we will never use
+  // this key again)
+  iv := make([]byte, aes.BlockSize)
 
-  // Evaluate AES using ECB mode on the integer
-  ciphertext := make([]byte, len(plaintext))
-  p.block.Encrypt(ciphertext[:], plaintext[:])
+  // We are making the [unsafe] assumption that all blocks
+  // are the same length.
+  iv_integer := block_idx * uint64(len(to_encrypt))
+  binary.PutUvarint(iv, iv_integer)
 
-  out := new(Block)
-  copy(out[:], ciphertext[:])
-  return *out
+  stream := cipher.NewCTR(p.block, iv)
+  stream.XORKeyStream(to_encrypt, to_encrypt)
 }
 

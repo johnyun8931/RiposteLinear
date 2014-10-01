@@ -13,13 +13,13 @@ const NUM_SERVERS = 2//1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
 const TABLE_WIDTH int = 1 << 8
-const TABLE_HEIGHT int = 1 << 8
+const TABLE_HEIGHT int = 1 << 9
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
 
-// Length of plaintext messages (in multiples of PRF block size)
-const SLOT_LENGTH int = 16
+// Length of plaintext messages (in bytes)
+const SLOT_LENGTH int = 256// 64 KB
 
 type BitMatrix [TABLE_HEIGHT][TABLE_WIDTH]SlotContents
 
@@ -32,7 +32,7 @@ const (
 )
 
 type SlotContents struct {
-  Message [SLOT_LENGTH]prf.Block
+  Message [SLOT_LENGTH]byte
 }
 
 type EncryptedInsertQuery struct {
