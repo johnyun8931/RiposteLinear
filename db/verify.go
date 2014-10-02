@@ -5,10 +5,10 @@ import (
 
 //  "henrycg/zkp/group"
 //  "henrycg/zkp/schnorr"
-  "henrycg/email/utils"
+//  "henrycg/email/utils"
 )
 
-var curve = utils.CommonCurve
+//var curve = utils.CommonCurve
 
 func ValidateUpload(serverIdx int, query *InsertQuery) bool {
   // Server 0: X,  Y

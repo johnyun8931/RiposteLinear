@@ -1,9 +1,7 @@
-package main
+package db
 
 import (
   "testing"
-
-  "henrycg/email/db"
 )
 
 func TestArgsZero(t *testing.T) {
@@ -15,23 +13,23 @@ func TestArgsNonzero(t *testing.T) {
 }
 
 func testOnce(t *testing.T, xIdx, yIdx int) {
-  var args db.UploadArgs
-  var msg db.SlotContents
-  msg.Message = [2]byte{123, 101}
+  var args UploadArgs
+  var msg SlotContents
+  msg.Message = [SLOT_LENGTH]byte{123, 101}
 
-  err := initializeUploadArgs(&args, xIdx, yIdx, msg)
+  err := InitializeUploadArgs(&args, xIdx, yIdx, msg)
   if err != nil {
     t.Fail()
   }
 
   for serv := 0; serv<len(args.Query); serv++ {
     q := args.Query[serv]
-    qDec, err := db.DecryptQuery(serv, q)
+    qDec, err := DecryptQuery(serv, q)
     if err != nil {
       t.Fail()
     }
 
-    if !db.ValidateUpload(serv, qDec) {
+    if !ValidateUpload(serv, qDec) {
       t.Fail()
     }
   }

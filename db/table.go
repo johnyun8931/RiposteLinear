@@ -1,8 +1,6 @@
 package db
 
 import (
-  "log"
-
   "henrycg/email/prf"
 )
 
@@ -29,11 +27,11 @@ func (t *SlotTable) processRow(row_idx int, queries []*InsertQuery, done chan er
   var i uint64
   for i = 0; i < uint64(TABLE_WIDTH); i++ {
     for j := 0; j < len(queries); j++ {
-      prfs[j].Evaluate(i, t.entries[row_idx][i].Message[:])
+      prfs[j].Evaluate(i, t.table[row_idx][i].Message[:])
 
       // If row bitmask is set, then XOR in the message mask too
       if rowBits[j] {
-        t.entries[row_idx][i] = AddSlots(t.entries[row_idx][i], queries[j].MessageMask[i])
+        t.table[row_idx][i] = AddSlots(t.table[row_idx][i], queries[j].MessageMask[i])
       }
     }
   }
@@ -43,8 +41,7 @@ func (t *SlotTable) processRow(row_idx int, queries []*InsertQuery, done chan er
 }
 
 func (t *SlotTable) processQuery(queries []*InsertQuery) error {
-  log.Printf("Processing query %d [len %v]", t.ServerIdx, len(queries))
-  t.entriesMutex.Lock()
+  t.tableMutex.Lock()
 
   c := make(chan error, TABLE_HEIGHT)
   for i := 0; i < TABLE_HEIGHT; i++ {
@@ -59,12 +56,55 @@ func (t *SlotTable) processQuery(queries []*InsertQuery) error {
     }
   }
 
-  t.ClientsServed += len(queries)
-  log.Printf("Clients served: %d", t.ClientsServed)
-  t.entriesMutex.Unlock()
-  log.Printf("Done processing query %d", t.ServerIdx)
+  t.tableMutex.Unlock()
   t.debugTable()
   return nil
 }
 
+type ForeachFunc func(col int, row int, value *SlotContents)
+
+func (t *SlotTable) ForeachCell(f ForeachFunc) {
+  t.tableMutex.Lock()
+  for i := 0; i<TABLE_HEIGHT; i++ {
+    for j := 0; j<TABLE_WIDTH; j++ {
+      f(i, j, &t.table[i][j])
+    }
+  }
+  t.tableMutex.Unlock()
+}
+
+func (t *SlotTable) Clear() {
+  var empty SlotContents
+  t.ForeachCell(func(_ int, _ int, m *SlotContents) {
+    *m = empty
+  })
+}
+
+func (t *SlotTable) CopyAndClear(dest *BitMatrix) {
+  var empty SlotContents
+  t.ForeachCell(func(i int, j int, m *SlotContents) {
+    dest[i][j] = *m
+    *m = empty
+  })
+}
+
+
+func (t *SlotTable) debugTable() {
+  /*
+  f := func(data [TABLE_HEIGHT][TABLE_WIDTH]SlotContents) {
+    // it in the plaintext table
+    for i := 0; i<TABLE_HEIGHT; i++ {
+      for j := 0; j<TABLE_WIDTH; j++ {
+        fmt.Printf("%v", data[i][j].Message)
+      }
+      fmt.Printf ("\n")
+    }
+  }
+  fmt.Printf("---- Table ----\n")
+  t.tableMutex.Lock()
+  f(*t.table)
+  t.tableMutex.Unlock()
+  */
+  return
+}
 

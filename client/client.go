@@ -35,7 +35,6 @@ func tryDumpTable(client *rpc.Client) db.DumpReply {
 }
 
 func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
-
   certs := make([]tls.Certificate, 1)
   certs[0] = utils.LeaderCertificate
   client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
@@ -56,14 +55,8 @@ func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
 }
 
 func main() {
-  var err error
-  var xIdx, yIdx int
-  var msg db.SlotContents
+  xIdx, yIdx, msg, err := db.RandomMessage()
 
-  xIdx, err = utils.RandomInt(db.TABLE_WIDTH)
-  yIdx, err = utils.RandomInt(db.TABLE_HEIGHT)
-
-  msg, err = db.RandomSlot()
   if err != nil {
     log.Fatal("error: ", err)
     return
@@ -73,7 +66,7 @@ func main() {
   log.Printf("Plaintext [%v]", msg.Message)
 
   var args db.UploadArgs
-  err = initializeUploadArgs(&args, xIdx, yIdx, msg)
+  err = db.InitializeUploadArgs(&args, xIdx, yIdx, msg)
   if err != nil {
     log.Fatal("error: ", err)
     return

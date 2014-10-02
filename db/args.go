@@ -1,11 +1,10 @@
-package main
+package db
 
 import (
   "log"
 //  "fmt"
 //  "math/big"
 
-  "henrycg/email/db"
   "henrycg/email/prf"
   "henrycg/email/utils"
 //  "henrycg/zkp/schnorr"
@@ -13,17 +12,18 @@ import (
 
 var curve = utils.CommonCurve
 
-func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
-    msg db.SlotContents) error {
+
+func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
+    msg SlotContents) error {
 
   // Create random values for secret sharing
-  var keys [db.TABLE_HEIGHT]prf.Key
-  var keysP [db.TABLE_HEIGHT]prf.Key
+  var keys [TABLE_HEIGHT]prf.Key
+  var keysP [TABLE_HEIGHT]prf.Key
 
-  var keyMask [db.TABLE_HEIGHT]bool
-  var keyMaskP [db.TABLE_HEIGHT]bool
+  var keyMask [TABLE_HEIGHT]bool
+  var keyMaskP [TABLE_HEIGHT]bool
 
-  var msgMask [db.TABLE_WIDTH]db.SlotContents
+  var msgMask [TABLE_WIDTH]SlotContents
 
   randomVectorKeys(keys[:])
   utils.RandomVector(keyMask[:])
@@ -40,15 +40,15 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   }
 
   /*
-  for i := 0; i<db.TABLE_HEIGHT; i++ {
+  for i := 0; i<TABLE_HEIGHT; i++ {
     fmt.Printf("%v\n\t%v\n\t%v\n\t%v\n\t%v\n", i, keyMask[i], keyMaskP[i], keys[i], keysP[i])
   }
   */
 
   computeMessageMask(msgMask[:], keys[yIdx], keysP[yIdx], msg, xIdx)
 
-  for i := 0; i < db.NUM_SERVERS; i++ {
-    var plainQuery db.InsertQuery
+  for i := 0; i < NUM_SERVERS; i++ {
+    var plainQuery InsertQuery
 
     plainQuery.MessageMask = msgMask
     plainQuery.Keys = keys
@@ -60,7 +60,7 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
     }
 
     var err error
-    args.Query[i], err = db.EncryptQuery(i, plainQuery)
+    args.Query[i], err = EncryptQuery(i, plainQuery)
     if err != nil {
       log.Fatal("Could not encrypt: ", err)
     }
@@ -69,9 +69,9 @@ func initializeUploadArgs(args *db.UploadArgs, xIdx int, yIdx int,
   return nil
 }
 
-func computeMessageMask(msgMask []db.SlotContents,
+func computeMessageMask(msgMask []SlotContents,
     key prf.Key, keyP prf.Key,
-    msg db.SlotContents, xIdx int) error {
+    msg SlotContents, xIdx int) error {
 
   prfA, err := prf.NewPrf(key)
   if err != nil {
@@ -84,12 +84,12 @@ func computeMessageMask(msgMask []db.SlotContents,
   }
 
   var i uint64
-  for i = 0; i < uint64(db.TABLE_WIDTH); i++ {
+  for i = 0; i < uint64(TABLE_WIDTH); i++ {
     prfA.Evaluate(i, msgMask[i].Message[:])
     prfB.Evaluate(i, msgMask[i].Message[:])
   }
 
-  msgMask[xIdx] = db.AddSlots(msgMask[xIdx], msg)
+  msgMask[xIdx] = AddSlots(msgMask[xIdx], msg)
 
   return nil
 }
@@ -112,5 +112,23 @@ func boolToInt(b bool) int64 {
   } else {
     return 0
   }
+}
+
+func RandomMessage() (int, int, SlotContents, error) {
+  var err error
+  var xIdx, yIdx int
+  var msg SlotContents
+
+  xIdx, err = utils.RandomInt(TABLE_WIDTH)
+  if err != nil {
+    return 0, 0, msg, err
+  }
+  yIdx, err = utils.RandomInt(TABLE_HEIGHT)
+  if err != nil {
+    return 0, 0, msg, err
+  }
+
+  msg, err = RandomSlot()
+  return xIdx, yIdx, msg, err
 }
 

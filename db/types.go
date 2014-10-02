@@ -18,10 +18,18 @@ const TABLE_HEIGHT int = 1 << 9
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
 
+// XXX TODO Much more efficient when SLOT_LENGTH
+// is large!! 
+
 // Length of plaintext messages (in bytes)
 const SLOT_LENGTH int = 256// 64 KB
 
 type BitMatrix [TABLE_HEIGHT][TABLE_WIDTH]SlotContents
+
+type SlotTable struct {
+  table BitMatrix
+  tableMutex sync.Mutex
+}
 
 type DbState int
 const (
@@ -99,7 +107,7 @@ type PlaintextReply struct {
   // Nothing
 }
 
-type SlotTable struct {
+type Server struct {
   ServerIdx int
   State DbState
 
@@ -108,13 +116,11 @@ type SlotTable struct {
   pending map[int64]([]*InsertQuery)
   pendingMutex sync.Mutex
 
-  entries *BitMatrix
-  entriesMutex sync.Mutex
+  entries *SlotTable
 
   plain *BitMatrix
   plainMutex sync.Mutex
 
   rpcClients [NUM_SERVERS]*rpc.Client
 }
-
 

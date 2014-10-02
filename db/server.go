@@ -25,7 +25,7 @@ var (
   beginMergeMarkerCommit CommitArgs
 )
 
-func (t *SlotTable) isLeader() bool {
+func (t *Server) isLeader() bool {
   return (t.ServerIdx == 0)
 }
 
@@ -47,7 +47,7 @@ func (t *SlotTable) isLeader() bool {
  * Leader code
  */
 
-func (t *SlotTable) Upload(args *UploadArgs, reply *UploadReply) error {
+func (t *Server) Upload(args *UploadArgs, reply *UploadReply) error {
   if !t.isLeader() {
     return errors.New("Only leader can accept uploads")
   }
@@ -118,7 +118,7 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
   return n
 }
 
-func (t *SlotTable) submitPrepares() {
+func (t *Server) submitPrepares() {
   for {
     uuid, err := utils.RandomInt64(math.MaxInt64)
     if err != nil {
@@ -146,7 +146,7 @@ func (t *SlotTable) submitPrepares() {
     var replies [NUM_SERVERS]PrepareReply
     for i:=0; i<NUM_SERVERS; i++ {
       go func(prep *PrepareArgs, reply *PrepareReply, i int, c chan error) {
-        err := t.rpcClients[i].Call("SlotTable.Prepare", prep, reply)
+        err := t.rpcClients[i].Call("Server.Prepare", prep, reply)
         if err != nil {
           c <- err
         } else {
@@ -185,7 +185,7 @@ func (t *SlotTable) submitPrepares() {
   }
 }
 
-func (t *SlotTable) submitCommits() {
+func (t *Server) submitCommits() {
   for {
     com := <-commitReqs
     if com.Uuid == beginMergeMarkerCommit.Uuid {
@@ -198,7 +198,7 @@ func (t *SlotTable) submitCommits() {
     var replies [NUM_SERVERS]CommitReply
     for i:=0; i<NUM_SERVERS; i++ {
       go func(com *CommitArgs, reply *CommitReply, i int, c chan error) {
-        err := t.rpcClients[i].Call("SlotTable.Commit", com, reply)
+        err := t.rpcClients[i].Call("Server.Commit", com, reply)
         if err != nil {
           c <- err
         } else {
@@ -220,21 +220,21 @@ func (t *SlotTable) submitCommits() {
   }
 }
 
-func (t *SlotTable) mergeWorker() {
+func (t *Server) mergeWorker() {
   for {
     time.Sleep(MERGE_TIME_DELAY*time.Second)
     t.sendMergeRequest()
   }
 }
 
-func (t *SlotTable) sendMergeRequest() {
+func (t *Server) sendMergeRequest() {
   // Call each server and ask for their data
   // Send out COMMIT request
   c := make(chan error, NUM_SERVERS)
   var replies [NUM_SERVERS]DumpReply
   for i:=0; i<NUM_SERVERS; i++ {
     go func(reply *DumpReply, i int, c chan error) {
-      err := t.rpcClients[i].Call("SlotTable.DumpTable", 0, reply)
+      err := t.rpcClients[i].Call("Server.DumpTable", 0, reply)
       if err != nil {
         c <- err
       } else {
@@ -259,7 +259,7 @@ func (t *SlotTable) sendMergeRequest() {
   for i:=0; i<NUM_SERVERS; i++ {
     go func(i int, c chan error) {
       var p_reply PlaintextReply
-      err := t.rpcClients[i].Call("SlotTable.StorePlaintext", &parg, &p_reply)
+      err := t.rpcClients[i].Call("Server.StorePlaintext", &parg, &p_reply)
       if err != nil {
         c <- err
       } else {
@@ -296,7 +296,7 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
   return b
 }
 
-func (t *SlotTable) beginMerge() {
+func (t *Server) beginMerge() {
   // Stop accepting uploads
   t.State = State_PrepareForMerge
 
@@ -309,7 +309,7 @@ func (t *SlotTable) beginMerge() {
  * Handle Updates
  */
 
-func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
+func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   // XXX check if good
   okay := true
 
@@ -337,7 +337,7 @@ func (t *SlotTable) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   return nil
 }
 
-func (t *SlotTable) Commit(com *CommitArgs, reply *CommitReply) error {
+func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
   t.pendingMutex.Lock()
   val, ok := t.pending[com.Uuid]
 
@@ -351,20 +351,18 @@ func (t *SlotTable) Commit(com *CommitArgs, reply *CommitReply) error {
   t.pendingMutex.Unlock()
 
   // Update the database with the query
-  t.processQuery(val)
+  log.Printf("Processing query %d [len %v]", t.ServerIdx, len(val))
+  t.entries.processQuery(val)
+  log.Printf("Done processing query %d [len %v]", t.ServerIdx, len(val))
 
   return nil
 }
 
-func (t *SlotTable) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) error {
+func (t *Server) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) error {
   t.plainMutex.Lock()
-  t.plain = com.Plaintext
-  t.plainMutex.Unlock()
-
-  t.entriesMutex.Lock()
   t.ClientsServed = 0
-  clearBitMatrix(t.entries)
-  t.entriesMutex.Unlock()
+  t.entries.CopyAndClear(t.plain)
+  t.plainMutex.Unlock()
 
   t.State = State_AcceptUpload
 
@@ -373,7 +371,8 @@ func (t *SlotTable) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) er
 }
 
 
-func (t *SlotTable) DumpTable(_ *int, reply *DumpReply) error {
+/*
+func (t *Server) DumpTable(_ *int, reply *DumpReply) error {
   log.Printf("Dumping table %d\n", t.ServerIdx)
   t.entriesMutex.Lock()
   reply.Entries = t.entries
@@ -381,19 +380,20 @@ func (t *SlotTable) DumpTable(_ *int, reply *DumpReply) error {
   return nil
 }
 
-func (t *SlotTable) DumpPlaintext(_ *int, reply *DumpReply) error {
+func (t *Server) DumpPlaintext(_ *int, reply *DumpReply) error {
   t.plainMutex.Lock()
   reply.Entries = t.plain
   t.plainMutex.Unlock()
   return nil
 }
+*/
 
 
 /***********
  * Initialization
  */
 
-func (t *SlotTable) connectToServer(client **rpc.Client, serverAddr string, remoteIdx int, c chan int) {
+func (t *Server) connectToServer(client **rpc.Client, serverAddr string, remoteIdx int, c chan int) {
   var err error
   certs := []tls.Certificate{utils.ServerCertificates[remoteIdx]}
   *client, err = utils.DialHTTPWithTLS("tcp", serverAddr, t.ServerIdx, certs)
@@ -405,7 +405,7 @@ func (t *SlotTable) connectToServer(client **rpc.Client, serverAddr string, remo
   }
 }
 
-func (t *SlotTable) openConnections() error {
+func (t *Server) openConnections() error {
   if !t.isLeader() {
     return errors.New("Only leader should open connections")
   }
@@ -426,12 +426,12 @@ func (t *SlotTable) openConnections() error {
   return nil
 }
 
-func (t *SlotTable) Initialize(*int, *int) error {
+func (t *Server) Initialize(*int, *int) error {
   if (t.isLeader()) {
     go t.submitPrepares()
     go t.submitCommits()
     go t.mergeWorker()
-    go func(t *SlotTable) {
+    go func(t *Server) {
       // HACK wait until other servers have started
       time.Sleep(500*time.Millisecond)
       err := t.openConnections()
@@ -441,40 +441,6 @@ func (t *SlotTable) Initialize(*int, *int) error {
     }(t)
   }
   return nil
-}
-
-func clearBitMatrix(data *BitMatrix) {
-  for i := 0; i<TABLE_HEIGHT; i++ {
-    for j := 0; j<TABLE_WIDTH; j++ {
-      for k := 0; k<SLOT_LENGTH; k++ {
-        data[i][j].Message[k] = 0
-      }
-    }
-  }
-}
-
-func (t *SlotTable) debugTable() {
-  /*
-  f := func(data [TABLE_HEIGHT][TABLE_WIDTH]SlotContents) {
-    // it in the plaintext table
-    for i := 0; i<TABLE_HEIGHT; i++ {
-      for j := 0; j<TABLE_WIDTH; j++ {
-        fmt.Printf("%v", data[i][j].Message)
-      }
-      fmt.Printf ("\n")
-    }
-  }
-  fmt.Printf("---- Table ----\n")
-  t.entriesMutex.Lock()
-  f(*t.entries)
-  t.entriesMutex.Unlock()
-  fmt.Printf("---- Plain ----\n")
-  t.plainMutex.Lock()
-  f(*t.plain)
-  t.plainMutex.Unlock()
-  fmt.Printf("---------------\n")
-  */
-  return
 }
 
 func elementsToBytes(elms []group.Element) []byte {
@@ -487,7 +453,7 @@ func elementsToBytes(elms []group.Element) []byte {
 }
 
 /*
-func (t *SlotTable) Download(args *DownloadArgs, reply *DownloadReply) error {
+func (t *Server) Download(args *DownloadArgs, reply *DownloadReply) error {
   log.Printf("Got download request")
   log.Printf("Request:", args)
 
@@ -508,9 +474,9 @@ func (t *SlotTable) Download(args *DownloadArgs, reply *DownloadReply) error {
 }
 */
 
-func NewSlotTable(serverIdx int) *SlotTable {
-  t := new(SlotTable)
-  t.entries = new(BitMatrix)
+func NewServer(serverIdx int) *Server {
+  t := new(Server)
+  t.entries = new(SlotTable)
   t.plain = new(BitMatrix)
   t.ServerIdx = serverIdx
   t.ClientsServed = 0
