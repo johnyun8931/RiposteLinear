@@ -65,3 +65,34 @@ func TestEndToEnd(t *testing.T) {
   }
 }
 
+func BenchmarkTable(b *testing.B) {
+  xIdx, yIdx, msg, err := RandomMessage()
+  if err != nil {
+    b.FailNow()
+  }
+
+  var args UploadArgs
+  err = InitializeUploadArgs(&args, xIdx, yIdx, msg)
+  if err != nil {
+    b.FailNow()
+  }
+
+  // Decrypt query
+  var query *InsertQuery
+  query, err = DecryptQuery(0, args.Query[0])
+  if err != nil {
+    b.FailNow()
+  }
+
+  // Add to table
+  queries := make([]*InsertQuery, b.N)
+  for i := 0; i < b.N; i++ {
+    queries[i] = query
+  }
+
+  // Args has encrypted insert queries
+  slotTable := new(SlotTable)
+  b.ResetTimer()
+  slotTable.processQuery(queries)
+}
+
