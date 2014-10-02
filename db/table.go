@@ -1,6 +1,8 @@
 package db
 
 import (
+//  "log"
+
   "henrycg/email/prf"
 )
 
@@ -11,32 +13,25 @@ import (
 func (t *SlotTable) processRow(row_idx int, queries []*InsertQuery, done chan error) {
 //  log.Printf("Processing row %v", row_idx)
   nQueries := len(queries)
-  prfs := make([]prf.Prf, nQueries)
-  rowBits := make([]bool, nQueries)
-
-  for i := 0; i < nQueries; i++ {
+  for q := 0; q < nQueries; q++ {
     // For each row, use key to generate PRF output for that row
     var err error
-    prfs[i], err = prf.NewPrf(queries[i].Keys[row_idx])
+    var row_prf prf.Prf
+    row_prf, err = prf.NewPrf(queries[q].Keys[row_idx])
     if err != nil {
       done <-err
     }
-    rowBits[i] = queries[i].KeyMask[row_idx]
-  }
 
-  var i uint64
-  for i = 0; i < uint64(TABLE_WIDTH); i++ {
-    for j := 0; j < len(queries); j++ {
-      prfs[j].Evaluate(i, t.table[row_idx][i].Message[:])
+    rowBit := queries[q].KeyMask[row_idx]
+    row_prf.Evaluate(t.table[row_idx][:])
 
-      // If row bitmask is set, then XOR in the message mask too
-      if rowBits[j] {
-        t.table[row_idx][i] = AddSlots(t.table[row_idx][i], queries[j].MessageMask[i])
-      }
+    // If row bitmask is set, then XOR in the message mask too
+    if rowBit {
+      XorRows(&t.table[row_idx], &queries[q].MessageMask)
     }
   }
 
- // log.Printf("Processing row %v -- done", row_idx)
+  //log.Printf("Processing row %v -- done", row_idx)
   done<-nil
 }
 
@@ -61,49 +56,41 @@ func (t *SlotTable) processQuery(queries []*InsertQuery) error {
   return nil
 }
 
-type ForeachFunc func(col int, row int, value *SlotContents)
+type ForeachFunc func(row int, value *BitMatrixRow)
 
-func (t *SlotTable) ForeachCell(f ForeachFunc) {
+func (t *SlotTable) ForeachRow(f ForeachFunc) {
   t.tableMutex.Lock()
   for i := 0; i<TABLE_HEIGHT; i++ {
-    for j := 0; j<TABLE_WIDTH; j++ {
-      f(i, j, &t.table[i][j])
-    }
+    f(i, &t.table[i])
   }
   t.tableMutex.Unlock()
 }
 
 func (t *SlotTable) Clear() {
-  var empty SlotContents
-  t.ForeachCell(func(_ int, _ int, m *SlotContents) {
-    *m = empty
+  var empty BitMatrixRow
+  t.ForeachRow(func(_ int, row *BitMatrixRow) {
+    *row = empty
   })
 }
 
 func (t *SlotTable) CopyAndClear(dest *BitMatrix) {
-  var empty SlotContents
-  t.ForeachCell(func(i int, j int, m *SlotContents) {
-    dest[i][j] = *m
-    *m = empty
+  var empty BitMatrixRow
+  t.ForeachRow(func(idx int, row *BitMatrixRow) {
+    dest[idx] = *row
+    *row = empty
   })
 }
 
 
 func (t *SlotTable) debugTable() {
   /*
-  f := func(data [TABLE_HEIGHT][TABLE_WIDTH]SlotContents) {
-    // it in the plaintext table
-    for i := 0; i<TABLE_HEIGHT; i++ {
-      for j := 0; j<TABLE_WIDTH; j++ {
-        fmt.Printf("%v", data[i][j].Message)
-      }
-      fmt.Printf ("\n")
-    }
-  }
   fmt.Printf("---- Table ----\n")
-  t.tableMutex.Lock()
-  f(*t.table)
-  t.tableMutex.Unlock()
+  t.ForeachRow(func(idx int, row *BitMatrixRow) {
+    for i := 0; i<len(row); i++ {
+      fmt.Printf("%v ", row[i])
+    }
+    fmt.Printf ("\n")
+  })
   */
   return
 }

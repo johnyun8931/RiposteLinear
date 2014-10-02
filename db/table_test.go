@@ -1,24 +1,25 @@
 package db
 
 import (
+//  "fmt"
   "testing"
 )
 
 func TestSimple(t *testing.T) {
   tab := new(SlotTable)
-  tab.ForeachCell(func(_, _ int, value *SlotContents) {
-    for i := 0; i<len(value.Message); i++ {
-      value.Message[i] = 2
+  tab.ForeachRow(func(_ int, value *BitMatrixRow) {
+    for i := 0; i<len(value); i++ {
+      value[i] = 2
     }
   })
 
-  if tab.table[0][0].Message[0] != 2 {
+  if tab.table[0][0] != 2 {
     t.Fail()
   }
 
   tab.Clear()
 
-  if tab.table[0][0].Message[0] != 0 {
+  if tab.table[0][0] != 0 {
     t.Fail()
   }
 }
@@ -34,6 +35,8 @@ func TestEndToEnd(t *testing.T) {
   if err != nil {
     t.FailNow()
   }
+  //fmt.Printf("(x,y) = (%v, %v)\n", xIdx, yIdx)
+  //fmt.Printf("msg = (%v)\n", msg)
 
   // Args has encrypted insert queries
   slotTables := make([]SlotTable, NUM_SERVERS)
@@ -59,9 +62,17 @@ func TestEndToEnd(t *testing.T) {
   }
 
   b := revealCleartext(*replies)
+  for i:=0; i<len(b); i++ {
+    for j:=0; j<len(b[i]); j++ {
+      //fmt.Printf("%v ", b[i][j])
+    }
+    //fmt.Printf("\n")
+  }
 
-  if b[yIdx][xIdx].Message != msg.Message {
-    t.Fail()
+  var out [SLOT_LENGTH]byte
+  copy(out[:], b[yIdx][(SLOT_LENGTH*xIdx):])
+  if out != msg {
+    t.Fatal("Message mismatch", out, msg)
   }
 }
 

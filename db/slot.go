@@ -4,21 +4,22 @@ import (
   "crypto/rand"
 )
 
-func AddSlots(a, b SlotContents) SlotContents {
-  if len(a.Message) != SLOT_LENGTH {
-    panic("Invalid slot")
-  }
-
-  var res SlotContents
-  for i := 0; i < len(a.Message); i++ {
-    res.Message[i] = a.Message[i] ^ b.Message[i]
-  }
+func MessageToRow(msg SlotContents, xIdx int) BitMatrixRow {
+  var res BitMatrixRow
+  start := SLOT_LENGTH * xIdx
+  copy(res[start:], msg[:])
   return res
+}
+
+func XorRows(dest, add *BitMatrixRow) {
+  for i := 0; i < len(add); i++ {
+    dest[i] = dest[i] ^ add[i]
+  }
 }
 
 func RandomSlot() (SlotContents, error) {
   var msg SlotContents
-  _, err := rand.Read(msg.Message[:])
+  _, err := rand.Read(msg[:])
   return msg, err
 }
 

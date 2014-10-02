@@ -24,7 +24,8 @@ const REQ_BUFFER_SIZE int = 48
 // Length of plaintext messages (in bytes)
 const SLOT_LENGTH int = 256// 64 KB
 
-type BitMatrix [TABLE_HEIGHT][TABLE_WIDTH]SlotContents
+type BitMatrix [TABLE_HEIGHT]BitMatrixRow
+type BitMatrixRow [TABLE_WIDTH*SLOT_LENGTH]byte
 
 type SlotTable struct {
   table BitMatrix
@@ -39,9 +40,7 @@ const (
   State_AcceptPlaintext = iota
 )
 
-type SlotContents struct {
-  Message [SLOT_LENGTH]byte
-}
+type SlotContents [SLOT_LENGTH]byte
 
 type EncryptedInsertQuery struct {
   SenderPublicKey [32]byte
@@ -56,7 +55,7 @@ type UploadArgs struct {
 type InsertQuery struct {
   Keys [TABLE_HEIGHT]prf.Key
   KeyMask [TABLE_HEIGHT]bool
-  MessageMask [TABLE_WIDTH]SlotContents
+  MessageMask BitMatrixRow
 }
 
 type UploadReply struct {

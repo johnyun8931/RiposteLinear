@@ -15,7 +15,7 @@ func TestArgsNonzero(t *testing.T) {
 func testOnce(t *testing.T, xIdx, yIdx int) {
   var args UploadArgs
   var msg SlotContents
-  msg.Message = [SLOT_LENGTH]byte{123, 101}
+  msg = [SLOT_LENGTH]byte{123, 101}
 
   err := InitializeUploadArgs(&args, xIdx, yIdx, msg)
   if err != nil {

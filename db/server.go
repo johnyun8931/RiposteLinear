@@ -287,9 +287,7 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
   // it in the plaintext table
   for serv := 0; serv<NUM_SERVERS; serv++ {
     for i := 0; i<TABLE_HEIGHT; i++ {
-      for j := 0; j<TABLE_WIDTH; j++ {
-        b[i][j] = AddSlots(b[i][j], tables[serv].Entries[i][j])
-      }
+      XorRows(&b[i], &tables[serv].Entries[i])
     }
   }
 

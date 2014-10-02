@@ -2,7 +2,6 @@ package db
 
 import (
   "log"
-//  "fmt"
 //  "math/big"
 
   "henrycg/email/prf"
@@ -23,7 +22,7 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
   var keyMask [TABLE_HEIGHT]bool
   var keyMaskP [TABLE_HEIGHT]bool
 
-  var msgMask [TABLE_WIDTH]SlotContents
+  var msgMask BitMatrixRow
 
   randomVectorKeys(keys[:])
   utils.RandomVector(keyMask[:])
@@ -39,13 +38,10 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
     return err
   }
 
-  /*
-  for i := 0; i<TABLE_HEIGHT; i++ {
-    fmt.Printf("%v\n\t%v\n\t%v\n\t%v\n\t%v\n", i, keyMask[i], keyMaskP[i], keys[i], keysP[i])
+  msgMask, err = computeMessageMask(keys[yIdx], keysP[yIdx], msg, xIdx)
+  if err != nil {
+    return err
   }
-  */
-
-  computeMessageMask(msgMask[:], keys[yIdx], keysP[yIdx], msg, xIdx)
 
   for i := 0; i < NUM_SERVERS; i++ {
     var plainQuery InsertQuery
@@ -69,29 +65,27 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
   return nil
 }
 
-func computeMessageMask(msgMask []SlotContents,
-    key prf.Key, keyP prf.Key,
-    msg SlotContents, xIdx int) error {
+func computeMessageMask(key prf.Key, keyP prf.Key,
+    msg SlotContents, xIdx int) (BitMatrixRow, error) {
 
+  var msgMask BitMatrixRow
   prfA, err := prf.NewPrf(key)
   if err != nil {
-    return err
+    return msgMask, err
   }
 
   prfB, err := prf.NewPrf(keyP)
   if err != nil {
-    return err
+    return msgMask, err
   }
 
-  var i uint64
-  for i = 0; i < uint64(TABLE_WIDTH); i++ {
-    prfA.Evaluate(i, msgMask[i].Message[:])
-    prfB.Evaluate(i, msgMask[i].Message[:])
-  }
+  prfA.Evaluate(msgMask[:])
+  prfB.Evaluate(msgMask[:])
 
-  msgMask[xIdx] = AddSlots(msgMask[xIdx], msg)
+  msg_row := MessageToRow(msg, xIdx)
+  XorRows(&msgMask, &msg_row)
 
-  return nil
+  return msgMask, nil
 }
 
 func randomVectorKeys(lst []prf.Key) error {

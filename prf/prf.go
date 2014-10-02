@@ -2,7 +2,7 @@
 package prf
 
 import (
-  "encoding/binary"
+//  "encoding/binary"
 
   "crypto/aes"
   "crypto/cipher"
@@ -35,15 +35,15 @@ func NewPrf(k Key) (Prf, error) {
   return p, err
 }
 
-func (p *Prf) Evaluate(block_idx uint64, to_encrypt []byte) {
+func (p *Prf) Evaluate(to_encrypt []byte) {
   // IV is all zeros (we will never use
   // this key again)
   iv := make([]byte, aes.BlockSize)
 
   // We are making the [unsafe] assumption that all blocks
   // are the same length.
-  iv_integer := block_idx * uint64(len(to_encrypt))
-  binary.PutUvarint(iv, iv_integer)
+  //iv_integer := block_idx * uint64(len(to_encrypt))
+  //binary.PutUvarint(iv, iv_integer)
 
   stream := cipher.NewCTR(p.block, iv)
   stream.XORKeyStream(to_encrypt, to_encrypt)
