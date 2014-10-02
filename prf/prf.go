@@ -11,7 +11,7 @@ import (
 )
 
 // Length of PRF seed (in bytes)
-const KEY_LENGTH = 32
+const KEY_LENGTH = 16
 
 type Key [KEY_LENGTH]byte
 
