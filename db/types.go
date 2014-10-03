@@ -18,9 +18,6 @@ const TABLE_HEIGHT int = 1 << 9
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
 
-// XXX TODO Much more efficient when SLOT_LENGTH
-// is large!! 
-
 // Length of plaintext messages (in bytes)
 const SLOT_LENGTH int = 256// 64 KB
 

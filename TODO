@@ -1,7 +1,5 @@
 TODO
 - Implement ZKP (+ commit signing) with the CPIR version
-- Make better use of AES: generate entire table row in a stream
-  to reduce key changes
 - Use signatures to give a "receipt" to the client
 
 
