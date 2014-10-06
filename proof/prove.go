@@ -49,12 +49,12 @@ func VectorProve(vectorA, vectorB [][]byte, differAt int) (schnorr.ManyEvidence,
     commitB[i] = stB.GtoXs[i].X
 
     mA := utils.HashString(vectorA[i][:])
-    gToMsgA := curve.Pow(curve.GeneratorG(), mA)
+    gToMsgA := curve.PowG(mA)
 
     var gToMsgB group.Element
     if i == differAt {
       mB := utils.HashString(vectorB[i][:])
-      gToMsgB = curve.Pow(curve.GeneratorG(), mB)
+      gToMsgB = curve.PowG(mB)
     } else {
       gToMsgB = gToMsgA
     }
