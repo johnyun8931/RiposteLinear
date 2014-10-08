@@ -1,10 +1,13 @@
 package db
 
 import (
+  "math/big"
   "net/rpc"
   "sync"
 
   "henrycg/email/prf"
+  "henrycg/zkp/group"
+  "henrycg/zkp/schnorr"
 )
 
 // Number of "dimensions" for PIR scheme
@@ -53,6 +56,11 @@ type InsertQuery struct {
   Keys [TABLE_HEIGHT]prf.Key
   KeyMask [TABLE_HEIGHT]bool
   MessageMask BitMatrixRow
+
+  CommitsA []group.Element
+  CommitsB []group.Element
+  KeyCommitSecrets []*big.Int
+  KeyProof schnorr.ManyEvidence
 }
 
 type UploadReply struct {

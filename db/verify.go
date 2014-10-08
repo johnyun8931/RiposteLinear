@@ -1,38 +1,56 @@
 package db
 
 import (
-//  "log"
+  "log"
+  "math/big"
 
-//  "henrycg/zkp/group"
-//  "henrycg/zkp/schnorr"
-//  "henrycg/email/utils"
+  "henrycg/zkp/group"
+  "henrycg/email/proof"
+  "henrycg/email/utils"
 )
 
 //var curve = utils.CommonCurve
 
 func ValidateUpload(serverIdx int, query *InsertQuery) bool {
-  // Server 0: X,  Y
-  // Server 1: X', Y
-  // Server 2: X,  Y'
-  // Server 3: X', Y'
-  // Recreate proof statement and verify it
+  // Check that commitments are valid
+  msgVec := ComputeProofVector(query.Keys[:], query.KeyMask[:])
+  var myCommits []group.Element
+  var otherCommits []group.Element
+
+  if serverIdx == 0 {
+    myCommits = query.CommitsA
+    otherCommits = query.CommitsB
+  } else {
+    myCommits = query.CommitsB
+    otherCommits = query.CommitsA
+  }
+
+  keyCommitValid := CommitIsValid(msgVec, myCommits, query.KeyCommitSecrets)
+  keyProofValid := proof.VectorVerify(msgVec[:], query.KeyCommitSecrets, otherCommits, query.KeyProof, serverIdx == 0)
+
+  log.Printf("Key commits are valid? %v", keyCommitValid)
+  log.Printf("Key proof is valid? %v", keyProofValid)
 
   // XXX Should short-circuit these checks for efficiency!
+  return keyCommitValid && keyProofValid
+}
 
-  /* XXX removing ZKPs for now
-  xComValid := xCommitIsValid(serverIdx, query)
-  yComValid := yCommitIsValid(serverIdx, query)
-  xValid := xProofIsValid(serverIdx, query)
-  yValid := yProofIsValid(serverIdx, query)
-  log.Printf("X com is valid? %v", xComValid)
-  log.Printf("Y com is valid? %v", xComValid)
-  log.Printf("XProof is valid? %v", xValid)
-  log.Printf("YProof is valid? %v", yValid)
+func CommitIsValid(msgvec [][]byte, commits []group.Element, secrets []*big.Int) bool {
+  g := curve.GeneratorG()
+  h := curve.GeneratorH()
 
-  return xValid && yValid && xComValid && yComValid
-  */
+  for i:=0; i<TABLE_HEIGHT; i++ {
+    com := curve.Pow(h, secrets[i])
+    com = curve.Mul(com, curve.Pow(g, utils.HashString(msgvec[i][:])))
+
+    if !curve.AreEqual(commits[i], com) {
+      return false
+    }
+  }
+
   return true
 }
+
 
 /* XXX removing ZKPs for now
 func xProofIsValid(serverIdx int, query *InsertQuery) bool {
@@ -80,59 +98,4 @@ func yProofIsValid(serverIdx int, query *InsertQuery) bool {
       utils.HashString(query.YCoords[i].Message[:]))
     st.GtoXs[i].X = curve.Mul(st.GtoXs[i].X, curve.Inverse(gToM))
   }
-
-  return schnorr.ManyVerify(curve, st, query.YProof)
-}
-
-func xCommitIsValid(serverIdx int, query *InsertQuery) bool {
-  g := curve.GeneratorG()
-  h := curve.GeneratorH()
-
-  var truth []group.Element
-  if serverIdx & 1 > 0 {
-    // Have X'
-    truth = query.XpCommits[:]
-  } else {
-    // Have X
-    truth = query.XCommits[:]
-  }
-
-  for i:=0; i<TABLE_WIDTH; i++ {
-    com := curve.Pow(h, query.XSecrets[i])
-    if query.XCoords[i] {
-      com = curve.Mul(g, com)
-    }
-
-    if !curve.AreEqual(com, truth[i]) {
-      return false
-    }
-  }
-
-  return true
-}
-
-func yCommitIsValid(serverIdx int, query *InsertQuery) bool {
-  g := curve.GeneratorG()
-  h := curve.GeneratorH()
-
-  var truth []group.Element
-  if serverIdx & 2 > 0 {
-    // Have Y'
-    truth = query.YpCommits[:]
-  } else {
-    // Have Y
-    truth = query.YCommits[:]
-  }
-
-  for i:=0; i<TABLE_HEIGHT; i++ {
-    com := curve.Pow(h, query.YSecrets[i])
-    com = curve.Mul(com, curve.Pow(g, utils.HashString(query.YCoords[i].Message[:])))
-
-    if !curve.AreEqual(com, truth[i]) {
-      return false
-    }
-  }
-
-  return true
-}
 */

@@ -2,18 +2,20 @@ package db
 
 import (
   "log"
-//  "math/big"
+  "math/big"
 
   "henrycg/email/prf"
+  "henrycg/email/proof"
   "henrycg/email/utils"
-//  "henrycg/zkp/schnorr"
+  "henrycg/zkp/group"
+  "henrycg/zkp/schnorr"
 )
 
 var curve = utils.CommonCurve
 
 
 func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
-    msg SlotContents) error {
+    msg SlotContents, doProof bool) error {
 
   // Create random values for secret sharing
   var keys [TABLE_HEIGHT]prf.Key
@@ -38,6 +40,13 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
     return err
   }
 
+  var ev schnorr.ManyEvidence
+  var commitsA, commitsB []group.Element
+  var secA, secB []*big.Int
+  if doProof {
+    ev, commitsA, secA, commitsB, secB = computeProof(keys[:], keysP[:], keyMask[:], keyMaskP[:], yIdx)
+  }
+
   msgMask, err = computeMessageMask(keys[yIdx], keysP[yIdx], msg, xIdx)
   if err != nil {
     return err
@@ -49,10 +58,15 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
     plainQuery.MessageMask = msgMask
     plainQuery.Keys = keys
     plainQuery.KeyMask = keyMask
+    plainQuery.KeyProof = ev
+    plainQuery.CommitsA = commitsA
+    plainQuery.CommitsB = commitsB
+    plainQuery.KeyCommitSecrets = secA
 
     if (i & 1) > 0 {
       plainQuery.Keys = keysP
       plainQuery.KeyMask = keyMaskP
+      plainQuery.KeyCommitSecrets = secB
     }
 
     var err error
@@ -86,6 +100,33 @@ func computeMessageMask(key prf.Key, keyP prf.Key,
   XorRows(&msgMask, &msg_row)
 
   return msgMask, nil
+}
+
+func ComputeProofVector(keys []prf.Key, keyMask []bool) [][]byte {
+  vec := make([][]byte, len(keys))
+
+  boolToByte := func(b bool) byte {
+    if b {
+      return 0x00
+    } else {
+      return 0xff
+    }
+  }
+
+  for i:=0; i<len(vec); i++ {
+    vec[i] = make([]byte, len(keys[i]) + 1)
+    vec[i][0] = boolToByte(keyMask[i])
+    copy(vec[i][1:], keys[i][:])
+  }
+
+  return vec
+}
+
+func computeProof(keys, keysP []prf.Key, keyMask, keyMaskP []bool, differAt int) (schnorr.ManyEvidence, []group.Element, []*big.Int, []group.Element, []*big.Int) {
+  vecA := ComputeProofVector(keys, keyMask)
+  vecB := ComputeProofVector(keysP, keyMaskP)
+
+  return proof.VectorProve(vecA, vecB, differAt)
 }
 
 func randomVectorKeys(lst []prf.Key) error {
