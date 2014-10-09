@@ -316,7 +316,11 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   for i := 0; i < len(prep.Queries); i++ {
     plainQueries[i], err = DecryptQuery(t.ServerIdx, prep.Queries[i])
     if err == nil {
-      okay = ValidateUpload(t.ServerIdx, plainQueries[i])
+      if GENERATE_PROOFS {
+        okay = ValidateUpload(t.ServerIdx, plainQueries[i])
+      } else {
+        okay = true
+      }
     } else {
       log.Printf("Error in decryption: ", err)
       okay = false

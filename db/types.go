@@ -10,6 +10,9 @@ import (
   "henrycg/zkp/schnorr"
 )
 
+// Generate client zero knowledge proofs of correctness
+const GENERATE_PROOFS bool = true
+
 // Number of "dimensions" for PIR scheme
 const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2//1 << NUM_DIMENSIONS

@@ -56,7 +56,7 @@ func main() {
   }
 
   port := os.Args[2]
-  slotTable := db.NewSlotTable(idx)
+  slotTable := db.NewServer(idx)
   var a int
   go slotTable.Initialize(&a, &a)
 

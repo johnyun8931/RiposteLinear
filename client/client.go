@@ -14,7 +14,7 @@ import (
 func tryUpload(client *rpc.Client, args db.UploadArgs) error {
   var upRes db.UploadReply
 
-  err := client.Call("SlotTable.Upload", args, &upRes)
+  err := client.Call("Server.Upload", args, &upRes)
   if err != nil {
     log.Fatal("Error:", err)
     return err
@@ -26,7 +26,7 @@ func tryUpload(client *rpc.Client, args db.UploadArgs) error {
 
 func tryDumpTable(client *rpc.Client) db.DumpReply {
   var tab db.DumpReply
-  err := client.Call("SlotTable.DumpPlaintext", 0, &tab)
+  err := client.Call("Server.DumpPlaintext", 0, &tab)
   if err != nil {
     log.Fatal("Error:", err)
   }
@@ -63,10 +63,10 @@ func main() {
   }
 
   log.Printf("Insert into [%v,%v]", xIdx, yIdx)
-  log.Printf("Plaintext [%v]", msg.Message)
+  log.Printf("Plaintext [%v]", msg)
 
   var args db.UploadArgs
-  err = db.InitializeUploadArgs(&args, xIdx, yIdx, msg, true)
+  err = db.InitializeUploadArgs(&args, xIdx, yIdx, msg, db.GENERATE_PROOFS)
   if err != nil {
     log.Fatal("error: ", err)
     return
