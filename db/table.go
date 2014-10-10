@@ -2,15 +2,25 @@ package db
 
 import (
 //  "log"
-
+//  "math/big"
   "henrycg/email/prf"
 )
+
+func NewBitMatrix() *BitMatrix {
+  return new(BitMatrix)
+}
+
+func NewSlotTable() *SlotTable {
+  t := new(SlotTable)
+  t.table = *NewBitMatrix()
+  return t
+}
 
 /************
  * Actual DB manipulation
  */
 
-func (t *SlotTable) processRow(row_idx int, queries []*InsertQuery, done chan error) {
+func (t *SlotTable) processRow(is_server_a bool, row_idx int, queries []*InsertQuery, done chan error) {
 //  log.Printf("Processing row %v", row_idx)
   nQueries := len(queries)
   for q := 0; q < nQueries; q++ {
@@ -23,7 +33,7 @@ func (t *SlotTable) processRow(row_idx int, queries []*InsertQuery, done chan er
     }
 
     rowBit := queries[q].KeyMask[row_idx]
-    row_prf.Evaluate(t.table[row_idx][:])
+    row_prf.Evaluate(t.table[row_idx][:], ORDER, is_server_a)
 
     // If row bitmask is set, then XOR in the message mask too
     if rowBit {
@@ -35,12 +45,12 @@ func (t *SlotTable) processRow(row_idx int, queries []*InsertQuery, done chan er
   done<-nil
 }
 
-func (t *SlotTable) processQuery(queries []*InsertQuery) error {
+func (t *SlotTable) processQuery(is_server_a bool, queries []*InsertQuery) error {
   t.tableMutex.Lock()
 
   c := make(chan error, TABLE_HEIGHT)
   for i := 0; i < TABLE_HEIGHT; i++ {
-    go t.processRow(i, queries, c)
+    go t.processRow(is_server_a, i, queries, c)
   }
 
   // Wait for all workers to complete
@@ -67,17 +77,19 @@ func (t *SlotTable) ForeachRow(f ForeachFunc) {
 }
 
 func (t *SlotTable) Clear() {
-  var empty BitMatrixRow
   t.ForeachRow(func(_ int, row *BitMatrixRow) {
-    *row = empty
+    for i := 0; i < len(row); i++ {
+      row[i].SetUint64(0)
+    }
   })
 }
 
 func (t *SlotTable) CopyAndClear(dest *BitMatrix) {
-  var empty BitMatrixRow
   t.ForeachRow(func(idx int, row *BitMatrixRow) {
-    dest[idx] = *row
-    *row = empty
+    for i := 0; i < len(row); i++ {
+      dest[idx][i].SetBytes(row[i].Bytes())
+      row[i].SetUint64(0)
+    }
   })
 }
 

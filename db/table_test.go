@@ -1,25 +1,28 @@
 package db
 
 import (
-//  "fmt"
+  "log"
+  "math/big"
   "testing"
 )
 
 func TestSimple(t *testing.T) {
-  tab := new(SlotTable)
+  tab := NewSlotTable()
+  two := big.NewInt(2)
   tab.ForeachRow(func(_ int, value *BitMatrixRow) {
     for i := 0; i<len(value); i++ {
-      value[i] = 2
+      value[i] = *two
     }
   })
 
-  if tab.table[0][0] != 2 {
+  if two.Cmp(&tab.table[0][0]) != 0 {
     t.Fail()
   }
 
   tab.Clear()
 
-  if tab.table[0][0] != 0 {
+  zero := big.NewInt(0)
+  if zero.Cmp(&tab.table[0][0]) != 0 {
     t.Fail()
   }
 }
@@ -44,11 +47,15 @@ func testEndToEndOnce(t *testing.T, doProof bool) {
     t.FailNow()
   }
   //fmt.Printf("(x,y) = (%v, %v)\n", xIdx, yIdx)
-  //fmt.Printf("msg = (%v)\n", msg)
+  //for i := 0; i < len(msg); i++ {
+  //  fmt.Printf("msg[%v] = (%v)\n", i, &msg[i])
+  //}
 
   // Args has encrypted insert queries
-  slotTables := make([]SlotTable, NUM_SERVERS)
+  slotTables := make([]*SlotTable, NUM_SERVERS)
   for i := 0; i<NUM_SERVERS; i++ {
+    slotTables[i] = NewSlotTable()
+
     // Decrypt query
     var query *InsertQuery
     query, err = DecryptQuery(i, args.Query[i])
@@ -59,28 +66,31 @@ func testEndToEndOnce(t *testing.T, doProof bool) {
     // Add to table
     queries := make([]*InsertQuery, 1)
     queries[0] = query
-    slotTables[i].processQuery(queries)
+    slotTables[i].processQuery(i == 0, queries)
   }
 
   // Combine tables 
   replies := new([NUM_SERVERS]DumpReply)
   for i := 0; i<NUM_SERVERS; i++ {
-    replies[i].Entries = new(BitMatrix)
+    replies[i].Entries = NewBitMatrix()
     slotTables[i].CopyAndClear(replies[i].Entries)
   }
 
   b := revealCleartext(*replies)
   for i:=0; i<len(b); i++ {
     for j:=0; j<len(b[i]); j++ {
-      //fmt.Printf("%v ", b[i][j])
+      //fmt.Printf("%v ", &b[i][j])
     }
     //fmt.Printf("\n")
   }
 
-  var out [SLOT_LENGTH]byte
-  copy(out[:], b[yIdx][(SLOT_LENGTH*xIdx):])
-  if out != msg {
-    t.Fatal("Message mismatch", out, msg)
+  var out [SLOT_LENGTH]big.Int
+  start := SLOT_LENGTH * xIdx
+  for i := 0; i<len(out); i++ {
+    out[i] = b[yIdx][start + i]
+    if out[i].Cmp(&msg[i]) != 0 {
+      t.Fatal("Message mismatch", &out[i], &msg[i])
+    }
   }
 }
 
@@ -107,11 +117,13 @@ func BenchmarkTable(b *testing.B) {
   queries := make([]*InsertQuery, b.N)
   for i := 0; i < b.N; i++ {
     queries[i] = query
+
   }
 
   // Args has encrypted insert queries
-  slotTable := new(SlotTable)
+  slotTable := NewSlotTable()
   b.ResetTimer()
-  slotTable.processQuery(queries)
+  slotTable.processQuery(false, queries)
+  log.Printf("Here!")
 }
 

@@ -1,6 +1,9 @@
 package prf
 
-import "testing"
+import (
+  "math/big"
+  "testing"
+)
 
 func TestPrf(t *testing.T) {
   key, err := NewKey()
@@ -13,10 +16,24 @@ func TestPrf(t *testing.T) {
     t.FailNow()
   }
 
-  var i uint64
-  buf := make([]byte, 1<<8)
-  for i = 0; i<(1<<6); i++ {
-    prf.Evaluate(i, buf)
+  buf := make([]big.Int, 1<<8)
+
+  m := big.NewInt(12312312312)
+  prf.Evaluate(buf, m, true)
+
+  prf2, err := NewPrf(key)
+  if err != nil {
+    t.FailNow()
+  }
+
+  prf2.Evaluate(buf, m, false)
+  for i := 0; i<len(buf); i++ {
+    b := buf[i].Bytes()
+    for j := 0; j<len(b); j++ {
+      if b[j] != 0x00 {
+        t.FailNow()
+      }
+    }
   }
 }
 
@@ -31,8 +48,8 @@ func BenchmarkPrf(b *testing.B) {
     b.FailNow()
   }
 
-  var i64 uint64
-  i64 = 0
-  buf := make([]byte, b.N * (1<<20))
-  prf.Evaluate(i64, buf)
+  buf := make([]big.Int, b.N)
+
+  prf.Evaluate(buf, new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1)), true)
 }
+

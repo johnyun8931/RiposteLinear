@@ -42,7 +42,7 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 
   var ev schnorr.ManyEvidence
   var commitsA, commitsB []group.Element
-  var secA, secB []*big.Int
+  var secA, secB []big.Int
   if doProof {
     ev, commitsA, secA, commitsB, secB = computeProof(keys[:], keysP[:], keyMask[:], keyMaskP[:], yIdx)
   }
@@ -93,10 +93,10 @@ func computeMessageMask(key prf.Key, keyP prf.Key,
     return msgMask, err
   }
 
-  prfA.Evaluate(msgMask[:])
-  prfB.Evaluate(msgMask[:])
-
   msg_row := MessageToRow(msg, xIdx)
+  prfA.Evaluate(msgMask[:], ORDER, false)
+  prfB.Evaluate(msgMask[:], ORDER, true)
+
   XorRows(&msgMask, &msg_row)
 
   return msgMask, nil
@@ -122,7 +122,7 @@ func ComputeProofVector(keys []prf.Key, keyMask []bool) [][]byte {
   return vec
 }
 
-func computeProof(keys, keysP []prf.Key, keyMask, keyMaskP []bool, differAt int) (schnorr.ManyEvidence, []group.Element, []*big.Int, []group.Element, []*big.Int) {
+func computeProof(keys, keysP []prf.Key, keyMask, keyMaskP []bool, differAt int) (schnorr.ManyEvidence, []group.Element, []big.Int, []group.Element, []big.Int) {
   vecA := ComputeProofVector(keys, keyMask)
   vecB := ComputeProofVector(keysP, keyMaskP)
 

@@ -1,6 +1,7 @@
 package db
 
 import (
+  "crypto/rand"
   "testing"
 )
 
@@ -23,7 +24,10 @@ func TestArgsNonzeroProof(t *testing.T) {
 func testOnce(t *testing.T, xIdx, yIdx int, doProof bool) {
   var args UploadArgs
   var msg SlotContents
-  msg = [SLOT_LENGTH]byte{123, 101}
+  for i := 0; i < len(msg); i++ {
+    m, _ := rand.Int(rand.Reader, ORDER)
+    msg[i] = *m
+  }
 
   err := InitializeUploadArgs(&args, xIdx, yIdx, msg, doProof)
   if err != nil {
@@ -46,7 +50,10 @@ func testOnce(t *testing.T, xIdx, yIdx int, doProof bool) {
 func TestOnceBadProof(t *testing.T) {
   var args UploadArgs
   var msg SlotContents
-  msg = [SLOT_LENGTH]byte{123, 101}
+  for i := 0; i < len(msg); i++ {
+    m, _ := rand.Int(rand.Reader, ORDER)
+    msg[i] = *m
+  }
 
   err := InitializeUploadArgs(&args, 1, 1, msg, true)
   if err != nil {

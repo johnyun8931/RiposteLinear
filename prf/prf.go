@@ -8,6 +8,7 @@ import (
   "crypto/cipher"
   "crypto/rand"
   "errors"
+  "math/big"
 )
 
 // Length of PRF seed (in bytes)
@@ -35,7 +36,7 @@ func NewPrf(k Key) (Prf, error) {
   return p, err
 }
 
-func (p *Prf) Evaluate(to_encrypt []byte) {
+func (p *Prf) Evaluate(to_encrypt []big.Int, modulus *big.Int, add bool) {
   // IV is all zeros (we will never use
   // this key again)
   iv := make([]byte, aes.BlockSize)
@@ -45,7 +46,27 @@ func (p *Prf) Evaluate(to_encrypt []byte) {
   //iv_integer := block_idx * uint64(len(to_encrypt))
   //binary.PutUvarint(iv, iv_integer)
 
+  n_bytes := len(modulus.Bytes())
+  cipher_bytes := make([]byte, n_bytes*len(to_encrypt))
+
   stream := cipher.NewCTR(p.block, iv)
-  stream.XORKeyStream(to_encrypt, to_encrypt)
+  stream.XORKeyStream(cipher_bytes, cipher_bytes)
+
+  as_int := new(big.Int)
+  offset := 0
+  for i := 0; i < len(to_encrypt); i++ {
+    as_int.SetBytes(cipher_bytes[offset:(offset+n_bytes)])
+//    as_int.Mod(as_int, modulus)
+
+    if add {
+      to_encrypt[i].Add(&to_encrypt[i], as_int)
+    } else {
+      to_encrypt[i].Sub(&to_encrypt[i], as_int)
+    }
+    to_encrypt[i].Mod(&to_encrypt[i], modulus)
+
+    offset += n_bytes
+  }
 }
+
 

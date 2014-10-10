@@ -35,12 +35,12 @@ func ValidateUpload(serverIdx int, query *InsertQuery) bool {
   return keyCommitValid && keyProofValid
 }
 
-func CommitIsValid(msgvec [][]byte, commits []group.Element, secrets []*big.Int) bool {
+func CommitIsValid(msgvec [][]byte, commits []group.Element, secrets []big.Int) bool {
   g := curve.GeneratorG()
   h := curve.GeneratorH()
 
   for i:=0; i<TABLE_HEIGHT; i++ {
-    com := curve.Pow(h, secrets[i])
+    com := curve.Pow(h, &secrets[i])
     com = curve.Mul(com, curve.Pow(g, utils.HashString(msgvec[i][:])))
 
     if !curve.AreEqual(commits[i], com) {

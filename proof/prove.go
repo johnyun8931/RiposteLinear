@@ -13,7 +13,7 @@ var curve = utils.CommonCurve
 
 // The two vectors are the same except that:
 //    vectorA[differAt] != vectorB[differAt]
-func VectorProve(vectorA, vectorB [][]byte, differAt int) (schnorr.ManyEvidence, []group.Element, []*big.Int, []group.Element, []*big.Int) {
+func VectorProve(vectorA, vectorB [][]byte, differAt int) (schnorr.ManyEvidence, []group.Element, []big.Int, []group.Element, []big.Int) {
   length := len(vectorA)
 
   // Compute h^{r_i} for i = 1,...,num
@@ -31,7 +31,7 @@ func VectorProve(vectorA, vectorB [][]byte, differAt int) (schnorr.ManyEvidence,
   // The secret exponents in the proof are r_i - r'_i
   for i:=0; i<length; i++ {
     wit.Xs[i].X = new(big.Int)
-    wit.Xs[i].X.Sub(secA[i], secB[i])
+    wit.Xs[i].X.Sub(&secA[i], &secB[i])
     wit.Xs[i].X.Mod(wit.Xs[i].X, curve.Order())
   }
 
@@ -77,21 +77,21 @@ func VectorProve(vectorA, vectorB [][]byte, differAt int) (schnorr.ManyEvidence,
 }
 
 func createCommitVector(num, bogusIdx int) (
-  schnorr.ManyStatement, []*big.Int) {
+  schnorr.ManyStatement, []big.Int) {
   var st schnorr.ManyStatement
-  secrets := make([]*big.Int, num)
+  secrets := make([]big.Int, num)
 
   st.GtoXs = make([]schnorr.Statement, num)
   for i:= 0; i<num; i++ {
-    secrets[i] = curve.RandomExponent()
+    secrets[i] = *curve.RandomExponent()
     st.GtoXs[i].G = curve.GeneratorH()
-    st.GtoXs[i].X = curve.Pow(st.GtoXs[i].G, secrets[i])
+    st.GtoXs[i].X = curve.Pow(st.GtoXs[i].G, &secrets[i])
   }
 
   return st, secrets
 }
 
-func VectorVerify(vector [][]byte, myCommitSecrets []*big.Int, otherCommits []group.Element, ev schnorr.ManyEvidence, isServerA bool) bool {
+func VectorVerify(vector [][]byte, myCommitSecrets []big.Int, otherCommits []group.Element, ev schnorr.ManyEvidence, isServerA bool) bool {
   num := len(vector)
 
   // Recreate the proof statement.
@@ -102,7 +102,7 @@ func VectorVerify(vector [][]byte, myCommitSecrets []*big.Int, otherCommits []gr
     // We have m and r, so recreate commit as C_i = g^{Hash(m_i)} h^{r_i}
     msg := utils.HashString(vector[i][:])
     gToMsg := curve.Pow(curve.GeneratorG(), msg)
-    hToR := curve.Pow(curve.GeneratorH(), myCommitSecrets[i])
+    hToR := curve.Pow(curve.GeneratorH(), &myCommitSecrets[i])
 
     st.GtoXs[i].G = curve.GeneratorH()
     st.GtoXs[i].X = curve.Mul(gToMsg, hToR)

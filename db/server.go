@@ -15,7 +15,7 @@ import (
 )
 
 // Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 90
+const MERGE_TIME_DELAY time.Duration = 10
 
 var (
   incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
@@ -281,7 +281,7 @@ func (t *Server) sendMergeRequest() {
 }
 
 func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
-  b := new(BitMatrix)
+  b := NewBitMatrix()
 
   // XOR all of the tables together and save 
   // it in the plaintext table
@@ -354,7 +354,7 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 
   // Update the database with the query
   log.Printf("Processing query %d [len %v]", t.ServerIdx, len(val))
-  t.entries.processQuery(val)
+  t.entries.processQuery(t.ServerIdx == 0, val)
   log.Printf("Done processing query %d [len %v]", t.ServerIdx, len(val))
 
   return nil
@@ -373,15 +373,14 @@ func (t *Server) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) error
 }
 
 
-/*
 func (t *Server) DumpTable(_ *int, reply *DumpReply) error {
   log.Printf("Dumping table %d\n", t.ServerIdx)
-  t.entriesMutex.Lock()
-  reply.Entries = t.entries
-  t.entriesMutex.Unlock()
+  reply.Entries = NewBitMatrix()
+  t.entries.CopyAndClear(reply.Entries)
   return nil
 }
 
+/*
 func (t *Server) DumpPlaintext(_ *int, reply *DumpReply) error {
   t.plainMutex.Lock()
   reply.Entries = t.plain
@@ -478,8 +477,8 @@ func (t *Server) Download(args *DownloadArgs, reply *DownloadReply) error {
 
 func NewServer(serverIdx int) *Server {
   t := new(Server)
-  t.entries = new(SlotTable)
-  t.plain = new(BitMatrix)
+  t.entries = NewSlotTable()
+  t.plain = NewBitMatrix()
   t.ServerIdx = serverIdx
   t.ClientsServed = 0
   t.State = State_AcceptUpload
