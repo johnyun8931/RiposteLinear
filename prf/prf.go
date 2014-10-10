@@ -41,11 +41,6 @@ func (p *Prf) Evaluate(to_encrypt []big.Int, modulus *big.Int, add bool) {
   // this key again)
   iv := make([]byte, aes.BlockSize)
 
-  // We are making the [unsafe] assumption that all blocks
-  // are the same length.
-  //iv_integer := block_idx * uint64(len(to_encrypt))
-  //binary.PutUvarint(iv, iv_integer)
-
   n_bytes := len(modulus.Bytes())
   cipher_bytes := make([]byte, n_bytes*len(to_encrypt))
 

@@ -18,7 +18,7 @@ func TestPrf(t *testing.T) {
 
   buf := make([]big.Int, 1<<8)
 
-  m := big.NewInt(12312312312)
+  m := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
   prf.Evaluate(buf, m, true)
 
   prf2, err := NewPrf(key)
