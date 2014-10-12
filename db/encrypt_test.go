@@ -72,7 +72,7 @@ func TestEncryptSlot(t *testing.T) {
 
   c1, err := EncryptSlot(1, m)
   if err != nil {
-    t.FailNow()
+    t.Fatal("Could not encrypt 1")
   }
 
   overhead := BOX_PUBLIC_KEY_LEN + BOX_OVERHEAD
@@ -82,19 +82,19 @@ func TestEncryptSlot(t *testing.T) {
 
   c2, err := EncryptSlot(0, c1)
   if err != nil {
-    t.FailNow()
+    t.Fatal("Could not encrypt 0")
   }
 
   if len(c2) != SLOT_LENGTH {
     t.Fatal("Expected len %v, actual %v", SLOT_LENGTH, len(c2))
   }
 
-  m2, err := DecryptSlot(1, c2)
+  m2, err := DecryptSlot(0, c2)
   if err != nil {
     t.FailNow()
   }
 
-  m1, err:= DecryptSlot(0, m2)
+  m1, err:= DecryptSlot(1, m2)
   if err != nil {
     t.FailNow()
   }

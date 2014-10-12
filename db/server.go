@@ -254,9 +254,12 @@ func (t *Server) sendMergeRequest() {
 
   plaintext := revealCleartext(replies)
   n_collisions, darg := t.decideToDecrypt(plaintext)
-
-  log.Printf("NOT IMPLEMENTED: Should look for malicious participant?")
-  log.Printf("\t\t%v collision(s)", n_collisions)
+  coll_prob := CollisionProbability(t.ClientsServed,
+    TABLE_WIDTH*TABLE_HEIGHT, n_collisions)
+  log.Printf("%v collision(s), %v prob of occuring", n_collisions, coll_prob)
+  if coll_prob < 0.1 {
+    panic("Should trigger blame process!")
+  }
 
   // Decide whether to decrypt
 
@@ -296,23 +299,21 @@ func (t *Server) decideToDecrypt(plaintext *BitMatrix) (int, *DecryptArgs) {
 
   var zeros [SLOT_LENGTH]byte
 
-  n_collisions := 0
   for i := 0; i < len(plaintext); i++ {
     for j := 0; j < len(plaintext[i]); j += SLOT_LENGTH {
       slot := plaintext[i][j:(j+SLOT_LENGTH)]
       // Slot is not all zeros
       if bytes.Compare(slot[:], zeros[:]) != 0 {
         buf, err := DecryptSlot(0, slot[:])
-        if err != nil {
-          n_collisions++
-        } else {
+        if err == nil {
           d_args.ToDecrypt = append(d_args.ToDecrypt, buf)
         }
       }
     }
   }
 
-  // XXX bogus collision logic for now
+  n_collisions := t.ClientsServed - len(d_args.ToDecrypt)
+
   return n_collisions, &d_args
 }
 
