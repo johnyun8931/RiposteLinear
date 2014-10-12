@@ -252,28 +252,24 @@ func (t *Server) sendMergeRequest() {
     }
   }
 
-  var parg PlaintextArgs
-  parg.Plaintext = revealCleartext(replies)
+  plaintext := revealCleartext(replies)
+  n_collisions, darg := t.decideToDecrypt(plaintext)
 
-  c = make(chan error, NUM_SERVERS)
-  for i:=0; i<NUM_SERVERS; i++ {
-    go func(i int, c chan error) {
-      var p_reply PlaintextReply
-      err := t.rpcClients[i].Call("Server.StorePlaintext", &parg, &p_reply)
-      if err != nil {
-        c <- err
-      } else {
-        c <- nil
-      }
-    }(i, c)
+  log.Printf("NOT IMPLEMENTED: Should look for malicious participant?")
+  log.Printf("\t\t%v collision(s)", n_collisions)
+
+  // Decide whether to decrypt
+
+  // If YES, then decrypt send partial ciphertexts
+  var d_reply DecryptReply
+  err := t.rpcClients[1].Call("Server.Decrypt", &darg, &d_reply)
+  if err != nil {
+    log.Fatal("Error in decrypt: ", err)
   }
 
-  // Wait for responses
-  for i:=0; i<NUM_SERVERS; i++ {
-    r = <-c
-    if r != nil {
-      log.Fatal("Error in plaintext: ", r)
-    }
+  log.Printf("Got %d plaintexts", len(d_reply.Cleartexts))
+  for i, msg := range d_reply.Cleartexts {
+    log.Printf("[%v] %v", i, msg)
   }
 
   log.Printf("Done MERGE")
@@ -292,6 +288,32 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
   }
 
   return b
+}
+
+func (t *Server) decideToDecrypt(plaintext *BitMatrix) (int, *DecryptArgs) {
+  var d_args DecryptArgs
+  d_args.ToDecrypt = make([][]byte, 0)
+
+  var zeros [SLOT_LENGTH]byte
+
+  n_collisions := 0
+  for i := 0; i < len(plaintext); i++ {
+    for j := 0; j < len(plaintext[i]); j += SLOT_LENGTH {
+      slot := plaintext[i][j:(j+SLOT_LENGTH)]
+      // Slot is not all zeros
+      if bytes.Compare(slot[:], zeros[:]) != 0 {
+        buf, err := DecryptSlot(0, slot[:])
+        if err != nil {
+          n_collisions++
+        } else {
+          d_args.ToDecrypt = append(d_args.ToDecrypt, buf)
+        }
+      }
+    }
+  }
+
+  // XXX bogus collision logic for now
+  return n_collisions, &d_args
 }
 
 func (t *Server) beginMerge() {
@@ -356,15 +378,24 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
   return nil
 }
 
-func (t *Server) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) error {
-  t.plainMutex.Lock()
+func (t *Server) Decrypt(args *DecryptArgs, reply *DecryptReply) error {
+  if t.ServerIdx != 1 {
+    log.Fatal("Only server 1 should decrypt!")
+  }
+
+  reply.Cleartexts = make([][]byte, 0)
+
+  for _, item := range args.ToDecrypt {
+    buf, err := DecryptSlot(1, item[:])
+    if err == nil {
+      reply.Cleartexts = append(reply.Cleartexts, buf)
+    } else {
+      log.Printf("Decrypt error! ", err)
+    }
+  }
+
   t.ClientsServed = 0
-  t.entries.CopyAndClear(t.plain)
-  t.plainMutex.Unlock()
-
   t.State = State_AcceptUpload
-
-  MemCleanup()
   return nil
 }
 
@@ -375,15 +406,6 @@ func (t *Server) DumpTable(_ *int, reply *DumpReply) error {
   t.entries.CopyAndClear(reply.Entries)
   return nil
 }
-
-/*
-func (t *Server) DumpPlaintext(_ *int, reply *DumpReply) error {
-  t.plainMutex.Lock()
-  reply.Entries = t.plain
-  t.plainMutex.Unlock()
-  return nil
-}
-*/
 
 
 /***********

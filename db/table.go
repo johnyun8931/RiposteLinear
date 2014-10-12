@@ -1,8 +1,7 @@
 package db
 
 import (
-//  "log"
-//  "math/big"
+  //"log"
   "henrycg/email/prf"
 )
 
@@ -21,7 +20,7 @@ func NewSlotTable() *SlotTable {
  */
 
 func (t *SlotTable) processRow(is_server_a bool, row_idx int, queries []*InsertQuery, done chan error) {
-//  log.Printf("Processing row %v", row_idx)
+  //log.Printf("Processing row %v", row_idx)
   nQueries := len(queries)
   for q := 0; q < nQueries; q++ {
     // For each row, use key to generate PRF output for that row
@@ -78,17 +77,17 @@ func (t *SlotTable) ForeachRow(f ForeachFunc) {
 
 func (t *SlotTable) Clear() {
   t.ForeachRow(func(_ int, row *BitMatrixRow) {
-    for i := 0; i < len(row); i++ {
+    for i := 0; i<len(*row); i++ {
       row[i] = 0x00
     }
   })
 }
 
 func (t *SlotTable) CopyAndClear(dest *BitMatrix) {
-  t.ForeachRow(func(idx int, row *BitMatrixRow) {
-    for i := 0; i < len(row); i++ {
-      dest[idx][i] = row[i]
-      row[i] = 0x00
+  t.ForeachRow(func(i int, row *BitMatrixRow) {
+    for j := 0; j<len(*row); j++ {
+      dest[i][j] = row[j]
+      row[j] = 0x00
     }
   })
 }

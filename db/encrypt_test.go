@@ -1,7 +1,10 @@
 package db
 
 import (
+  "bytes"
+  "crypto/rand"
   "testing"
+
   "henrycg/email/prf"
   "henrycg/email/utils"
 )
@@ -59,3 +62,44 @@ func TestEncryptBad(t *testing.T) {
   }
 }
 
+func TestEncryptSlot(t *testing.T) {
+  var err error
+  m := make([]byte, PLAIN_LENGTH)
+  _, err = rand.Read(m[:])
+  if err != nil {
+    t.FailNow()
+  }
+
+  c1, err := EncryptSlot(1, m)
+  if err != nil {
+    t.FailNow()
+  }
+
+  overhead := BOX_PUBLIC_KEY_LEN + BOX_OVERHEAD
+  if len(c1) != PLAIN_LENGTH + overhead {
+    t.Fatal("Expected len %v, actual %v", PLAIN_LENGTH + overhead, len(c1))
+  }
+
+  c2, err := EncryptSlot(0, c1)
+  if err != nil {
+    t.FailNow()
+  }
+
+  if len(c2) != SLOT_LENGTH {
+    t.Fatal("Expected len %v, actual %v", SLOT_LENGTH, len(c2))
+  }
+
+  m2, err := DecryptSlot(1, c2)
+  if err != nil {
+    t.FailNow()
+  }
+
+  m1, err:= DecryptSlot(0, m2)
+  if err != nil {
+    t.FailNow()
+  }
+
+  if bytes.Compare(m1, m) != 0 {
+    t.FailNow()
+  }
+}

@@ -15,7 +15,22 @@ var curve = utils.CommonCurve
 
 
 func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
-    msg SlotContents) error {
+    plain PlainContents) error {
+  var err error
+  var msg SlotContents
+  var c []byte
+
+  c, err = EncryptSlot(1, plain[:])
+  if err != nil {
+    return err
+  }
+
+  c, err = EncryptSlot(0, c)
+  if err != nil {
+    return err
+  }
+
+  copy(msg[:], c)
 
   // Create random values for secret sharing
   var keys [TABLE_HEIGHT]prf.Key
@@ -34,7 +49,6 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 
   keyMaskP[yIdx] = !keyMask[yIdx]
 
-  var err error
   keysP[yIdx], err = prf.NewKey()
   if err != nil {
     return err
@@ -137,21 +151,21 @@ func boolToInt(b bool) int64 {
   }
 }
 
-func RandomMessage() (int, int, SlotContents, error) {
+func RandomMessage() (int, int, PlainContents, error) {
   var err error
   var xIdx, yIdx int
-  var msg SlotContents
+  var msg PlainContents
+
+  msg, err = RandomPlain()
+  if err != nil {
+    return 0, 0, msg, err
+  }
 
   xIdx, err = utils.RandomInt(TABLE_WIDTH)
   if err != nil {
     return 0, 0, msg, err
   }
   yIdx, err = utils.RandomInt(TABLE_HEIGHT)
-  if err != nil {
-    return 0, 0, msg, err
-  }
-
-  msg, err = RandomSlot()
   return xIdx, yIdx, msg, err
 }
 

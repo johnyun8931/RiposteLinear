@@ -4,6 +4,7 @@ import (
   "net/rpc"
   "sync"
 
+//  "code.google.com/p/go.crypto/nacl/box"
   "henrycg/email/prf"
 )
 
@@ -12,14 +13,22 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 1 << 8
-const TABLE_HEIGHT int = 1 << 9
+const TABLE_WIDTH int = 1 << 9
+const TABLE_HEIGHT int = 1 << 8
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
 
+// Length of NaCl "box" public key
+const BOX_PUBLIC_KEY_LEN int = 32
+const BOX_OVERHEAD int = 16
+
 // Length of plaintext messages (in bytes)
-const SLOT_LENGTH int = 256
+const PLAIN_LENGTH int = 140
+
+// Length of plaintext plus two public keys and two
+// message digests
+const SLOT_LENGTH int = PLAIN_LENGTH + 2*(BOX_PUBLIC_KEY_LEN + BOX_OVERHEAD)
 
 type BitMatrix [TABLE_HEIGHT]BitMatrixRow
 type BitMatrixRow [TABLE_WIDTH*SLOT_LENGTH]byte
@@ -37,6 +46,7 @@ const (
   State_AcceptPlaintext = iota
 )
 
+type PlainContents [PLAIN_LENGTH]byte
 type SlotContents [SLOT_LENGTH]byte
 
 type EncryptedInsertQuery struct {
@@ -95,13 +105,14 @@ type CommitReply struct {
   // uuid
 }
 
-type PlaintextArgs struct {
-  Plaintext *BitMatrix
+type DecryptArgs struct {
+  ToDecrypt [][]byte
 }
 
-type PlaintextReply struct {
-  // Nothing
+type DecryptReply struct {
+  Cleartexts [][]byte
 }
+
 
 type Server struct {
   ServerIdx int

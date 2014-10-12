@@ -18,7 +18,13 @@ func XorRows(dest, add *BitMatrixRow) {
   }
 }
 
-func RandomSlot() (SlotContents, error) {
+func RandomPlain() (PlainContents, error) {
+  var msg PlainContents
+  _, err := rand.Read(msg[:])
+  return msg, err
+}
+
+func randomSlot() (SlotContents, error) {
   var msg SlotContents
   _, err := rand.Read(msg[:])
   return msg, err

@@ -14,7 +14,7 @@ func TestArgsNonzero(t *testing.T) {
 
 func testOnce(t *testing.T, xIdx, yIdx int) {
   var args UploadArgs
-  msg, _ := RandomSlot()
+  msg, _ := RandomPlain()
 
   err := InitializeUploadArgs(&args, xIdx, yIdx, msg)
   if err != nil {

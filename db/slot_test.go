@@ -26,7 +26,7 @@ func TestAddRows(t *testing.T) {
 func TestMessageRow(t *testing.T) {
   var row, res BitMatrixRow
 
-  msg, err := RandomSlot()
+  msg, err := randomSlot()
   if err != nil {
     t.FailNow()
   }

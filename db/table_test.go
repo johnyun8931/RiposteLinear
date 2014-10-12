@@ -1,7 +1,9 @@
 package db
 
 import (
+  "bytes"
   "log"
+//  "fmt"
   "testing"
 )
 
@@ -36,9 +38,9 @@ func TestEndToEndOnce(t *testing.T) {
     t.FailNow()
   }
   //fmt.Printf("(x,y) = (%v, %v)\n", xIdx, yIdx)
-  //for i := 0; i < len(msg); i++ {
-  //  fmt.Printf("msg[%v] = (%v)\n", i, &msg[i])
-  //}
+  for i := 0; i < len(msg); i++ {
+   // fmt.Printf("msg[%v] = (%v)\n", i, &msg[i])
+  }
 
   // Args has encrypted insert queries
   slotTables := make([]*SlotTable, NUM_SERVERS)
@@ -68,18 +70,27 @@ func TestEndToEndOnce(t *testing.T) {
   b := revealCleartext(*replies)
   for i:=0; i<len(b); i++ {
     for j:=0; j<len(b[i]); j++ {
-      //fmt.Printf("%v ", &b[i][j])
+      //fmt.Printf("%v ", b[i][j])
     }
     //fmt.Printf("\n")
   }
 
-  var out [SLOT_LENGTH]byte
   start := SLOT_LENGTH * xIdx
-  for i := 0; i<len(out); i++ {
-    out[i] = b[yIdx][start + i]
-    if out[i] != msg[i] {
-      t.Fatal("Message mismatch", &out[i], &msg[i])
-    }
+  slot := make([]byte, SLOT_LENGTH)
+  copy(slot, b[yIdx][start:])
+
+  c2, err := DecryptSlot(0, slot)
+  if err != nil {
+    t.Fatal("Decryption failure - server 0")
+  }
+
+  c1, err := DecryptSlot(1, c2)
+  if err != nil {
+    t.Fatal("Decryption failure - server 1")
+  }
+
+  if bytes.Compare(c1, msg[:]) != 0 {
+    t.FailNow()
   }
 }
 
@@ -106,7 +117,6 @@ func BenchmarkTable(b *testing.B) {
   queries := make([]*InsertQuery, b.N)
   for i := 0; i < b.N; i++ {
     queries[i] = query
-
   }
 
   // Args has encrypted insert queries

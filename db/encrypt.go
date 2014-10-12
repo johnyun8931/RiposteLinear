@@ -73,3 +73,38 @@ func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (*InsertQuery, error)
 
 }
 
+func EncryptSlot(serverIdx int, slot []byte) ([]byte, error) {
+  serverPublicKey := utils.ServerBoxPublicKeys[serverIdx]
+  var nonce [24]byte
+
+  // XXX TODO nonce should increment with time epoch
+  myPublicKey, myPrivateKey, err := box.GenerateKey(rand.Reader)
+  if err != nil {
+    return nil, err
+  }
+
+  out := make([]byte, BOX_PUBLIC_KEY_LEN + BOX_OVERHEAD + len(slot))
+  copy(out[:], myPublicKey[:])
+  buf := box.Seal(nil, slot, &nonce, serverPublicKey, myPrivateKey)
+  copy(out[len(myPublicKey):], buf)
+  return out, nil
+}
+
+func DecryptSlot(serverIdx int, slot []byte) ([]byte, error) {
+  // First 32 bytes are the sender's ephemeral public key, 
+  // the rest is the message
+  serverPrivateKey := utils.ServerBoxPrivateKeys[serverIdx]
+
+  // XXX THIS IS COMPLETELY INSECURE! NONCE SHOULD INCREMENT WITH
+  // EACH TIME EPOCH TO PREVENT REPLAY ATTACKS.
+  var nonce [24]byte
+  var pubkey [32]byte
+
+  copy(pubkey[:], slot[0:32])
+  buf, okay := box.Open(nil, slot[32:], &nonce, &pubkey, serverPrivateKey)
+  if okay {
+    return buf, nil
+  } else {
+    return nil, errors.New("Decryption failure")
+  }
+}
