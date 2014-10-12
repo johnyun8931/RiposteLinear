@@ -1,5 +1,6 @@
 package db
 
+/*
 import (
   "log"
   "math/big"
@@ -52,7 +53,7 @@ func CommitIsValid(msgvec [][]byte, commits []group.Element, secrets []big.Int) 
 }
 
 
-/* XXX removing ZKPs for now
+XXX removing ZKPs for now
 func xProofIsValid(serverIdx int, query *InsertQuery) bool {
   var st schnorr.ManyStatement
   st.GtoXs = make([]schnorr.Statement, TABLE_WIDTH)

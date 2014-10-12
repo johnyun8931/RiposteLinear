@@ -66,7 +66,7 @@ func main() {
   log.Printf("Plaintext [%v]", msg)
 
   var args db.UploadArgs
-  err = db.InitializeUploadArgs(&args, xIdx, yIdx, msg, db.GENERATE_PROOFS)
+  err = db.InitializeUploadArgs(&args, xIdx, yIdx, msg)
   if err != nil {
     log.Fatal("error: ", err)
     return

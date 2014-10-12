@@ -33,7 +33,7 @@ func (t *SlotTable) processRow(is_server_a bool, row_idx int, queries []*InsertQ
     }
 
     rowBit := queries[q].KeyMask[row_idx]
-    row_prf.Evaluate(t.table[row_idx][:], ORDER, is_server_a)
+    row_prf.Evaluate(t.table[row_idx][:])
 
     // If row bitmask is set, then XOR in the message mask too
     if rowBit {
@@ -79,7 +79,7 @@ func (t *SlotTable) ForeachRow(f ForeachFunc) {
 func (t *SlotTable) Clear() {
   t.ForeachRow(func(_ int, row *BitMatrixRow) {
     for i := 0; i < len(row); i++ {
-      row[i].SetUint64(0)
+      row[i] = 0x00
     }
   })
 }
@@ -87,8 +87,8 @@ func (t *SlotTable) Clear() {
 func (t *SlotTable) CopyAndClear(dest *BitMatrix) {
   t.ForeachRow(func(idx int, row *BitMatrixRow) {
     for i := 0; i < len(row); i++ {
-      dest[idx][i].SetBytes(row[i].Bytes())
-      row[i].SetUint64(0)
+      dest[idx][i] = row[i]
+      row[i] = 0x00
     }
   })
 }

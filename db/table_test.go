@@ -2,47 +2,36 @@ package db
 
 import (
   "log"
-  "math/big"
   "testing"
 )
 
 func TestSimple(t *testing.T) {
   tab := NewSlotTable()
-  two := big.NewInt(2)
   tab.ForeachRow(func(_ int, value *BitMatrixRow) {
     for i := 0; i<len(value); i++ {
-      value[i] = *two
+      value[i] = 0x02
     }
   })
 
-  if two.Cmp(&tab.table[0][0]) != 0 {
+  if tab.table[0][0] != 0x02 {
     t.Fail()
   }
 
   tab.Clear()
 
-  zero := big.NewInt(0)
-  if zero.Cmp(&tab.table[0][0]) != 0 {
+  if tab.table[0][0] != 0x00 {
     t.Fail()
   }
 }
 
-func TestEndToEndNoProof(t *testing.T) {
-  testEndToEndOnce(t, false)
-}
-
-func TestEndToEndProof(t *testing.T) {
-  testEndToEndOnce(t, true)
-}
-
-func testEndToEndOnce(t *testing.T, doProof bool) {
+func TestEndToEndOnce(t *testing.T) {
   xIdx, yIdx, msg, err := RandomMessage()
   if err != nil {
     t.FailNow()
   }
 
   var args UploadArgs
-  err = InitializeUploadArgs(&args, xIdx, yIdx, msg, doProof)
+  err = InitializeUploadArgs(&args, xIdx, yIdx, msg)
   if err != nil {
     t.FailNow()
   }
@@ -84,11 +73,11 @@ func testEndToEndOnce(t *testing.T, doProof bool) {
     //fmt.Printf("\n")
   }
 
-  var out [SLOT_LENGTH]big.Int
+  var out [SLOT_LENGTH]byte
   start := SLOT_LENGTH * xIdx
   for i := 0; i<len(out); i++ {
     out[i] = b[yIdx][start + i]
-    if out[i].Cmp(&msg[i]) != 0 {
+    if out[i] != msg[i] {
       t.Fatal("Message mismatch", &out[i], &msg[i])
     }
   }
@@ -101,7 +90,7 @@ func BenchmarkTable(b *testing.B) {
   }
 
   var args UploadArgs
-  err = InitializeUploadArgs(&args, xIdx, yIdx, msg, false)
+  err = InitializeUploadArgs(&args, xIdx, yIdx, msg)
   if err != nil {
     b.FailNow()
   }

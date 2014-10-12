@@ -2,7 +2,6 @@ package db
 
 import (
   "crypto/rand"
-  "math/big"
 )
 
 func MessageToRow(msg SlotContents, xIdx int) BitMatrixRow {
@@ -15,19 +14,13 @@ func MessageToRow(msg SlotContents, xIdx int) BitMatrixRow {
 
 func XorRows(dest, add *BitMatrixRow) {
   for i := 0; i < len(add); i++ {
-    dest[i].Add(&dest[i], &add[i])
-    dest[i].Mod(&dest[i], ORDER)
+    dest[i] ^= add[i]
   }
 }
 
 func RandomSlot() (SlotContents, error) {
   var msg SlotContents
-  var err error
-  for i := 0; i < len(msg); i++ {
-    var m *big.Int
-    m, err = rand.Int(rand.Reader, ORDER)
-    msg[i] = *m
-  }
+  _, err := rand.Read(msg[:])
   return msg, err
 }
 

@@ -1,23 +1,11 @@
 package db
 
 import (
-  "math/big"
   "net/rpc"
   "sync"
 
   "henrycg/email/prf"
-  "henrycg/zkp/group"
-  "henrycg/zkp/schnorr"
 )
-
-var ORDER *big.Int
-
-func init() {
-  ORDER = group.CurveP256().Order()
-}
-
-// Generate client zero knowledge proofs of correctness
-const GENERATE_PROOFS bool = false
 
 // Number of "dimensions" for PIR scheme
 const NUM_DIMENSIONS = 2
@@ -30,11 +18,11 @@ const TABLE_HEIGHT int = 1 << 9
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 48
 
-// Length of plaintext messages (in big integers)
-const SLOT_LENGTH int = 8// 64 KB
+// Length of plaintext messages (in bytes)
+const SLOT_LENGTH int = 256
 
 type BitMatrix [TABLE_HEIGHT]BitMatrixRow
-type BitMatrixRow [TABLE_WIDTH*SLOT_LENGTH]big.Int
+type BitMatrixRow [TABLE_WIDTH*SLOT_LENGTH]byte
 
 type SlotTable struct {
   table BitMatrix
@@ -49,7 +37,7 @@ const (
   State_AcceptPlaintext = iota
 )
 
-type SlotContents [SLOT_LENGTH]big.Int
+type SlotContents [SLOT_LENGTH]byte
 
 type EncryptedInsertQuery struct {
   SenderPublicKey [32]byte
@@ -65,11 +53,6 @@ type InsertQuery struct {
   Keys [TABLE_HEIGHT]prf.Key
   KeyMask [TABLE_HEIGHT]bool
   MessageMask BitMatrixRow
-
-  CommitsA []group.Element
-  CommitsB []group.Element
-  KeyCommitSecrets []big.Int
-  KeyProof schnorr.ManyEvidence
 }
 
 type UploadReply struct {
