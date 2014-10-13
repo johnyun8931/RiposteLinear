@@ -113,15 +113,26 @@ type DecryptReply struct {
   Cleartexts [][]byte
 }
 
+type BlameArgs struct {
+  // Nothing
+}
+
+type BlameReply struct {
+  Queries map[int64]([]*InsertQuery)
+}
 
 type Server struct {
   ServerIdx int
   State DbState
 
-  ClientsServed int
+  clientsServedMutex sync.Mutex
+  clientsServed int
 
   pending map[int64]([]*InsertQuery)
   pendingMutex sync.Mutex
+
+  committed map[int64]([]*InsertQuery)
+  committedMutex sync.Mutex
 
   entries *SlotTable
 

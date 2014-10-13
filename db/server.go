@@ -254,13 +254,17 @@ func (t *Server) sendMergeRequest() {
 
   plaintext := revealCleartext(replies)
   n_collisions, darg := t.decideToDecrypt(plaintext)
-  coll_prob := CollisionProbability(t.ClientsServed,
+  coll_prob := CollisionProbability(t.clientsServed,
     TABLE_WIDTH*TABLE_HEIGHT, n_collisions)
   log.Printf("%v collision(s), %v prob of occuring", n_collisions, coll_prob)
-  if coll_prob < 0.1 {
-    panic("Should trigger blame process!")
+  if true /*coll_prob < 0.1 XXX here */{
+    t.sendBlameRequest()
+  } else {
+    t.sendDecryptRequest(darg)
   }
+}
 
+func (t *Server) sendDecryptRequest(darg *DecryptArgs) {
   // Decide whether to decrypt
 
   // If YES, then decrypt send partial ciphertexts
@@ -275,8 +279,44 @@ func (t *Server) sendMergeRequest() {
     log.Printf("[%v] %v", i, msg)
   }
 
+  t.wrapUp()
+}
+
+func (t *Server) sendBlameRequest() {
+  var b_args BlameArgs
+  var b_reply BlameReply
+
+  err := t.rpcClients[1].Call("Server.Blame", &b_args, &b_reply)
+  if err != nil {
+    log.Fatal("Error in blame: ", err)
+  }
+
+  t.committedMutex.Lock()
+  for uuid := range b_reply.Queries {
+    val,ok := t.committed[uuid]
+    if !ok {
+      log.Fatal("Other server is evil! Did not send all committed reqs.")
+      break
+    }
+
+    for i := range val {
+      if !QueriesMatch(val[i], b_reply.Queries[uuid][i]) {
+        log.Printf("Identified evil request %v.%v", uuid, i)
+      }
+    }
+  }
+  t.committedMutex.Unlock()
+
+  t.wrapUp()
+}
+
+func (t *Server) wrapUp() {
+  t.clientsServedMutex.Lock()
+  t.clientsServed = 0
+  t.clientsServedMutex.Unlock()
+  t.State = State_AcceptUpload
+
   log.Printf("Done MERGE")
-  MemCleanup()
 }
 
 func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
@@ -299,6 +339,11 @@ func (t *Server) decideToDecrypt(plaintext *BitMatrix) (int, *DecryptArgs) {
 
   var zeros [SLOT_LENGTH]byte
 
+  // For the moment, we count only messages that fail
+  // to decrypt as collisions. Depending on the security
+  // game, could also define it as the # of requests minus
+  // the number of valid decryptions.
+  n_collisions := 0
   for i := 0; i < len(plaintext); i++ {
     for j := 0; j < len(plaintext[i]); j += SLOT_LENGTH {
       slot := plaintext[i][j:(j+SLOT_LENGTH)]
@@ -307,12 +352,12 @@ func (t *Server) decideToDecrypt(plaintext *BitMatrix) (int, *DecryptArgs) {
         buf, err := DecryptSlot(0, slot[:])
         if err == nil {
           d_args.ToDecrypt = append(d_args.ToDecrypt, buf)
+        } else {
+          n_collisions += 1
         }
       }
     }
   }
-
-  n_collisions := t.ClientsServed - len(d_args.ToDecrypt)
 
   return n_collisions, &d_args
 }
@@ -368,8 +413,20 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
     return err
   }
 
+  // Copy executed query to list of committed queries
+  t.committedMutex.Lock()
+  if t.committed == nil {
+    t.committed = map[int64]([]*InsertQuery){}
+  }
+  t.committed[com.Uuid] = t.pending[com.Uuid]
+  t.committedMutex.Unlock()
+
   delete(t.pending, com.Uuid)
   t.pendingMutex.Unlock()
+
+  t.clientsServedMutex.Lock()
+  t.clientsServed += len(val)
+  t.clientsServedMutex.Unlock()
 
   // Update the database with the query
   log.Printf("Processing query %d [len %v]", t.ServerIdx, len(val))
@@ -395,8 +452,14 @@ func (t *Server) Decrypt(args *DecryptArgs, reply *DecryptReply) error {
     }
   }
 
-  t.ClientsServed = 0
   t.State = State_AcceptUpload
+  return nil
+}
+
+func (t *Server) Blame(com *BlameArgs, reply *BlameReply) error {
+  t.committedMutex.Lock()
+  reply.Queries = t.committed
+  t.committedMutex.Unlock()
   return nil
 }
 
@@ -499,7 +562,9 @@ func NewServer(serverIdx int) *Server {
   t.entries = NewSlotTable()
   t.plain = NewBitMatrix()
   t.ServerIdx = serverIdx
-  t.ClientsServed = 0
+  t.clientsServedMutex.Lock()
+  t.clientsServed = 0
+  t.clientsServedMutex.Unlock()
   t.State = State_AcceptUpload
 
   return t
