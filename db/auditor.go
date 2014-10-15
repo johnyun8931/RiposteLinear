@@ -6,10 +6,13 @@ import (
   "encoding/binary"
   "log"
 
+  "code.google.com/p/go.crypto/poly1305"
+
   "henrycg/email/prf"
   "henrycg/email/utils"
-  "henrycg/ffield"
 )
+
+const MAC_KEY_SIZE = 32
 
 type Auditor struct {
 }
@@ -47,9 +50,9 @@ func (t *Auditor) Audit(args *AuditArgs, reply *AuditReply) error {
 }
 
 func sharedSecretVector(uuid int64, queryIdx, itemIdx, serverA, serverB,
-    length int) [][ffield.BYTES_PER_FIELD_ELEMENT]byte {
-  vec := make([][ffield.BYTES_PER_FIELD_ELEMENT]byte, length)
-  str := make([]byte, length * ffield.BYTES_PER_FIELD_ELEMENT)
+    length int) [][MAC_KEY_SIZE]byte {
+  vec := make([][MAC_KEY_SIZE]byte, length)
+  str := make([]byte, length * MAC_KEY_SIZE)
 
   // XXX THIS IS UNSAFE -- JUST FOR PERFORMANCE TESTING
   sha_input := new(bytes.Buffer)
@@ -66,7 +69,7 @@ func sharedSecretVector(uuid int64, queryIdx, itemIdx, serverA, serverB,
   gen, _ := prf.NewPrf(key16)
   gen.Evaluate(str)
 
-  block := ffield.BYTES_PER_FIELD_ELEMENT
+  block := MAC_KEY_SIZE
   for i := 0; i<length; i++ {
     start := i * block
     copy(vec[i][:], str[start:(start+block)])
@@ -76,46 +79,83 @@ func sharedSecretVector(uuid int64, queryIdx, itemIdx, serverA, serverB,
 }
 
 func keyTestVector(uuid int64, queryIdx int, serverIdx int,
-    query *InsertQuery) [][ffield.BYTES_PER_FIELD_ELEMENT]byte {
+    query *InsertQuery) [][poly1305.TagSize]byte {
   length := len(query.Keys)
-  vec := make([][ffield.BYTES_PER_FIELD_ELEMENT]byte, length)
+  vec := make([][]byte, length)
 
   // Combine bitmask and keys into a single vector called "vec"
   for i := range vec {
+    vec[i] = make([]byte, prf.KEY_LENGTH + 1)
     if query.KeyMask[i] {
       vec[i][0] = 0xff
     }
     copy(vec[i][1:], query.Keys[i][:])
   }
 
-  // Compute r and v vectors
-  r := sharedSecretVector(uuid, queryIdx, 0, serverIdx, 1 - serverIdx, length)
-  v := sharedSecretVector(uuid, queryIdx, 1, serverIdx, 1 - serverIdx, length)
+  return macVector(uuid, queryIdx, serverIdx, vec)
+}
 
-  offset_bytes := sharedSecretVector(uuid, queryIdx, 2, serverIdx, 1 - serverIdx, 1)
+func msgTestVector(uuid int64, queryIdx int, serverIdx int,
+    query *InsertQuery) [][poly1305.TagSize]byte {
+  row := make([]byte, len(query.MessageMask))
+
+  if serverIdx > 0 {
+    copy(row, query.MessageMask[:])
+  }
+
+  // XOR in output of all PRG seeds
+  var err error
+  var row_prf prf.Prf
+  for i := 0; i<TABLE_HEIGHT; i++{
+    row_prf, err = prf.NewPrf(query.Keys[i])
+    if err != nil {
+      panic("Cannot create PRF!")
+    }
+
+    row_prf.Evaluate(row)
+  }
+
+  // Divide up the one long []byte into chunks of
+  // size SLOT_LENGTH
+  vec := make([][]byte, TABLE_WIDTH)
+  for i := range vec {
+    vec[i] = make([]byte, SLOT_LENGTH)
+    start := i * SLOT_LENGTH
+    copy(vec[i], row[start:(start+SLOT_LENGTH)])
+  }
+
+  return macVector(uuid, queryIdx, serverIdx, vec)
+}
+
+func macVector(uuid int64, queryIdx int, serverIdx int, vec_to_mac [][]byte) [][poly1305.TagSize]byte {
+  length := len(vec_to_mac)
+
+  // Compute shared secret keys for MAC
+  keys := sharedSecretVector(uuid, queryIdx, 2, serverIdx, 1 - serverIdx, length)
+  offset_bytes := sharedSecretVector(uuid, queryIdx, 3, serverIdx, 1 - serverIdx, 1)
   offset, _ := binary.Uvarint(offset_bytes[0][0:8])
   offset %= uint64(length)
 
-  keyTest := make([][ffield.BYTES_PER_FIELD_ELEMENT]byte, length)
+  out := make([][poly1305.TagSize]byte, length)
 
-  // y1 = ((r*(x1 + v)) << offset)      and      y2 = ((r*(x2 + v)) << offset)
-  for i := range vec {
+  // y1 = (H_k(m1) << offset)      and      y2 = (H_k(m2) << offset)
+  var mac_value [poly1305.TagSize]byte
+  for i := range vec_to_mac {
     // Convert vectors into elements of GF(2^256)
-    x_elm := ffield.Set(vec[i])
-    r_elm := ffield.Set(r[i])
-    v_elm := ffield.Set(v[i])
-
-    res := ffield.Mul(r_elm, ffield.Add(x_elm, v_elm))
-    keyTest[(i + int(offset)) % length] = ffield.Get(res)
+    poly1305.Sum(&mac_value, vec_to_mac[i][:], &keys[i])
+    out[(i + int(offset)) % length] = mac_value
   }
 
-  return keyTest
+  return out
 }
 
 func PrepareAudit(uuid int64, queryIdx int, serverIdx int,
     query *InsertQuery) EncryptedAuditQuery {
   var q AuditQuery
+
   q.KeyTest = keyTestVector(uuid, queryIdx, serverIdx, query)
+  q.MsgTest = msgTestVector(uuid, queryIdx, serverIdx, query)
+
   out, err := EncryptAudit(q)
   if err != nil {
     panic("Unexpected error in encryption!")
@@ -125,17 +165,29 @@ func PrepareAudit(uuid int64, queryIdx int, serverIdx int,
 }
 
 func validateQueries(q1, q2 *AuditQuery) bool {
-  if len(q1.KeyTest) != len(q2.KeyTest) || len(q1.KeyTest) != TABLE_HEIGHT {
+  if len(q1.KeyTest) != TABLE_HEIGHT {
+    return false
+  }
+
+  if len(q1.MsgTest) != TABLE_WIDTH {
+    return false
+  }
+
+  b1 := vectorsDifferAtMostOnce(q1.KeyTest, q2.KeyTest)
+  b2 := vectorsDifferAtMostOnce(q1.MsgTest, q2.MsgTest)
+
+  return b1 && b2
+}
+
+func vectorsDifferAtMostOnce(v1, v2 [][poly1305.TagSize]byte) bool {
+  if len(v1) != len(v2) {
     return false
   }
 
   seen := false
-  for i := range q1.KeyTest {
-    e1 := ffield.Set(q1.KeyTest[i])
-    e2 := ffield.Set(q2.KeyTest[i])
-
+  for i := range v1 {
     // Require that all but one of the entries are equal
-    if !ffield.Equal(e1, e2) {
+    if bytes.Compare(v1[i][:], v2[i][:]) != 0 {
       //log.Printf("Not equal %v %v", e1, e2)
       if seen {
         return false
@@ -144,8 +196,6 @@ func validateQueries(q1, q2 *AuditQuery) bool {
       }
     }
   }
-
-  log.Printf("Not yet auditing message vector!")
 
   return true
 }

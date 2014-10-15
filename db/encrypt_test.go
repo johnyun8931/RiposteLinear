@@ -5,7 +5,8 @@ import (
   "testing"
   "henrycg/email/prf"
   "henrycg/email/utils"
-  "henrycg/ffield"
+
+  "code.google.com/p/go.crypto/poly1305"
 )
 
 func randomQuery(t *testing.T) InsertQuery {
@@ -25,8 +26,8 @@ func randomQuery(t *testing.T) InsertQuery {
 func randomAudit(t *testing.T) AuditQuery {
   var q AuditQuery
   l := 128
-  q.MsgTest = make([][ffield.BYTES_PER_FIELD_ELEMENT]byte, l)
-  q.KeyTest = make([][ffield.BYTES_PER_FIELD_ELEMENT]byte, l)
+  q.MsgTest = make([][poly1305.TagSize]byte, l)
+  q.KeyTest = make([][poly1305.TagSize]byte, l)
   for i := range q.MsgTest {
     rand.Read(q.MsgTest[i][:])
     rand.Read(q.KeyTest[i][:])

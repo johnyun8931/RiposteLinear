@@ -455,15 +455,13 @@ func (t *Server) openConnections() error {
     return errors.New("Only leader should open connections")
   }
 
-  n := len(utils.AllServers())
-  c := make(chan int, n)
-  servers := utils.AllServers()
-  for i := range servers {
-    go t.connectToServer(&t.rpcClients[i], servers[i], i, c)
+  c := make(chan int, len(t.ServerAddrs))
+  for i := range t.ServerAddrs {
+    go t.connectToServer(&t.rpcClients[i], t.ServerAddrs[i], i, c)
   }
 
   // Wait for all connections
-  for i := 0; i < NUM_SERVERS; i++ {
+  for i := 0; i < len(t.ServerAddrs); i++ {
     if <-c != 1 {
       return errors.New("Connection failed")
     }
@@ -521,11 +519,12 @@ func (t *Server) Download(args *DownloadArgs, reply *DownloadReply) error {
 }
 */
 
-func NewServer(serverIdx int) *Server {
+func NewServer(serverIdx int, serverAddrs []string) *Server {
   t := new(Server)
   t.entries = new(SlotTable)
   t.plain = new(BitMatrix)
   t.ServerIdx = serverIdx
+  t.ServerAddrs = serverAddrs
   t.ClientsServed = 0
   t.State = State_AcceptUpload
 

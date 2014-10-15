@@ -4,8 +4,9 @@ import (
   "net/rpc"
   "sync"
 
+  "code.google.com/p/go.crypto/poly1305"
+
   "henrycg/email/prf"
-  "henrycg/ffield"
 )
 
 const AUDIT_SERVER int = 2
@@ -80,8 +81,8 @@ type PrepareReply struct {
 }
 
 type AuditQuery struct {
-  MsgTest [][ffield.BYTES_PER_FIELD_ELEMENT]byte
-  KeyTest [][ffield.BYTES_PER_FIELD_ELEMENT]byte
+  MsgTest [][poly1305.TagSize]byte
+  KeyTest [][poly1305.TagSize]byte
 }
 
 type AuditArgs struct {
@@ -115,6 +116,7 @@ type PlaintextReply struct {
 type Server struct {
   ServerIdx int
   State DbState
+  ServerAddrs []string
 
   ClientsServed int
 

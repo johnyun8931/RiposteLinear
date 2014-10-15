@@ -15,7 +15,7 @@ var curve = utils.CommonCurve
 
 
 func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
-    msg SlotContents) error {
+    msg SlotContents, corrupted bool) error {
 
   // Create random values for secret sharing
   var keys [TABLE_HEIGHT]prf.Key
@@ -43,6 +43,12 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
   msgMask, err = computeMessageMask(keys[yIdx], keysP[yIdx], msg, xIdx)
   if err != nil {
     return err
+  }
+
+  if corrupted {
+    log.Printf("Bogus!")
+    msgMask[2] = 0xff
+    keys[1][1] = 0xff
   }
 
   for i := 0; i < NUM_SERVERS; i++ {
@@ -154,4 +160,5 @@ func RandomMessage() (int, int, SlotContents, error) {
   msg, err = RandomSlot()
   return xIdx, yIdx, msg, err
 }
+
 

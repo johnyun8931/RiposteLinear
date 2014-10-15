@@ -2,14 +2,15 @@ package main
 
 import (
   "crypto/tls"
+  "errors"
+  "flag"
   "fmt"
   "log"
-  "net"
   "net/rpc"
   "os"
   "os/signal"
   "runtime/pprof"
-  "strconv"
+  "strings"
 )
 
 import (
@@ -17,62 +18,82 @@ import (
   "henrycg/email/utils"
 )
 
+var flagProfile = flag.Bool("profile", false, "Run CPU profiler")
+var flagIndex = flag.Int("idx", -1, "Server index")
+
+// List of server addresses
+type serverListType []string
+var serverList serverListType
+
+func (s *serverListType) String() string {
+  return fmt.Sprint(*s)
+}
+
+// Comma-separated list of server addresses (ip:port)
+func (s *serverListType) Set(value string) error {
+  if len(*s) > 0 {
+    return errors.New("server flag already set")
+  }
+
+  for _, dt := range strings.Split(value, ",") {
+    *s = append(*s, dt)
+  }
+  return nil
+}
+
+func init() {
+  flag.Var(&serverList, "servers", "Comma-separated list of servers (in \"ip:port\" form)")
+}
+
 func main() {
-  if len(os.Args) < 3 || len(os.Args) > 4 {
-    log.Fatal("Usage: ", os.Args[0], " [index] [port] [--profile]")
+  flag.Parse()
+
+  if *flagIndex < 0 {
+    log.Fatal("Must server index must be greater than zero")
     return
   }
 
-  idx,err := strconv.Atoi(os.Args[1])
-  if err != nil {
-    log.Fatal("Invalid index: %s", os.Args[1])
+
+  idx := *flagIndex
+
+  if len(serverList) < 1 || idx > len(serverList) - 1 {
+    log.Fatal("Must specify a list of servers")
     return
   }
 
   log.SetPrefix(fmt.Sprintf("[Server %v] ", idx))
 
-  if len(os.Args) > 3 {
-    if os.Args[3] == "--profile" {
-      f, err := os.Create(fmt.Sprintf("server-%v.prof", idx))
-      if err != nil {
-        log.Fatal(err)
-      }
-      pprof.StartCPUProfile(f)
-
-      // Stop when process exits
-      defer pprof.StopCPUProfile()
-
-      // Stop on ^C
-      c := make(chan os.Signal, 1)
-      signal.Notify(c, os.Interrupt)
-      go func(){
-        for _ = range c {
-          // sig is a ^C, handle it
-          pprof.StopCPUProfile()
-          os.Exit(0)
-        }
-      }()
-    } else {
-      log.Fatal("Invalid profile flag")
+  if *flagProfile {
+    f, err := os.Create(fmt.Sprintf("server-%v.prof", idx))
+    if err != nil {
+      log.Fatal(err)
     }
+    pprof.StartCPUProfile(f)
+
+    // Stop when process exits
+    defer pprof.StopCPUProfile()
+
+    // Stop on ^C
+    c := make(chan os.Signal, 1)
+    signal.Notify(c, os.Interrupt)
+    go func(){
+      for _ = range c {
+        // sig is a ^C, handle it
+        pprof.StopCPUProfile()
+        os.Exit(0)
+      }
+    }()
   }
-
-  port := os.Args[2]
-
 
   if idx == db.AUDIT_SERVER {
     auditor := new(db.Auditor)
     rpc.Register(auditor)
   } else {
     var a int
-    slotTable := db.NewServer(idx)
-    go slotTable.Initialize(&a, &a)
+    slotTable := db.NewServer(idx, serverList)
+    slotTable.Initialize(&a, &a)
     rpc.Register(slotTable)
   }
-
-
-  //rpc.HandleHTTP()
-  addr := net.JoinHostPort("", port)
 
   var certs []tls.Certificate
 
@@ -81,8 +102,10 @@ func main() {
   if idx > 0 {
     certs = append(certs, utils.LeaderCertificate)
   }
-  utils.ListenAndServe(addr, idx, certs)
-  log.Printf("Server %d is listening at %s", idx, port)
+
+  utils.ListenAndServe(serverList[idx], idx, certs)
+  log.Printf("Server %d is listening at %s", idx, serverList[idx])
 
   //http.ListenAndServe(addr, nil)
 }
+

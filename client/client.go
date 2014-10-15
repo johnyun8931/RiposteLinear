@@ -1,15 +1,19 @@
 package main
 
 import (
-  //"crypto/rand"
   "crypto/tls"
-//  "fmt"
+  "flag"
+  "fmt"
+  "os"
   "net/rpc"
   "log"
 
   "henrycg/email/db"
   "henrycg/email/utils"
 )
+
+var bogusFlag = flag.Bool("bogus", false, "If set, client sends an invalid request.")
+var leaderFlag = flag.String("leader", "", "Leader IP and port")
 
 func tryUpload(client *rpc.Client, args db.UploadArgs) error {
   var upRes db.UploadReply
@@ -49,12 +53,17 @@ func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
     return
   }
   log.Printf("Done uploading")
-  //*tab = tryDumpTable(client)
 
   log.Printf("Done")
 }
 
 func main() {
+  flag.Parse()
+  if *leaderFlag == "" {
+    fmt.Printf("Must specify leader.\n")
+    os.Exit(1)
+  }
+
   xIdx, yIdx, msg, err := db.RandomMessage()
 
   if err != nil {
@@ -66,24 +75,13 @@ func main() {
   log.Printf("Plaintext [%v]", msg)
 
   var args db.UploadArgs
-  err = db.InitializeUploadArgs(&args, xIdx, yIdx, msg)
+  err = db.InitializeUploadArgs(&args, xIdx, yIdx, msg, *bogusFlag)
   if err != nil {
     log.Fatal("error: ", err)
     return
   }
 
   var table db.DumpReply
-  servers := utils.AllServers()
-  leader := servers[0]
-  runClient(leader, args, &table)
-
-  /*
-  for i := 0; i<db.TABLE_WIDTH; i++ {
-    for j := 0; j<db.TABLE_HEIGHT; j++ {
-      fmt.Printf("%v", table.Entries[i][j].Message)
-    }
-    fmt.Printf("\n")
-  }
-  */
+  runClient(*leaderFlag, args, &table)
 }
 

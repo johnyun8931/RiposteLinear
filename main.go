@@ -4,13 +4,9 @@ import (
   "fmt"
   "io"
   "log"
-  "net"
   "os/exec"
   "strconv"
-)
-
-import (
-  "henrycg/email/utils"
+  "strings"
 )
 
 func readAll(p io.ReadCloser) {
@@ -22,17 +18,18 @@ func readAll(p io.ReadCloser) {
 }
 
 func main() {
-  var servers = utils.AllServers()
+  var servers = []string {
+    "localhost:9090",
+    "localhost:9091",
+    "localhost:9092",
+  }
+
+  s := strings.Join(servers, ",")
 
   var procs []*exec.Cmd = make([]*exec.Cmd, len(servers))
   for i := range servers {
-    _, port, err := net.SplitHostPort(servers[i])
     log.Printf("Starting server: %v", servers[i])
-    if err != nil {
-      log.Fatal("Oh no!")
-      return
-    }
-    procs[i] = exec.Command("./server", strconv.Itoa(i), port, "--profile")
+    procs[i] = exec.Command("./server", "-servers", s, "-idx", strconv.Itoa(i))
     stdout, err := procs[i].StdoutPipe()
     stderr, err := procs[i].StderrPipe()
     go readAll(stdout)

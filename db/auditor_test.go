@@ -2,6 +2,8 @@ package db
 
 import (
   "testing"
+
+  "code.google.com/p/go.crypto/poly1305"
 )
 
 func TestSharedSecret(t *testing.T) {
@@ -25,4 +27,25 @@ func TestSharedSecret(t *testing.T) {
     }
   }
 }
+
+func TestVectorDiff(t *testing.T) {
+  v1 := make([][poly1305.TagSize]byte, 3)
+  v2 := make([][poly1305.TagSize]byte, 3)
+  v3 := make([][poly1305.TagSize]byte, 4)
+
+  if !vectorsDifferAtMostOnce(v1, v2) || vectorsDifferAtMostOnce(v1, v3) {
+    t.FailNow()
+  }
+
+  v1[0][1] = 0xff
+  if !vectorsDifferAtMostOnce(v1, v2) {
+    t.FailNow()
+  }
+
+  v1[2][1] = 0xff
+  if vectorsDifferAtMostOnce(v1, v2) {
+    t.FailNow()
+  }
+}
+
 
