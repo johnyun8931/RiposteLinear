@@ -29,6 +29,8 @@ func main() {
     return
   }
 
+  log.SetPrefix(fmt.Sprintf("[Server %v] ", idx))
+
   if len(os.Args) > 3 {
     if os.Args[3] == "--profile" {
       f, err := os.Create(fmt.Sprintf("server-%v.prof", idx))
@@ -56,13 +58,19 @@ func main() {
   }
 
   port := os.Args[2]
-  slotTable := db.NewServer(idx)
-  var a int
-  go slotTable.Initialize(&a, &a)
 
-  log.SetPrefix(fmt.Sprintf("[Server %v] ", idx))
 
-  rpc.Register(slotTable)
+  if idx == db.AUDIT_SERVER {
+    auditor := new(db.Auditor)
+    rpc.Register(auditor)
+  } else {
+    var a int
+    slotTable := db.NewServer(idx)
+    go slotTable.Initialize(&a, &a)
+    rpc.Register(slotTable)
+  }
+
+
   //rpc.HandleHTTP()
   addr := net.JoinHostPort("", port)
 

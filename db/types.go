@@ -1,17 +1,14 @@
 package db
 
 import (
-  "math/big"
   "net/rpc"
   "sync"
 
   "henrycg/email/prf"
-  "henrycg/zkp/group"
-  "henrycg/zkp/schnorr"
+  "henrycg/ffield"
 )
 
-// Generate client zero knowledge proofs of correctness
-const GENERATE_PROOFS bool = true
+const AUDIT_SERVER int = 2
 
 // Number of "dimensions" for PIR scheme
 const NUM_DIMENSIONS = 2
@@ -51,6 +48,8 @@ type EncryptedInsertQuery struct {
   Ciphertext []byte
 }
 
+type EncryptedAuditQuery EncryptedInsertQuery
+
 type UploadArgs struct {
   Query [NUM_SERVERS]EncryptedInsertQuery
 }
@@ -59,11 +58,6 @@ type InsertQuery struct {
   Keys [TABLE_HEIGHT]prf.Key
   KeyMask [TABLE_HEIGHT]bool
   MessageMask BitMatrixRow
-
-  CommitsA []group.Element
-  CommitsB []group.Element
-  KeyCommitSecrets []*big.Int
-  KeyProof schnorr.ManyEvidence
 }
 
 type UploadReply struct {
@@ -74,17 +68,6 @@ type DumpReply struct {
   Entries *BitMatrix
 }
 
-/*
-type DownloadArgs struct {
-  XCoords [NUM_SLOTS]bool
-  YCoords [NUM_SLOTS]bool
-}
-
-type DownloadReply struct {
-  Data SlotContents
-}
-*/
-
 type PrepareArgs struct {
   Uuid int64
   Queries []EncryptedInsertQuery
@@ -92,6 +75,21 @@ type PrepareArgs struct {
 
 type PrepareReply struct {
   // VOTE: YES/NO
+  QueryToAudit []EncryptedAuditQuery
+  Okay bool
+}
+
+type AuditQuery struct {
+  MsgTest [][ffield.BYTES_PER_FIELD_ELEMENT]byte
+  KeyTest [][ffield.BYTES_PER_FIELD_ELEMENT]byte
+}
+
+type AuditArgs struct {
+  Uuid int64
+  QueriesToAudit *[NUM_SERVERS][]EncryptedAuditQuery
+}
+
+type AuditReply struct {
   Okay bool
 }
 
@@ -128,6 +126,6 @@ type Server struct {
   plain *BitMatrix
   plainMutex sync.Mutex
 
-  rpcClients [NUM_SERVERS]*rpc.Client
+  rpcClients [NUM_SERVERS+1]*rpc.Client
 }
 

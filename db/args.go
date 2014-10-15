@@ -15,7 +15,7 @@ var curve = utils.CommonCurve
 
 
 func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
-    msg SlotContents, doProof bool) error {
+    msg SlotContents) error {
 
   // Create random values for secret sharing
   var keys [TABLE_HEIGHT]prf.Key
@@ -40,13 +40,6 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
     return err
   }
 
-  var ev schnorr.ManyEvidence
-  var commitsA, commitsB []group.Element
-  var secA, secB []*big.Int
-  if doProof {
-    ev, commitsA, secA, commitsB, secB = computeProof(keys[:], keysP[:], keyMask[:], keyMaskP[:], yIdx)
-  }
-
   msgMask, err = computeMessageMask(keys[yIdx], keysP[yIdx], msg, xIdx)
   if err != nil {
     return err
@@ -58,15 +51,10 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
     plainQuery.MessageMask = msgMask
     plainQuery.Keys = keys
     plainQuery.KeyMask = keyMask
-    plainQuery.KeyProof = ev
-    plainQuery.CommitsA = commitsA
-    plainQuery.CommitsB = commitsB
-    plainQuery.KeyCommitSecrets = secA
 
     if (i & 1) > 0 {
       plainQuery.Keys = keysP
       plainQuery.KeyMask = keyMaskP
-      plainQuery.KeyCommitSecrets = secB
     }
 
     var err error

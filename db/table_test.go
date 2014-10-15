@@ -25,21 +25,17 @@ func TestSimple(t *testing.T) {
 }
 
 func TestEndToEndNoProof(t *testing.T) {
-  testEndToEndOnce(t, false)
+  testEndToEndOnce(t)
 }
 
-func TestEndToEndProof(t *testing.T) {
-  testEndToEndOnce(t, true)
-}
-
-func testEndToEndOnce(t *testing.T, doProof bool) {
+func testEndToEndOnce(t *testing.T) {
   xIdx, yIdx, msg, err := RandomMessage()
   if err != nil {
     t.FailNow()
   }
 
   var args UploadArgs
-  err = InitializeUploadArgs(&args, xIdx, yIdx, msg, doProof)
+  err = InitializeUploadArgs(&args, xIdx, yIdx, msg)
   if err != nil {
     t.FailNow()
   }
@@ -91,7 +87,7 @@ func BenchmarkTable(b *testing.B) {
   }
 
   var args UploadArgs
-  err = InitializeUploadArgs(&args, xIdx, yIdx, msg, false)
+  err = InitializeUploadArgs(&args, xIdx, yIdx, msg)
   if err != nil {
     b.FailNow()
   }

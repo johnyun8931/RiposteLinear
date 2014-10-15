@@ -10,11 +10,68 @@ import (
   "henrycg/email/utils"
 )
 
-// XXX This is a terrible way to implement this functionality.
-// Box provides authentication, which we don't need. I'm using 
-// it now just because I don't want to use Go's PGP or RSA 
-// implementations. 
 func EncryptQuery(serverIdx int, query InsertQuery) (EncryptedInsertQuery, error) {
+  var out EncryptedInsertQuery
+  var buf bytes.Buffer
+  enc := gob.NewEncoder(&buf)
+  err := enc.Encode(query)
+  if err != nil {
+    return out, err
+  }
+
+  return encryptBytes(serverIdx, buf.Bytes())
+}
+
+
+func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (*InsertQuery, error) {
+  /*
+  log.Printf("pk   %v", enc.SenderPublicKey)
+  log.Printf("nc   %v", enc.Nonce)
+  log.Printf("ct   %v", enc.Ciphertext)
+  */
+
+  buf, err := decryptBytes(serverIdx, enc)
+
+  query := new(InsertQuery)
+  if err != nil {
+    return query, err
+  }
+
+  dec := gob.NewDecoder(bytes.NewBuffer(buf))
+  err = dec.Decode(&query)
+  return query, err
+}
+
+func EncryptAudit(query AuditQuery) (EncryptedAuditQuery, error) {
+  var out EncryptedAuditQuery
+  var buf bytes.Buffer
+  enc := gob.NewEncoder(&buf)
+  err := enc.Encode(query)
+  if err != nil {
+    return out, err
+  }
+
+  q, err := encryptBytes(AUDIT_SERVER, buf.Bytes())
+  return EncryptedAuditQuery(q), err
+}
+
+func DecryptAudit(enc EncryptedAuditQuery) (*AuditQuery, error) {
+  buf, err := decryptBytes(AUDIT_SERVER, EncryptedInsertQuery(enc))
+
+  query := new(AuditQuery)
+  if err != nil {
+    return query, err
+  }
+
+  dec := gob.NewDecoder(bytes.NewBuffer(buf))
+  err = dec.Decode(&query)
+
+  return query, err
+}
+
+/*** Helper Functions ***/
+
+func encryptBytes(serverIdx int, buf []byte) (EncryptedInsertQuery, error) {
   var out EncryptedInsertQuery
   serverPublicKey := utils.ServerBoxPublicKeys[serverIdx]
   var nonce [24]byte
@@ -23,18 +80,11 @@ func EncryptQuery(serverIdx int, query InsertQuery) (EncryptedInsertQuery, error
     return out, err
   }
 
-  var buf bytes.Buffer
-  enc := gob.NewEncoder(&buf)
-  err = enc.Encode(query)
-  if err != nil {
-    return out, err
-  }
-
   myPublicKey, myPrivateKey, err := box.GenerateKey(rand.Reader)
 
   out.SenderPublicKey = *myPublicKey
   out.Nonce = nonce
-  out.Ciphertext = box.Seal(nil, buf.Bytes(), &nonce, serverPublicKey, myPrivateKey)
+  out.Ciphertext = box.Seal(nil, buf, &nonce, serverPublicKey, myPrivateKey)
 
   /*
   log.Printf("pk   %v", out.SenderPublicKey)
@@ -45,31 +95,16 @@ func EncryptQuery(serverIdx int, query InsertQuery) (EncryptedInsertQuery, error
   return out, nil
 }
 
-func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (*InsertQuery, error) {
+func decryptBytes(serverIdx int, enc EncryptedInsertQuery) ([]byte, error) {
   serverPrivateKey := utils.ServerBoxPrivateKeys[serverIdx]
-
-  /*
-  log.Printf("pk   %v", enc.SenderPublicKey)
-  log.Printf("nc   %v", enc.Nonce)
-  log.Printf("ct   %v", enc.Ciphertext)
-  */
 
   var buf []byte
   buf, okay := box.Open(nil, enc.Ciphertext, &enc.Nonce,
       &enc.SenderPublicKey, serverPrivateKey)
 
-  query := new(InsertQuery)
   if !okay {
-    return query, errors.New("Could not decrypt")
+    return buf, errors.New("Could not decrypt")
   }
 
-  dec := gob.NewDecoder(bytes.NewBuffer(buf))
-  err := dec.Decode(&query)
-  if err != nil {
-    return query, err
-  }
-
-  return query, nil
-
+  return buf, nil
 }
-

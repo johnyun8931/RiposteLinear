@@ -9,6 +9,8 @@ import (
   "crypto/tls"
   "encoding/hex"
   "log"
+
+  "code.google.com/p/go.crypto/nacl/box"
 )
 
 var serverPublicKeys = [...]string {
@@ -328,6 +330,7 @@ var ServerCertificates []tls.Certificate
 var LeaderCertificate tls.Certificate
 var ServerBoxPublicKeys []*[32]byte
 var ServerBoxPrivateKeys []*[32]byte
+var SharedSecrets [][][32]byte
 
 func stringToArray(s string) *[32]byte {
   arr := new([32]byte)
@@ -362,6 +365,16 @@ func init() {
 
     ServerBoxPublicKeys[i] = stringToArray(serverBoxPublicHex[i])
     ServerBoxPrivateKeys[i] = stringToArray(serverBoxPrivateHex[i])
+
+  }
+
+  SharedSecrets = make([][][32]byte, nServers)
+  for i := 0; i<nServers; i++ {
+    SharedSecrets[i] = make([][32]byte, nServers)
+    for j := 0; j<nServers; j++ {
+      box.Precompute(&SharedSecrets[i][j], ServerBoxPublicKeys[i],
+        ServerBoxPrivateKeys[j])
+    }
   }
 
   LeaderCertificate = ServerCertificates[0]
