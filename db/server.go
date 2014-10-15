@@ -168,7 +168,14 @@ func (t *Server) submitPrepares() {
 
     var auditArgs AuditArgs
     auditArgs.Uuid = uuid
-    auditArgs.QueriesToAudit = new([NUM_SERVERS][]EncryptedAuditQuery)
+    if len(replies[0].QueryToAudit) != len(replies[1].QueryToAudit) {
+      panic("Length mismatch")
+    }
+
+    auditList := make([][NUM_SERVERS]EncryptedAuditQuery,
+      len(replies[0].QueryToAudit))
+    auditArgs.QueriesToAudit = &auditList
+
     okay := true
     for i:=0; i<NUM_SERVERS; i++ {
       if !replies[i].Okay {
@@ -176,7 +183,9 @@ func (t *Server) submitPrepares() {
         okay = false
       }
 
-      auditArgs.QueriesToAudit[i] = replies[i].QueryToAudit
+      for j := 0; j<len(replies[i].QueryToAudit); j++ {
+        (*auditArgs.QueriesToAudit)[j][i] = replies[i].QueryToAudit[j]
+      }
     }
 
     log.Printf("Done PREPARE %d", uuid)
@@ -217,7 +226,7 @@ func (t *Server) submitAudits() {
       log.Printf("FAILED audit, uuid: %v", req.Uuid)
     }
 
-    log.Printf("Done AUDIT %d", req.Uuid)
+    log.Printf("Done AUDIT %d => Okay? %v", req.Uuid, a_reply.Okay)
   }
 }
 

@@ -86,7 +86,7 @@ type AuditQuery struct {
 
 type AuditArgs struct {
   Uuid int64
-  QueriesToAudit *[NUM_SERVERS][]EncryptedAuditQuery
+  QueriesToAudit *[][NUM_SERVERS]EncryptedAuditQuery
 }
 
 type AuditReply struct {

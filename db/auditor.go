@@ -4,6 +4,7 @@ import (
   "bytes"
   "crypto/sha256"
   "encoding/binary"
+  "log"
 
   "henrycg/email/prf"
   "henrycg/email/utils"
@@ -13,9 +14,35 @@ import (
 type Auditor struct {
 }
 
+func (t *Auditor) auditOnce(c chan bool, queries *[NUM_SERVERS]EncryptedAuditQuery) {
+  var err1, err2 error
+  q0, err1 := DecryptAudit(queries[0])
+  q1, err2 := DecryptAudit(queries[1])
+  if (err1 != nil) || (err2 != nil) {
+    c<- false
+    return
+  }
+
+  c<- validateQueries(q0, q1)
+}
+
 func (t *Auditor) Audit(args *AuditArgs, reply *AuditReply) error {
-  // Bogus for now
+  c := make(chan bool, len(*args.QueriesToAudit))
+
+  for i := range *args.QueriesToAudit {
+    go t.auditOnce(c, &(*args.QueriesToAudit)[i])
+  }
+
   reply.Okay = true
+  for _ = range *args.QueriesToAudit {
+    b := <-c
+    if !b {
+      log.Printf("Audit failed at uuid %v", args.Uuid)
+      reply.Okay = false
+      break
+    }
+  }
+
   return nil
 }
 
@@ -95,4 +122,30 @@ func PrepareAudit(uuid int64, queryIdx int, serverIdx int,
   }
 
   return out
+}
+
+func validateQueries(q1, q2 *AuditQuery) bool {
+  if len(q1.KeyTest) != len(q2.KeyTest) || len(q1.KeyTest) != TABLE_HEIGHT {
+    return false
+  }
+
+  seen := false
+  for i := range q1.KeyTest {
+    e1 := ffield.Set(q1.KeyTest[i])
+    e2 := ffield.Set(q2.KeyTest[i])
+
+    // Require that all but one of the entries are equal
+    if !ffield.Equal(e1, e2) {
+      //log.Printf("Not equal %v %v", e1, e2)
+      if seen {
+        return false
+      } else {
+        seen = true
+      }
+    }
+  }
+
+  log.Printf("Not yet auditing message vector!")
+
+  return true
 }
