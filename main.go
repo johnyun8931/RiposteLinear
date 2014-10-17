@@ -29,7 +29,7 @@ func main() {
   var procs []*exec.Cmd = make([]*exec.Cmd, len(servers))
   for i := range servers {
     log.Printf("Starting server: %v", servers[i])
-    procs[i] = exec.Command("./server", "-servers", s, "-idx", strconv.Itoa(i))
+    procs[i] = exec.Command("./server", "-profile", "-servers", s, "-idx", strconv.Itoa(i))
     stdout, err := procs[i].StdoutPipe()
     stderr, err := procs[i].StderrPipe()
     go readAll(stdout)

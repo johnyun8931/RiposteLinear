@@ -20,7 +20,7 @@ const TABLE_WIDTH int = 1 << 5
 const TABLE_HEIGHT int = 1 << 12
 
 // Number of upload requests to buffer
-const REQ_BUFFER_SIZE int = 8
+const REQ_BUFFER_SIZE int = 256
 
 // Length of plaintext messages (in bytes)
 const SLOT_LENGTH int = 160// 64 KB

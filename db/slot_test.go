@@ -47,3 +47,12 @@ func TestMessageRow(t *testing.T) {
   }
 }
 
+func BenchmarkMessageRow(b *testing.B) {
+  var r, s BitMatrixRow
+  rand.Read(r[:])
+  rand.Read(s[:])
+  for i := 0; i<b.N; i++ {
+    XorRows(&r, &s)
+  }
+}
+
