@@ -92,13 +92,13 @@ type AuditArgs struct {
 }
 
 type AuditReply struct {
-  Okay bool
+  Okay []bool
 }
 
 type CommitArgs struct {
   // COMMIT
-  // uuid
   Uuid int64
+  Commit []bool
 }
 
 type CommitReply struct {

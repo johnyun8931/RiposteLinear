@@ -53,9 +53,7 @@ func testEndToEndOnce(t *testing.T) {
     }
 
     // Add to table
-    queries := make([]*InsertQuery, 1)
-    queries[0] = query
-    slotTables[i].processQuery(queries)
+    slotTables[i].processQuery(query)
   }
 
   // Combine tables 
@@ -108,6 +106,17 @@ func BenchmarkTable(b *testing.B) {
   // Args has encrypted insert queries
   slotTable := new(SlotTable)
   b.ResetTimer()
-  slotTable.processQuery(queries)
+
+  c := make(chan int, b.N)
+  for i := 0; i < b.N; i++ {
+    go func(q *InsertQuery) {
+      slotTable.processQuery(q)
+      c <- 0
+    }(queries[i])
+  }
+
+  for i := 0; i < b.N; i++ {
+    <-c
+  }
 }
 

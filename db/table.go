@@ -10,59 +10,56 @@ import (
  * Actual DB manipulation
  */
 
-func (t *SlotTable) processRow(row_idx int, queries []*InsertQuery, done chan error) {
-//  log.Printf("Processing row %v", row_idx)
-  nQueries := len(queries)
-  for q := 0; q < nQueries; q++ {
-    // For each row, use key to generate PRF output for that row
-    var err error
-    var row_prf prf.Prf
-    row_prf, err = prf.NewPrf(queries[q].Keys[row_idx])
+func (t *SlotTable) processQuery(query *InsertQuery) (*BitMatrixRow, error) {
+  // This contains the sum of all the generated rows, which is used later
+  // to make the audit request.
+  allRows := new(BitMatrixRow)
+
+  // This holds the output of the current run of the PRF
+  var genRow BitMatrixRow
+
+  for i := 0; i < TABLE_HEIGHT; i++ {
+    row_prf, err := prf.NewPrf(query.Keys[i])
     if err != nil {
-      done <-err
+      return allRows, err
     }
 
-    rowBit := queries[q].KeyMask[row_idx]
-    row_prf.Evaluate(t.table[row_idx][:])
+    rowBit := query.KeyMask[i]
+    row_prf.Evaluate(genRow[:])
 
-    // If row bitmask is set, then XOR in the message mask too
+
+    // XOR into the row that holds all generated strings
+    XorRows(allRows, &genRow)
+
+    // XOR into the database table
+    t.tableMutex.Lock()
+    XorRows(&t.table[i], &genRow)
     if rowBit {
-      XorRows(&t.table[row_idx], &queries[q].MessageMask)
+      // If row bitmask is set, then XOR in the message mask to
+      // the table too
+      XorRows(&t.table[i], &query.MessageMask)
     }
+    t.tableMutex.Unlock()
   }
 
-  //log.Printf("Processing row %v -- done", row_idx)
-  done<-nil
-}
-
-func (t *SlotTable) processQuery(queries []*InsertQuery) error {
-  t.tableMutex.Lock()
-
-  c := make(chan error, TABLE_HEIGHT)
-  for i := 0; i < TABLE_HEIGHT; i++ {
-    go t.processRow(i, queries, c)
-  }
-
-  // Wait for all workers to complete
-  for i := 0; i < TABLE_HEIGHT; i++ {
-    err := <-c
-    if err != nil {
-      return err
-    }
-    //log.Printf("Done processing %v/%v", i, TABLE_HEIGHT)
-  }
-
-  t.tableMutex.Unlock()
   t.debugTable()
-  return nil
+  return allRows, nil
 }
 
 type ForeachFunc func(row int, value *BitMatrixRow)
 
 func (t *SlotTable) ForeachRow(f ForeachFunc) {
+  c := make(chan int, TABLE_HEIGHT)
   t.tableMutex.Lock()
   for i := 0; i<TABLE_HEIGHT; i++ {
-    f(i, &t.table[i])
+    go func(j int) {
+      f(j, &t.table[j])
+      c <- 0
+    }(i)
+  }
+
+  for i := 0; i<TABLE_HEIGHT; i++ {
+    <-c
   }
   t.tableMutex.Unlock()
 }
@@ -82,6 +79,11 @@ func (t *SlotTable) CopyAndClear(dest *BitMatrix) {
   })
 }
 
+func (t *SlotTable) Xor(other *BitMatrix) {
+  t.ForeachRow(func(idx int, row *BitMatrixRow) {
+    XorRows(row, &other[idx])
+  })
+}
 
 func (t *SlotTable) debugTable() {
   /*

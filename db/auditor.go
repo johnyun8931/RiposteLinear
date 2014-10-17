@@ -17,32 +17,38 @@ const MAC_KEY_SIZE = 32
 type Auditor struct {
 }
 
-func (t *Auditor) auditOnce(c chan bool, queries *[NUM_SERVERS]EncryptedAuditQuery) {
+type auditResult struct {
+  isGood bool
+  idx int
+}
+
+func (t *Auditor) auditOnce(idx int, c chan auditResult, queries *[NUM_SERVERS]EncryptedAuditQuery) {
+  var ret auditResult
+  ret.idx = idx
+  ret.isGood = false
+
   var err1, err2 error
   q0, err1 := DecryptAudit(queries[0])
   q1, err2 := DecryptAudit(queries[1])
-  if (err1 != nil) || (err2 != nil) {
-    c<- false
-    return
+  if (err1 == nil) && (err2 == nil) {
+    ret.isGood = validateQueries(q0, q1)
   }
-
-  c<- validateQueries(q0, q1)
+  c<- ret
 }
 
 func (t *Auditor) Audit(args *AuditArgs, reply *AuditReply) error {
-  c := make(chan bool, len(*args.QueriesToAudit))
+  reply.Okay = make([]bool, len(*args.QueriesToAudit))
+  c := make(chan auditResult, len(*args.QueriesToAudit))
 
   for i := range *args.QueriesToAudit {
-    go t.auditOnce(c, &(*args.QueriesToAudit)[i])
+    go t.auditOnce(i, c, &(*args.QueriesToAudit)[i])
   }
 
-  reply.Okay = true
   for _ = range *args.QueriesToAudit {
-    b := <-c
-    if !b {
-      log.Printf("Audit failed at uuid %v", args.Uuid)
-      reply.Okay = false
-      break
+    res := <-c
+    reply.Okay[res.idx] = res.isGood
+    if !res.isGood {
+      log.Printf("Audit failed at uuid %v[%v]", args.Uuid, res.idx)
     }
   }
 
@@ -96,24 +102,14 @@ func keyTestVector(uuid int64, queryIdx int, serverIdx int,
 }
 
 func msgTestVector(uuid int64, queryIdx int, serverIdx int,
-    query *InsertQuery) [][poly1305.TagSize]byte {
-  row := make([]byte, len(query.MessageMask))
+    query *InsertQuery, genRows *BitMatrixRow) [][poly1305.TagSize]byte {
+  var row BitMatrixRow
 
   if serverIdx > 0 {
-    copy(row, query.MessageMask[:])
+    copy(row[:], query.MessageMask[:])
   }
 
-  // XOR in output of all PRG seeds
-  var err error
-  var row_prf prf.Prf
-  for i := 0; i<TABLE_HEIGHT; i++{
-    row_prf, err = prf.NewPrf(query.Keys[i])
-    if err != nil {
-      panic("Cannot create PRF!")
-    }
-
-    row_prf.Evaluate(row)
-  }
+  XorRows(&row, genRows)
 
   // Divide up the one long []byte into chunks of
   // size SLOT_LENGTH
@@ -149,12 +145,12 @@ func macVector(uuid int64, queryIdx int, serverIdx int, vec_to_mac [][]byte) [][
   return out
 }
 
-func PrepareAudit(uuid int64, queryIdx int, serverIdx int,
-    query *InsertQuery) EncryptedAuditQuery {
+func prepareAudit(uuid int64, queryIdx int, serverIdx int,
+    query *InsertQuery, genRows *BitMatrixRow) EncryptedAuditQuery {
   var q AuditQuery
 
   q.KeyTest = keyTestVector(uuid, queryIdx, serverIdx, query)
-  q.MsgTest = msgTestVector(uuid, queryIdx, serverIdx, query)
+  q.MsgTest = msgTestVector(uuid, queryIdx, serverIdx, query, genRows)
 
   out, err := EncryptAudit(q)
   if err != nil {

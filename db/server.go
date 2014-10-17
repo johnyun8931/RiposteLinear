@@ -146,14 +146,14 @@ func (t *Server) submitPrepares() {
     c := make(chan error, NUM_SERVERS)
     var replies [NUM_SERVERS]PrepareReply
     for i:=0; i<NUM_SERVERS; i++ {
-      go func(prep *PrepareArgs, reply *PrepareReply, i int, c chan error) {
+      go func(prep *PrepareArgs, reply *PrepareReply, i int) {
         err := t.rpcClients[i].Call("Server.Prepare", prep, reply)
         if err != nil {
           c <- err
         } else {
           c <- nil
         }
-      }(&preps[i], &replies[i], i, c)
+      }(&preps[i], &replies[i], i)
     }
 
     // Wait for responses
@@ -217,12 +217,14 @@ func (t *Server) submitAudits() {
       log.Fatal("Error in audit: ", err)
     }
 
-    if a_reply.Okay {
-      var commitArgs CommitArgs
-      commitArgs.Uuid = req.Uuid
-      commitReqs <- commitArgs
-    } else {
-      log.Printf("FAILED audit, uuid: %v", req.Uuid)
+    var commitArgs CommitArgs
+    commitArgs.Uuid = req.Uuid
+    commitArgs.Commit = a_reply.Okay
+    commitReqs <- commitArgs
+    for i := range a_reply.Okay {
+      if !a_reply.Okay[i] {
+        log.Printf("FAILED audit, uuid: %v[%v]", req.Uuid, i)
+      }
     }
 
     log.Printf("Done AUDIT %d => Okay? %v", req.Uuid, a_reply.Okay)
@@ -242,14 +244,14 @@ func (t *Server) submitCommits() {
     c := make(chan error, NUM_SERVERS)
     var replies [NUM_SERVERS]CommitReply
     for i:=0; i<NUM_SERVERS; i++ {
-      go func(com *CommitArgs, reply *CommitReply, i int, c chan error) {
+      go func(com *CommitArgs, reply *CommitReply, i int) {
         err := t.rpcClients[i].Call("Server.Commit", com, reply)
         if err != nil {
           c <- err
         } else {
           c <- nil
         }
-      }(&com, &replies[i], i, c)
+      }(&com, &replies[i], i)
     }
 
     // Wait for responses
@@ -279,14 +281,14 @@ func (t *Server) sendMergeRequest() {
   c := make(chan error, NUM_SERVERS)
   var replies [NUM_SERVERS]DumpReply
   for i:=0; i<NUM_SERVERS; i++ {
-    go func(reply *DumpReply, i int, c chan error) {
+    go func(reply *DumpReply, i int) {
       err := t.rpcClients[i].Call("Server.DumpTable", 0, reply)
       if err != nil {
         c <- err
       } else {
         c <- nil
       }
-    }(&replies[i], i, c)
+    }(&replies[i], i)
   }
 
   // Wait for responses
@@ -304,15 +306,11 @@ func (t *Server) sendMergeRequest() {
 
   c = make(chan error, NUM_SERVERS)
   for i:=0; i<NUM_SERVERS; i++ {
-    go func(i int, c chan error) {
+    go func(i int) {
       var p_reply PlaintextReply
       err := t.rpcClients[i].Call("Server.StorePlaintext", &parg, &p_reply)
-      if err != nil {
-        c <- err
-      } else {
-        c <- nil
-      }
-    }(i, c)
+      c <- err
+    }(i)
   }
 
   // Wait for responses
@@ -364,19 +362,29 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   n_queries := len(prep.Queries)
   c := make(chan error, n_queries)
   for i:=0; i<n_queries; i++ {
-    go func(i int, c chan error) {
+    go func(i int) {
       plainQueries[i], err = DecryptQuery(t.ServerIdx, prep.Queries[i])
       if err != nil {
         c <-err
         return
       }
 
+      // Generate out each of the seeds and XOR into the database.
+      // At the same time, generate an XOR of all of the seed outputs.
+      log.Printf("XORing into table for %v[%v]", prep.Uuid, i)
+      row, err := t.entries.processQuery(plainQueries[i])
+      if err != nil {
+        c <-err
+        return
+      }
+
       log.Printf("Preparing audit for %v[%v]", prep.Uuid, i)
-      reply.QueryToAudit[i] = PrepareAudit(prep.Uuid, i, t.ServerIdx, plainQueries[i])
+      // Use the XORd seeds (row) to generate the audit request
+      reply.QueryToAudit[i] = prepareAudit(prep.Uuid, i, t.ServerIdx, plainQueries[i], row)
       log.Printf("Done preparing audit for %v[%v]", prep.Uuid, i)
 
       c <- nil
-    }(i, c)
+    }(i)
   }
 
   var r error
@@ -403,7 +411,7 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 
 func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
   t.pendingMutex.Lock()
-  val, ok := t.pending[com.Uuid]
+  queries, ok := t.pending[com.Uuid]
 
   if !ok {
     err := errors.New(fmt.Sprintf("Got commit msg for unknown UUID: %d",  com.Uuid))
@@ -411,15 +419,28 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
     return err
   }
 
+  toWait := 0
+  c := make(chan int, len(queries))
+  for i := range queries {
+    if !com.Commit[i] {
+      // Remove query from the database, since it
+      // was malformed.
+      log.Printf("Removing bogus query %v[%v] from DB", com.Uuid, i)
+      go t.entries.processQuery(queries[i])
+      toWait += 1
+      c <- 0
+    }
+  }
+
+  for i := 0; i < toWait; i++ {
+    <-c
+  }
+
   delete(t.pending, com.Uuid)
   t.pendingMutex.Unlock()
 
-  // Update the database with the query
-  log.Printf("Processing query %d [len %v]", t.ServerIdx, len(val))
-  t.entries.processQuery(val)
-  log.Printf("Done processing query %d [len %v]", t.ServerIdx, len(val))
   t.clientsServedMutex.Lock()
-  t.clientsServed += len(val)
+  t.clientsServed += len(queries)
   log.Printf("Processed %v queries so far", t.clientsServed)
   t.clientsServedMutex.Unlock()
 
