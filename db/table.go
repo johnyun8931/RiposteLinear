@@ -49,6 +49,7 @@ func (t *SlotTable) processQuery(queries []*InsertQuery) error {
     if err != nil {
       return err
     }
+    //log.Printf("Done processing %v/%v", i, TABLE_HEIGHT)
   }
 
   t.tableMutex.Unlock()

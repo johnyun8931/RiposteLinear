@@ -18,7 +18,7 @@ func testOnce(t *testing.T, xIdx, yIdx int) {
   var msg SlotContents
   msg = [SLOT_LENGTH]byte{123, 101}
 
-  err := InitializeUploadArgs(&args, xIdx, yIdx, msg)
+  err := InitializeUploadArgs(&args, xIdx, yIdx, msg, false)
   if err != nil {
     t.Fail()
   }

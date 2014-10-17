@@ -72,7 +72,7 @@ func DialHTTPWithTLS(network, address string,
 
   conn, err := tls.Dial(network, address, &config)
   if err != nil {
-    log.Printf("DialHTTP error:", err)
+    log.Printf("DialHTTP error: %v", err)
     return nil, err
   }
 

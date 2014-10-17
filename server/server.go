@@ -9,6 +9,7 @@ import (
   "net/rpc"
   "os"
   "os/signal"
+  "runtime"
   "runtime/pprof"
   "strings"
 )
@@ -20,6 +21,8 @@ import (
 
 var flagProfile = flag.Bool("profile", false, "Run CPU profiler")
 var flagIndex = flag.Int("idx", -1, "Server index")
+var flagLog = flag.String("log", "", "Log file")
+var flagThreads = flag.Uint("threads", 1, "Number of threads to use")
 
 // List of server addresses
 type serverListType []string
@@ -48,11 +51,19 @@ func init() {
 func main() {
   flag.Parse()
 
+  if *flagLog != "" {
+    f, ferr := os.OpenFile(*flagLog, os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0664)
+    if ferr != nil {
+      log.Fatal("Could not open log file ", *flagLog)
+      os.Exit(1)
+    }
+    log.SetOutput(f)
+  }
+
   if *flagIndex < 0 {
     log.Fatal("Must server index must be greater than zero")
     return
   }
-
 
   idx := *flagIndex
 
@@ -60,6 +71,10 @@ func main() {
     log.Fatal("Must specify a list of servers")
     return
   }
+
+  runtime.GOMAXPROCS(int(*flagThreads))
+
+  defer log.Printf("Server died.")
 
   log.SetPrefix(fmt.Sprintf("[Server %v] ", idx))
 

@@ -36,8 +36,7 @@ func randomAudit(t *testing.T) AuditQuery {
 }
 
 func TestEncryptGood(t *testing.T) {
-  for i := 0 ; i < utils.NumServers(); i++ {
-
+  for i := 0 ; i < NUM_SERVERS; i++ {
     q := randomQuery(t)
     enc, err := EncryptQuery(i, q)
     if err != nil {
@@ -98,7 +97,7 @@ func TestEncryptAuditBad(t *testing.T) {
 
 
 func TestEncryptBad(t *testing.T) {
-  for i := 0 ; i < utils.NumServers(); i++ {
+  for i := 0 ; i < NUM_SERVERS; i++ {
 
     q := randomQuery(t)
     enc, err := EncryptQuery(i, q)
@@ -106,7 +105,7 @@ func TestEncryptBad(t *testing.T) {
       t.Fatal("Could not encrypt")
     }
 
-    _, err = DecryptQuery((i+1)%utils.NumServers(), enc)
+    _, err = DecryptQuery((i+1)%NUM_SERVERS, enc)
     if err == nil {
       t.Fail()
     }

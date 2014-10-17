@@ -20,7 +20,7 @@ const TABLE_WIDTH int = 1 << 8
 const TABLE_HEIGHT int = 1 << 9
 
 // Number of upload requests to buffer
-const REQ_BUFFER_SIZE int = 48
+const REQ_BUFFER_SIZE int = 8
 
 // Length of plaintext messages (in bytes)
 const SLOT_LENGTH int = 256// 64 KB
@@ -35,6 +35,7 @@ type SlotTable struct {
 
 type DbState int
 const (
+  State_Booting = iota
   State_AcceptUpload = iota
   State_PrepareForMerge = iota
   State_Merge = iota
@@ -118,7 +119,8 @@ type Server struct {
   State DbState
   ServerAddrs []string
 
-  ClientsServed int
+  clientsServed int
+  clientsServedMutex sync.Mutex
 
   pending map[int64]([]*InsertQuery)
   pendingMutex sync.Mutex

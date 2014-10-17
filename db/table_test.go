@@ -35,7 +35,7 @@ func testEndToEndOnce(t *testing.T) {
   }
 
   var args UploadArgs
-  err = InitializeUploadArgs(&args, xIdx, yIdx, msg)
+  err = InitializeUploadArgs(&args, xIdx, yIdx, msg, false)
   if err != nil {
     t.FailNow()
   }
@@ -87,7 +87,7 @@ func BenchmarkTable(b *testing.B) {
   }
 
   var args UploadArgs
-  err = InitializeUploadArgs(&args, xIdx, yIdx, msg)
+  err = InitializeUploadArgs(&args, xIdx, yIdx, msg, false)
   if err != nil {
     b.FailNow()
   }

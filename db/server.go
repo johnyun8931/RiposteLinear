@@ -15,7 +15,7 @@ import (
 )
 
 // Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 90
+const MERGE_TIME_DELAY time.Duration = 60*60*8
 
 var (
   incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
@@ -74,7 +74,6 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
 
   n := 0
   appendOnce := func(queryList [NUM_SERVERS]EncryptedInsertQuery) {
-    fmt.Printf("Got one")
     for i := 0; i < NUM_SERVERS; i++ {
       (*preps)[i].Queries = append((*preps)[i].Queries, queryList[i])
     }
@@ -260,6 +259,7 @@ func (t *Server) submitCommits() {
       if r != nil {
         log.Fatal("Error in commit: ", r)
       }
+      log.Printf("Got commit %v/%v", i, NUM_SERVERS)
     }
 
     log.Printf("Done COMMIT %d", com.Uuid)
@@ -294,8 +294,9 @@ func (t *Server) sendMergeRequest() {
   for i:=0; i<NUM_SERVERS; i++ {
     r = <-c
     if r != nil {
-      log.Fatal("Error in commit: ", r)
+      log.Fatal("Error in merge: ", r)
     }
+    log.Printf("Done merge")
   }
 
   var parg PlaintextArgs
@@ -331,11 +332,13 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
 
   // XOR all of the tables together and save 
   // it in the plaintext table
+  log.Printf("Revealing cleartext")
   for serv := 0; serv<NUM_SERVERS; serv++ {
     for i := 0; i<TABLE_HEIGHT; i++ {
       XorRows(&b[i], &tables[serv].Entries[i])
     }
   }
+  log.Printf("Done revealing cleartext")
 
   return b
 }
@@ -354,22 +357,36 @@ func (t *Server) beginMerge() {
  */
 
 func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
-  // XXX check if good
-  okay := true
-
   var err error
   plainQueries := make([]*InsertQuery, len(prep.Queries))
   reply.QueryToAudit = make([]EncryptedAuditQuery, len(prep.Queries))
-  for i := 0; i < len(prep.Queries); i++ {
-    plainQueries[i], err = DecryptQuery(t.ServerIdx, prep.Queries[i])
-    if err == nil {
-      okay = true
-    } else {
-      log.Printf("Error in decryption: ", err)
-      okay = false
-    }
 
-    reply.QueryToAudit[i] = PrepareAudit(prep.Uuid, i, t.ServerIdx, plainQueries[i])
+  n_queries := len(prep.Queries)
+  c := make(chan error, n_queries)
+  for i:=0; i<n_queries; i++ {
+    go func(i int, c chan error) {
+      plainQueries[i], err = DecryptQuery(t.ServerIdx, prep.Queries[i])
+      if err != nil {
+        c <-err
+        return
+      }
+
+      log.Printf("Preparing audit for %v[%v]", prep.Uuid, i)
+      reply.QueryToAudit[i] = PrepareAudit(prep.Uuid, i, t.ServerIdx, plainQueries[i])
+      log.Printf("Done preparing audit for %v[%v]", prep.Uuid, i)
+
+      c <- nil
+    }(i, c)
+  }
+
+  var r error
+  okay := true
+  for i:=0; i<n_queries; i++ {
+    r = <-c
+    if r != nil {
+      okay = false
+      log.Fatal("Error in decrypt/audit: ", r)
+    }
   }
 
   reply.Okay = okay
@@ -401,13 +418,21 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
   log.Printf("Processing query %d [len %v]", t.ServerIdx, len(val))
   t.entries.processQuery(val)
   log.Printf("Done processing query %d [len %v]", t.ServerIdx, len(val))
+  t.clientsServedMutex.Lock()
+  t.clientsServed += len(val)
+  log.Printf("Processed %v queries so far", t.clientsServed)
+  t.clientsServedMutex.Unlock()
 
   return nil
 }
 
 func (t *Server) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) error {
+  t.clientsServedMutex.Lock()
+  t.clientsServed = 0
+  t.clientsServedMutex.Unlock()
+
+  log.Printf("Storing plaintext")
   t.plainMutex.Lock()
-  t.ClientsServed = 0
   t.entries.CopyAndClear(t.plain)
   t.plainMutex.Unlock()
 
@@ -438,36 +463,41 @@ func (t *Server) DumpPlaintext(_ *int, reply *DumpReply) error {
  * Initialization
  */
 
-func (t *Server) connectToServer(client **rpc.Client, serverAddr string, remoteIdx int, c chan int) {
+func (t *Server) connectToServer(client **rpc.Client, serverAddr string, remoteIdx int, c chan error) {
   var err error
   certs := []tls.Certificate{utils.ServerCertificates[remoteIdx]}
   *client, err = utils.DialHTTPWithTLS("tcp", serverAddr, t.ServerIdx, certs)
-
-  if err == nil {
-    c <- 1
-  } else {
-    c <- -1
-  }
+  c<- err
 }
 
 func (t *Server) openConnections() error {
+  log.Printf("Waiting 2 seconds for other servers to boot")
+  time.Sleep(1000 * time.Millisecond)
+
   if !t.isLeader() {
     return errors.New("Only leader should open connections")
   }
 
-  c := make(chan int, len(t.ServerAddrs))
+  c := make(chan error, len(t.ServerAddrs))
   for i := range t.ServerAddrs {
     go t.connectToServer(&t.rpcClients[i], t.ServerAddrs[i], i, c)
   }
 
   // Wait for all connections
+  failed := false
   for i := 0; i < len(t.ServerAddrs); i++ {
-    if <-c != 1 {
-      return errors.New("Connection failed")
+    err := <-c
+    if err != nil {
+      log.Printf("Error connecting to server: %v", err)
     }
   }
 
-  return nil
+  if failed {
+    return errors.New("Connection failed")
+  } else {
+    t.State = State_AcceptUpload
+    return nil
+  }
 }
 
 func (t *Server) Initialize(*int, *int) error {
@@ -525,8 +555,8 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
   t.plain = new(BitMatrix)
   t.ServerIdx = serverIdx
   t.ServerAddrs = serverAddrs
-  t.ClientsServed = 0
-  t.State = State_AcceptUpload
+  t.clientsServed = 0
+  t.State = State_Booting
 
   return t
 }
