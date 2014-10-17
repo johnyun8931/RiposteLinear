@@ -15,7 +15,7 @@ import (
 )
 
 // Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 60*60*8
+const MERGE_TIME_DELAY time.Duration = 10//60*60*8
 
 var (
   incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
@@ -146,8 +146,8 @@ func (t *Server) submitPrepares() {
     c := make(chan error, NUM_SERVERS)
     var replies [NUM_SERVERS]PrepareReply
     for i:=0; i<NUM_SERVERS; i++ {
-      go func(prep *PrepareArgs, reply *PrepareReply, i int) {
-        err := t.rpcClients[i].Call("Server.Prepare", prep, reply)
+      go func(prep *PrepareArgs, reply *PrepareReply, j int) {
+        err := t.rpcClients[j].Call("Server.Prepare", prep, reply)
         if err != nil {
           c <- err
         } else {
@@ -173,7 +173,7 @@ func (t *Server) submitPrepares() {
 
     auditList := make([][NUM_SERVERS]EncryptedAuditQuery,
       len(replies[0].QueryToAudit))
-    auditArgs.QueriesToAudit = &auditList
+    auditArgs.QueriesToAudit = auditList
 
     okay := true
     for i:=0; i<NUM_SERVERS; i++ {
@@ -182,8 +182,8 @@ func (t *Server) submitPrepares() {
         okay = false
       }
 
-      for j := 0; j<len(replies[i].QueryToAudit); j++ {
-        (*auditArgs.QueriesToAudit)[j][i] = replies[i].QueryToAudit[j]
+      for j := range replies[i].QueryToAudit {
+        auditArgs.QueriesToAudit[j][i] = replies[i].QueryToAudit[j]
       }
     }
 
@@ -196,7 +196,15 @@ func (t *Server) submitPrepares() {
     }
 
     if okay {
+      log.Printf("Putting audit request in pipeline %d", uuid)
       auditReqs<- auditArgs
+    } else {
+      log.Printf("Telling servers to abort the commit %d", uuid)
+      // Tell servers to abort the commit
+      var commitArgs CommitArgs
+      commitArgs.Uuid = preps[0].Uuid
+      commitArgs.Commit = make([]bool, len(replies[0].QueryToAudit))
+      commitReqs<- commitArgs
     }
   }
 }
@@ -244,8 +252,8 @@ func (t *Server) submitCommits() {
     c := make(chan error, NUM_SERVERS)
     var replies [NUM_SERVERS]CommitReply
     for i:=0; i<NUM_SERVERS; i++ {
-      go func(com *CommitArgs, reply *CommitReply, i int) {
-        err := t.rpcClients[i].Call("Server.Commit", com, reply)
+      go func(com *CommitArgs, reply *CommitReply, j int) {
+        err := t.rpcClients[j].Call("Server.Commit", com, reply)
         if err != nil {
           c <- err
         } else {
@@ -281,8 +289,8 @@ func (t *Server) sendMergeRequest() {
   c := make(chan error, NUM_SERVERS)
   var replies [NUM_SERVERS]DumpReply
   for i:=0; i<NUM_SERVERS; i++ {
-    go func(reply *DumpReply, i int) {
-      err := t.rpcClients[i].Call("Server.DumpTable", 0, reply)
+    go func(reply *DumpReply, j int) {
+      err := t.rpcClients[j].Call("Server.DumpTable", 0, reply)
       if err != nil {
         c <- err
       } else {
@@ -306,9 +314,9 @@ func (t *Server) sendMergeRequest() {
 
   c = make(chan error, NUM_SERVERS)
   for i:=0; i<NUM_SERVERS; i++ {
-    go func(i int) {
+    go func(j int) {
       var p_reply PlaintextReply
-      err := t.rpcClients[i].Call("Server.StorePlaintext", &parg, &p_reply)
+      err := t.rpcClients[j].Call("Server.StorePlaintext", &parg, &p_reply)
       c <- err
     }(i)
   }
@@ -362,8 +370,8 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   n_queries := len(prep.Queries)
   c := make(chan error, n_queries)
   for i:=0; i<n_queries; i++ {
-    go func(i int) {
-      plainQueries[i], err = DecryptQuery(t.ServerIdx, prep.Queries[i])
+    go func(j int) {
+      plainQueries[j], err = DecryptQuery(t.ServerIdx, prep.Queries[j])
       if err != nil {
         c <-err
         return
@@ -371,17 +379,17 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 
       // Generate out each of the seeds and XOR into the database.
       // At the same time, generate an XOR of all of the seed outputs.
-      log.Printf("XORing into table for %v[%v]", prep.Uuid, i)
-      row, err := t.entries.processQuery(plainQueries[i])
+      log.Printf("XORing into table for %v[%v]", prep.Uuid, j)
+      row, err := t.entries.processQuery(plainQueries[j])
       if err != nil {
         c <-err
         return
       }
 
-      log.Printf("Preparing audit for %v[%v]", prep.Uuid, i)
+      log.Printf("Preparing audit for %v[%v]", prep.Uuid, j)
       // Use the XORd seeds (row) to generate the audit request
-      reply.QueryToAudit[i] = prepareAudit(prep.Uuid, i, t.ServerIdx, plainQueries[i], row)
-      log.Printf("Done preparing audit for %v[%v]", prep.Uuid, i)
+      reply.QueryToAudit[j] = prepareAudit(prep.Uuid, j, t.ServerIdx, plainQueries[j], row)
+      log.Printf("Done preparing audit for %v[%v]", prep.Uuid, j)
 
       c <- nil
     }(i)
@@ -398,11 +406,9 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   }
 
   reply.Okay = okay
+  log.Printf("Done with preparing for %v", prep.Uuid)
 
   t.pendingMutex.Lock()
-  if t.pending == nil {
-    t.pending = map[int64]([]*InsertQuery){}
-  }
   t.pending[prep.Uuid] = plainQueries
   t.pendingMutex.Unlock()
 
@@ -412,10 +418,10 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
   t.pendingMutex.Lock()
   queries, ok := t.pending[com.Uuid]
+  t.pendingMutex.Unlock()
 
   if !ok {
     err := errors.New(fmt.Sprintf("Got commit msg for unknown UUID: %d",  com.Uuid))
-    t.pendingMutex.Unlock()
     return err
   }
 
@@ -436,6 +442,7 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
     <-c
   }
 
+  t.pendingMutex.Lock()
   delete(t.pending, com.Uuid)
   t.pendingMutex.Unlock()
 
@@ -447,14 +454,23 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
   return nil
 }
 
-func (t *Server) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) error {
+func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) error {
   t.clientsServedMutex.Lock()
   t.clientsServed = 0
   t.clientsServedMutex.Unlock()
 
   log.Printf("Storing plaintext")
   t.plainMutex.Lock()
-  t.entries.CopyAndClear(t.plain)
+  t.plain = args.Plaintext
+  var zeros SlotContents
+  for i := range t.plain {
+    for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
+      msg := t.plain[i][j:(j+SLOT_LENGTH)]
+      if bytes.Compare(zeros[:], msg) != 0 {
+        log.Printf("Got msg: %v", msg)
+      }
+    }
+  }
   t.plainMutex.Unlock()
 
   t.State = State_AcceptUpload
@@ -467,7 +483,7 @@ func (t *Server) StorePlaintext(com *PlaintextArgs, reply *PlaintextReply) error
 func (t *Server) DumpTable(_ *int, reply *DumpReply) error {
   log.Printf("Dumping table %d\n", t.ServerIdx)
   reply.Entries = new(BitMatrix)
-  t.entries.CopyAndClear(reply.Entries)
+  t.entries.CopyToAndClear(reply.Entries)
   return nil
 }
 
@@ -577,7 +593,7 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
   t.ServerIdx = serverIdx
   t.ServerAddrs = serverAddrs
   t.clientsServed = 0
-  t.State = State_Booting
+  t.pending = map[int64]([]*InsertQuery){}
 
   return t
 }

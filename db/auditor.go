@@ -32,19 +32,21 @@ func (t *Auditor) auditOnce(idx int, c chan auditResult, queries *[NUM_SERVERS]E
   q1, err2 := DecryptAudit(queries[1])
   if (err1 == nil) && (err2 == nil) {
     ret.isGood = validateQueries(q0, q1)
+  } else {
+    log.Printf("Audit failed because of decryption failure")
   }
   c<- ret
 }
 
 func (t *Auditor) Audit(args *AuditArgs, reply *AuditReply) error {
-  reply.Okay = make([]bool, len(*args.QueriesToAudit))
-  c := make(chan auditResult, len(*args.QueriesToAudit))
+  reply.Okay = make([]bool, len(args.QueriesToAudit))
+  c := make(chan auditResult, len(args.QueriesToAudit))
 
-  for i := range *args.QueriesToAudit {
-    go t.auditOnce(i, c, &(*args.QueriesToAudit)[i])
+  for i := range args.QueriesToAudit {
+    go t.auditOnce(i, c, &args.QueriesToAudit[i])
   }
 
-  for _ = range *args.QueriesToAudit {
+  for _ = range args.QueriesToAudit {
     res := <-c
     reply.Okay[res.idx] = res.isGood
     if !res.isGood {
@@ -162,15 +164,24 @@ func prepareAudit(uuid int64, queryIdx int, serverIdx int,
 
 func validateQueries(q1, q2 *AuditQuery) bool {
   if len(q1.KeyTest) != TABLE_HEIGHT {
+    log.Printf("Audit failed because KeyTest vector has wrong length")
     return false
   }
 
   if len(q1.MsgTest) != TABLE_WIDTH {
+    log.Printf("Audit failed because MsgTest vector has wrong length")
     return false
   }
 
   b1 := vectorsDifferAtMostOnce(q1.KeyTest, q2.KeyTest)
   b2 := vectorsDifferAtMostOnce(q1.MsgTest, q2.MsgTest)
+
+  if !b1 {
+    log.Printf("Audit failed because KeyTest vectors differ too often")
+  }
+  if !b2 {
+    log.Printf("Audit failed because MsgTest vectors differ too often")
+  }
 
   return b1 && b2
 }

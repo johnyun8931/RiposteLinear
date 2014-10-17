@@ -15,10 +15,9 @@ func (t *SlotTable) processQuery(query *InsertQuery) (*BitMatrixRow, error) {
   // to make the audit request.
   allRows := new(BitMatrixRow)
 
-  // This holds the output of the current run of the PRF
-  var genRow BitMatrixRow
-
   for i := 0; i < TABLE_HEIGHT; i++ {
+    // This holds the output of the current run of the PRF
+    var genRow BitMatrixRow
     row_prf, err := prf.NewPrf(query.Keys[i])
     if err != nil {
       return allRows, err
@@ -26,7 +25,6 @@ func (t *SlotTable) processQuery(query *InsertQuery) (*BitMatrixRow, error) {
 
     rowBit := query.KeyMask[i]
     row_prf.Evaluate(genRow[:])
-
 
     // XOR into the row that holds all generated strings
     XorRows(allRows, &genRow)
@@ -71,7 +69,7 @@ func (t *SlotTable) Clear() {
   })
 }
 
-func (t *SlotTable) CopyAndClear(dest *BitMatrix) {
+func (t *SlotTable) CopyToAndClear(dest *BitMatrix) {
   var empty BitMatrixRow
   t.ForeachRow(func(idx int, row *BitMatrixRow) {
     dest[idx] = *row
