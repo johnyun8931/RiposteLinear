@@ -15,7 +15,7 @@ import (
 )
 
 // Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 10//60*60*8
+const MERGE_TIME_DELAY time.Duration = 60*60*8
 
 var (
   incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
@@ -462,6 +462,7 @@ func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) erro
   log.Printf("Storing plaintext")
   t.plainMutex.Lock()
   t.plain = args.Plaintext
+  /*
   var zeros SlotContents
   for i := range t.plain {
     for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
@@ -471,6 +472,7 @@ func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) erro
       }
     }
   }
+  */
   t.plainMutex.Unlock()
 
   t.State = State_AcceptUpload
