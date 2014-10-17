@@ -94,7 +94,6 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
   //time.Sleep(1*time.Second)
 
   *shouldMerge = false
-  fmt.Printf("Here!")
   for {
     select {
       // Each element of incomingReqs has an array
@@ -107,11 +106,13 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
           return n
         } else {
           appendOnce(queryList)
+          if len(preps[0].Queries) >= MAX_QUERY_SIZE  {
+            return n
+          }
         }
         continue
 
       default:
-        fmt.Printf("Done")
         return n
     }
   }
@@ -368,46 +369,38 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   reply.QueryToAudit = make([]EncryptedAuditQuery, len(prep.Queries))
 
   n_queries := len(prep.Queries)
-  c := make(chan error, n_queries)
+  // XXX parallelize this?
+  for i:=0; i<n_queries; i++ {
+    plainQueries[i], err = DecryptQuery(t.ServerIdx, prep.Queries[i])
+  }
+
+
+  // Generate out each of the seeds and XOR into the database.
+  // At the same time, generate an XOR of all of the seed outputs.
+  log.Printf("XORing into table for %v", prep.Uuid)
+  rows, err := t.entries.processQueries(plainQueries)
+  if err != nil {
+    reply.Okay = false
+    log.Printf("Error in decrypt/audit: ", err)
+    return err
+  }
+
+  c := make(chan int, n_queries)
   for i:=0; i<n_queries; i++ {
     go func(j int) {
-      plainQueries[j], err = DecryptQuery(t.ServerIdx, prep.Queries[j])
-      if err != nil {
-        c <-err
-        return
-      }
-
-      // Generate out each of the seeds and XOR into the database.
-      // At the same time, generate an XOR of all of the seed outputs.
-      log.Printf("XORing into table for %v[%v]", prep.Uuid, j)
-      row, err := t.entries.processQuery(plainQueries[j])
-      if err != nil {
-        c <-err
-        return
-      }
-
       log.Printf("Preparing audit for %v[%v]", prep.Uuid, j)
       // Use the XORd seeds (row) to generate the audit request
-      reply.QueryToAudit[j] = prepareAudit(prep.Uuid, j, t.ServerIdx, plainQueries[j], row)
+      reply.QueryToAudit[j] = prepareAudit(prep.Uuid, j, t.ServerIdx, plainQueries[j], &rows[j])
       log.Printf("Done preparing audit for %v[%v]", prep.Uuid, j)
-
-      c <- nil
+      c <- 0
     }(i)
   }
 
-  var r error
-  okay := true
   for i:=0; i<n_queries; i++ {
-    r = <-c
-    if r != nil {
-      okay = false
-      log.Fatal("Error in decrypt/audit: ", r)
-    }
+    <-c
   }
 
-  reply.Okay = okay
-  log.Printf("Done with preparing for %v", prep.Uuid)
-
+  reply.Okay = true
   t.pendingMutex.Lock()
   t.pending[prep.Uuid] = plainQueries
   t.pendingMutex.Unlock()
@@ -425,22 +418,16 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
     return err
   }
 
-  toWait := 0
-  c := make(chan int, len(queries))
+  bogus := make([]*InsertQuery, 0)
   for i := range queries {
     if !com.Commit[i] {
       // Remove query from the database, since it
       // was malformed.
       log.Printf("Removing bogus query %v[%v] from DB", com.Uuid, i)
-      go t.entries.processQuery(queries[i])
-      toWait += 1
-      c <- 0
+      bogus = append(bogus, queries[i])
     }
   }
-
-  for i := 0; i < toWait; i++ {
-    <-c
-  }
+  t.entries.processQueries(bogus)
 
   t.pendingMutex.Lock()
   delete(t.pending, com.Uuid)
@@ -448,7 +435,8 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 
   t.clientsServedMutex.Lock()
   t.clientsServed += len(queries)
-  log.Printf("Processed %v queries so far", t.clientsServed)
+  rate := float64(t.clientsServed) / time.Now().Sub(t.clientsServedStart).Seconds()
+  log.Printf("Processed %v queries at rate %v reqs/sec", t.clientsServed, rate)
   t.clientsServedMutex.Unlock()
 
   return nil
@@ -457,6 +445,7 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) error {
   t.clientsServedMutex.Lock()
   t.clientsServed = 0
+  t.clientsServedStart = time.Now()
   t.clientsServedMutex.Unlock()
 
   log.Printf("Storing plaintext")
@@ -595,6 +584,7 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
   t.ServerIdx = serverIdx
   t.ServerAddrs = serverAddrs
   t.clientsServed = 0
+  t.clientsServedStart = time.Now()
   t.pending = map[int64]([]*InsertQuery){}
 
   return t

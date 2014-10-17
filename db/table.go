@@ -2,7 +2,6 @@ package db
 
 import (
 //  "log"
-
   "henrycg/email/prf"
 )
 
@@ -10,37 +9,42 @@ import (
  * Actual DB manipulation
  */
 
-func (t *SlotTable) processQuery(query *InsertQuery) (*BitMatrixRow, error) {
-  // This contains the sum of all the generated rows, which is used later
-  // to make the audit request.
-  allRows := new(BitMatrixRow)
+func (t *SlotTable) processQueries(queries []*InsertQuery) ([]BitMatrixRow, error) {
+  t.tableMutex.Lock()
 
+  // For each query, expand seeds to the size of the whole DB table
+  allTables := make([]BitMatrix, len(queries))
+  allRows := make([]BitMatrixRow, len(queries))
+
+  // For each row i and query q, XOR allTables[q][i] into table[i]
   for i := 0; i < TABLE_HEIGHT; i++ {
-    // This holds the output of the current run of the PRF
-    var genRow BitMatrixRow
-    row_prf, err := prf.NewPrf(query.Keys[i])
-    if err != nil {
-      return allRows, err
+    for q := 0; q < len(queries); q++ {
+      row_prf, err := prf.NewPrf(queries[q].Keys[i])
+      if err != nil {
+        return allRows, err
+      }
+
+      rowBit := queries[q].KeyMask[i]
+      row_prf.Evaluate(allTables[q][i][:])
+
+      // XOR row i of query q into the database table
+      XorRows(&t.table[i], &allTables[q][i])
+      if rowBit {
+        // If row bitmask is set, then XOR in the message mask to
+        // the table too
+        XorRows(&t.table[i], &queries[q].MessageMask)
+      }
     }
+  }
+  t.tableMutex.Unlock()
 
-    rowBit := query.KeyMask[i]
-    row_prf.Evaluate(genRow[:])
-
-    // XOR into the row that holds all generated strings
-    XorRows(allRows, &genRow)
-
-    // XOR into the database table
-    t.tableMutex.Lock()
-    XorRows(&t.table[i], &genRow)
-    if rowBit {
-      // If row bitmask is set, then XOR in the message mask to
-      // the table too
-      XorRows(&t.table[i], &query.MessageMask)
+  // For each query q and row i, XOR allTables[q][i] into allRows[q]
+  for q := 0; q < len(queries); q++ {
+    for i := 0; i < TABLE_HEIGHT; i++ {
+      XorRows(&allRows[q], &allTables[q][i])
     }
-    t.tableMutex.Unlock()
   }
 
-  t.debugTable()
   return allRows, nil
 }
 

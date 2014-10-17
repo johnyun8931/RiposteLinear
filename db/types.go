@@ -3,6 +3,7 @@ package db
 import (
   "net/rpc"
   "sync"
+  "time"
 
   "code.google.com/p/go.crypto/poly1305"
 
@@ -20,7 +21,10 @@ const TABLE_WIDTH int = 1 << 5
 const TABLE_HEIGHT int = 1 << 12
 
 // Number of upload requests to buffer
-const REQ_BUFFER_SIZE int = 256
+const REQ_BUFFER_SIZE int = 64
+
+// Maximum number of queries to bundle together
+const MAX_QUERY_SIZE int = 4
 
 // Length of plaintext messages (in bytes)
 const SLOT_LENGTH int = 160// 64 KB
@@ -120,6 +124,7 @@ type Server struct {
   ServerAddrs []string
 
   clientsServed int
+  clientsServedStart time.Time
   clientsServedMutex sync.Mutex
 
   pending map[int64]([]*InsertQuery)
