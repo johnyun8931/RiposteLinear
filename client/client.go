@@ -8,6 +8,9 @@ import (
   "os"
   "runtime"
 
+  "bytes"
+  "encoding/gob"
+
   "henrycg/email/db"
   "henrycg/email/utils"
 )
@@ -20,6 +23,12 @@ var threadsFlag = flag.Uint("threads", 1, "Number of threads to use")
 
 func tryUpload(client *rpc.Client, args db.UploadArgs) error {
   var upRes db.UploadReply
+
+  var buf []byte
+  b := bytes.NewBuffer(buf)
+  g := gob.NewEncoder(b)
+  g.Encode(args)
+  log.Printf("Buffer len %v", b.Len())
 
   err := client.Call("Server.Upload", args, &upRes)
   if err != nil {
