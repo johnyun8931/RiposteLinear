@@ -24,14 +24,14 @@ func newCountSocket(t *tls.Conn) countSocket {
 func (s countSocket) Read(p []byte) (int, error) {
   n, err := s.Conn.Read(p)
   s.bytes_recv += int64(n)
-  log.Printf("Read %v bytes [total %v]\n", n, s.bytes_recv)
+  //log.Printf("Read %v bytes [total %v]\n", n, s.bytes_recv)
   return n, err
 }
 
 func (s countSocket) Write(p []byte) (int, error) {
   n, err := s.Conn.Write(p)
   s.bytes_sent += int64(n)
-  log.Printf("Sent %v bytes [total %v]\n", n, s.bytes_sent)
+  //log.Printf("Sent %v bytes [total %v]\n", n, s.bytes_sent)
   return n, err
 }
 
@@ -84,10 +84,10 @@ func handleOneClient(conn net.Conn) {
     return
   }
 
-  state := tlscon.ConnectionState()
-  log.Printf("Certs %v", state.PeerCertificates)
+  //state := tlscon.ConnectionState()
+  //log.Printf("Certs %v", state.PeerCertificates)
 
-  log.Printf("Handshake OK")
+  //log.Printf("Handshake OK")
 
   rpc.ServeConn(newCountSocket(conn.(*tls.Conn)))
 }
