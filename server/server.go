@@ -22,7 +22,7 @@ import (
 var flagProfile = flag.Bool("profile", false, "Run CPU profiler")
 var flagIndex = flag.Int("idx", -1, "Server index")
 var flagLog = flag.String("log", "", "Log file")
-var flagThreads = flag.Uint("threads", 1, "Number of threads to use")
+var flagThreads = flag.Int("threads", -1, "Number of threads to use")
 
 // List of server addresses
 type serverListType []string
@@ -72,7 +72,9 @@ func main() {
     return
   }
 
-  runtime.GOMAXPROCS(int(*flagThreads))
+  if *flagThreads > 0 {
+    runtime.GOMAXPROCS(int(*flagThreads))
+  }
 
   defer log.Printf("Server died.")
 

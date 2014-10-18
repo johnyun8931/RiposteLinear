@@ -53,14 +53,16 @@ func testEndToEndOnce(t *testing.T) {
     }
 
     // Add to table
-    slotTables[i].processQuery(query)
+    queries := make([]*InsertQuery, 1)
+    queries[0] = query
+    slotTables[i].processQueries(queries)
   }
 
   // Combine tables 
   replies := new([NUM_SERVERS]DumpReply)
   for i := 0; i<NUM_SERVERS; i++ {
     replies[i].Entries = new(BitMatrix)
-    slotTables[i].CopyAndClear(replies[i].Entries)
+    slotTables[i].CopyToAndClear(replies[i].Entries)
   }
 
   b := revealCleartext(*replies)
@@ -107,16 +109,6 @@ func BenchmarkTable(b *testing.B) {
   slotTable := new(SlotTable)
   b.ResetTimer()
 
-  c := make(chan int, b.N)
-  for i := 0; i < b.N; i++ {
-    go func(q *InsertQuery) {
-      slotTable.processQuery(q)
-      c <- 0
-    }(queries[i])
-  }
-
-  for i := 0; i < b.N; i++ {
-    <-c
-  }
+  slotTable.processQueries(queries)
 }
 

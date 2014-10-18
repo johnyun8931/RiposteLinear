@@ -9,6 +9,37 @@ import (
   "net/rpc"
 )
 
+type countSocket struct {
+  Conn *tls.Conn
+  bytes_sent int64
+  bytes_recv int64
+}
+
+func newCountSocket(t *tls.Conn) countSocket {
+  var c countSocket
+  c.Conn = t
+  return c
+}
+
+func (s countSocket) Read(p []byte) (int, error) {
+  n, err := s.Conn.Read(p)
+  s.bytes_recv += int64(n)
+  log.Printf("Read %v bytes [total %v]\n", n, s.bytes_recv)
+  return n, err
+}
+
+func (s countSocket) Write(p []byte) (int, error) {
+  n, err := s.Conn.Write(p)
+  s.bytes_sent += int64(n)
+  log.Printf("Sent %v bytes [total %v]\n", n, s.bytes_sent)
+  return n, err
+}
+
+func (s countSocket) Close() error {
+  return s.Conn.Close()
+}
+
+
 /* For running RPC over TLS. */
 
 func ListenAndServe(address string, keyIdx int, acceptCerts []tls.Certificate) {
@@ -58,7 +89,7 @@ func handleOneClient(conn net.Conn) {
 
   log.Printf("Handshake OK")
 
-  rpc.ServeConn(conn)
+  rpc.ServeConn(newCountSocket(conn.(*tls.Conn)))
 }
 
 func DialHTTPWithTLS(network, address string,
@@ -82,7 +113,7 @@ func DialHTTPWithTLS(network, address string,
     return nil, errors.New("Invalid certificate")
   }
 
-  return rpc.NewClient(conn), nil
+  return rpc.NewClient(newCountSocket(conn)), nil
 }
 
 func validateCert(acceptCerts []tls.Certificate, present *x509.Certificate) bool {

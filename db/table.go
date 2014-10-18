@@ -1,13 +1,45 @@
 package db
 
 import (
-//  "log"
+  "log"
   "henrycg/email/prf"
 )
 
 /************
  * Actual DB manipulation
  */
+
+func (t *SlotTable) expandRow(allTables []BitMatrix, queries []*InsertQuery, row int, c chan int) {
+  for q := 0; q < len(queries); q++ {
+    row_prf, err := prf.NewPrf(queries[q].Keys[row])
+    if err != nil {
+      panic("Can't create PRG!")
+    }
+
+    rowBit := queries[q].KeyMask[row]
+    row_prf.Evaluate(allTables[q][row][:])
+
+    // XOR row i of query q into the database table
+    XorRows(&t.table[row], &allTables[q][row])
+    if rowBit {
+      // If row bitmask is set, then XOR in the message mask to
+      // the table too
+      XorRows(&t.table[row], &queries[q].MessageMask)
+    }
+  }
+
+  c <- 0
+}
+
+
+// XOR all of the rows in src into dst
+func xorTable(dst *BitMatrixRow, src *BitMatrix, c chan int) {
+  for i := 0; i < TABLE_HEIGHT; i++ {
+    XorRows(dst, &src[i])
+  }
+
+  c <- 0
+}
 
 func (t *SlotTable) processQueries(queries []*InsertQuery) ([]BitMatrixRow, error) {
   t.tableMutex.Lock()
@@ -16,34 +48,29 @@ func (t *SlotTable) processQueries(queries []*InsertQuery) ([]BitMatrixRow, erro
   allTables := make([]BitMatrix, len(queries))
   allRows := make([]BitMatrixRow, len(queries))
 
+  log.Printf("Making allTables")
   // For each row i and query q, XOR allTables[q][i] into table[i]
+  c := make(chan int, len(queries))
   for i := 0; i < TABLE_HEIGHT; i++ {
-    for q := 0; q < len(queries); q++ {
-      row_prf, err := prf.NewPrf(queries[q].Keys[i])
-      if err != nil {
-        return allRows, err
-      }
-
-      rowBit := queries[q].KeyMask[i]
-      row_prf.Evaluate(allTables[q][i][:])
-
-      // XOR row i of query q into the database table
-      XorRows(&t.table[i], &allTables[q][i])
-      if rowBit {
-        // If row bitmask is set, then XOR in the message mask to
-        // the table too
-        XorRows(&t.table[i], &queries[q].MessageMask)
-      }
-    }
+    go t.expandRow(allTables, queries, i, c)
   }
-  t.tableMutex.Unlock()
 
+  for i := 0; i < TABLE_HEIGHT; i++ {
+    <-c
+  }
+
+
+  log.Printf("Making allRows")
   // For each query q and row i, XOR allTables[q][i] into allRows[q]
   for q := 0; q < len(queries); q++ {
-    for i := 0; i < TABLE_HEIGHT; i++ {
-      XorRows(&allRows[q], &allTables[q][i])
-    }
+    go xorTable(&allRows[q], &allTables[q], c)
   }
+
+  for i := 0; i < len(queries); i++ {
+    <-c
+  }
+
+  t.tableMutex.Unlock()
 
   return allRows, nil
 }

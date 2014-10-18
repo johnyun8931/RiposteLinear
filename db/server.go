@@ -112,6 +112,7 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
         }
         continue
 
+      // Wait until we get MAX_QUERY_SIZE queries
       default:
         return n
     }
@@ -369,9 +370,20 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   reply.QueryToAudit = make([]EncryptedAuditQuery, len(prep.Queries))
 
   n_queries := len(prep.Queries)
-  // XXX parallelize this?
+  c := make(chan int, n_queries)
   for i:=0; i<n_queries; i++ {
-    plainQueries[i], err = DecryptQuery(t.ServerIdx, prep.Queries[i])
+    go func(j int) {
+      var err2 error
+      plainQueries[j], err2 = DecryptQuery(t.ServerIdx, prep.Queries[j])
+      if err2 != nil {
+        panic("Decryption error")
+      }
+      c <- 0
+    }(i)
+  }
+
+  for i:=0; i<n_queries; i++ {
+    <-c
   }
 
 
@@ -379,13 +391,13 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
   // At the same time, generate an XOR of all of the seed outputs.
   log.Printf("XORing into table for %v", prep.Uuid)
   rows, err := t.entries.processQueries(plainQueries)
+  log.Printf("Done XORing into table for %v", prep.Uuid)
   if err != nil {
     reply.Okay = false
     log.Printf("Error in decrypt/audit: ", err)
     return err
   }
 
-  c := make(chan int, n_queries)
   for i:=0; i<n_queries; i++ {
     go func(j int) {
       log.Printf("Preparing audit for %v[%v]", prep.Uuid, j)
@@ -427,7 +439,10 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
       bogus = append(bogus, queries[i])
     }
   }
-  t.entries.processQueries(bogus)
+
+  if len(bogus) > 0 {
+    t.entries.processQueries(bogus)
+  }
 
   t.pendingMutex.Lock()
   delete(t.pending, com.Uuid)

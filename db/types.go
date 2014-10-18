@@ -17,14 +17,14 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2//1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 1 << 5
-const TABLE_HEIGHT int = 1 << 12
+const TABLE_WIDTH int = 1 << 9
+const TABLE_HEIGHT int = 1 << 8
 
 // Number of upload requests to buffer
-const REQ_BUFFER_SIZE int = 64
+const REQ_BUFFER_SIZE int = 128
 
 // Maximum number of queries to bundle together
-const MAX_QUERY_SIZE int = 4
+const MAX_QUERY_SIZE int = 64
 
 // Length of plaintext messages (in bytes)
 const SLOT_LENGTH int = 160// 64 KB
