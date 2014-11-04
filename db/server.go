@@ -450,8 +450,10 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 
   t.clientsServedMutex.Lock()
   t.clientsServed += len(queries)
-  rate := float64(t.clientsServed) / time.Now().Sub(t.clientsServedStart).Seconds()
-  log.Printf("Processed %v queries at rate %v reqs/sec", t.clientsServed, rate)
+  rate := float64(len(queries)) / time.Now().Sub(t.clientsServedStart).Seconds()
+  log.Printf("Processed %v queries at rate %v reqs/sec | table size %d", t.clientsServed, rate,
+    TABLE_WIDTH*TABLE_HEIGHT*SLOT_LENGTH)
+  t.clientsServedStart = time.Now()
   t.clientsServedMutex.Unlock()
 
   return nil
