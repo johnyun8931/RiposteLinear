@@ -111,6 +111,8 @@ func main() {
     log.SetOutput(f)
   }
 
+  log.SetPrefix("[Client ] ")
+
   runtime.GOMAXPROCS(int(*threadsFlag))
 
   defer log.Printf("Client died.")

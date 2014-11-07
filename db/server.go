@@ -15,7 +15,7 @@ import (
 )
 
 // Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 60*60*8
+const MERGE_TIME_DELAY time.Duration = 60*60*24
 
 var (
   incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
