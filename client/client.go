@@ -15,6 +15,7 @@ import (
   "henrycg/email/utils"
 )
 
+var donothingFlag = flag.Bool("donothing", false, "If set, client pings server.")
 var bogusFlag = flag.Bool("bogus", false, "If set, client sends an invalid request.")
 var hammerFlag = flag.Bool("hammer", false, "If set, client sends requests to server as quickly as possible.")
 var leaderFlag = flag.String("leader", "", "Leader IP and port")
@@ -59,35 +60,48 @@ func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
     return
   }
 
-  err = tryUpload(client, args)
-  if err != nil {
-    log.Printf("Upload error", err)
-    return
+  if (*donothingFlag) {
+    var a, b int
+    err := client.Call("Server.DoNothing", &a, &b)
+    if err != nil {
+      panic("Oh no!")
+    }
+
+    log.Printf("Done")
+  } else {
+    err = tryUpload(client, args)
+    if err != nil {
+      log.Printf("Upload error", err)
+      return
+    }
+    log.Printf("Done uploading")
   }
-  log.Printf("Done uploading")
   client.Close()
 }
 
 func clientOnce(bogus bool) {
-  log.Printf("=== Starting Client ===")
-  xIdx, yIdx, msg, err := db.RandomMessage()
-
-  if err != nil {
-    log.Printf("Error generating message: ", err)
-    return
-  }
-
-  log.Printf("Insert into [%v,%v]", xIdx, yIdx)
-  log.Printf("Plaintext [%v]", msg)
-
   var args db.UploadArgs
-  err = db.InitializeUploadArgs(&args, xIdx, yIdx, msg, *bogusFlag)
-  if err != nil {
-    log.Fatal("error: ", err)
-    return
+  var table db.DumpReply
+
+  if (!*donothingFlag) {
+    log.Printf("=== Starting Client ===")
+    xIdx, yIdx, msg, err := db.RandomMessage()
+
+    if err != nil {
+      log.Printf("Error generating message: ", err)
+      return
+    }
+
+    log.Printf("Insert into [%v,%v]", xIdx, yIdx)
+    log.Printf("Plaintext [%v]", msg)
+
+    err = db.InitializeUploadArgs(&args, xIdx, yIdx, msg, *bogusFlag)
+    if err != nil {
+      log.Fatal("error: ", err)
+      return
+    }
   }
 
-  var table db.DumpReply
   runClient(*leaderFlag, args, &table)
 }
 

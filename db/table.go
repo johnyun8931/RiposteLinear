@@ -59,7 +59,6 @@ func (t *SlotTable) processQueries(queries []*InsertQuery) ([]BitMatrixRow, erro
     <-c
   }
 
-
   log.Printf("Making allRows")
   // For each query q and row i, XOR allTables[q][i] into allRows[q]
   for q := 0; q < len(queries); q++ {

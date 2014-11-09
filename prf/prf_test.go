@@ -18,16 +18,23 @@ func TestPrf(t *testing.T) {
 }
 
 func BenchmarkPrf(b *testing.B) {
-  key, err := NewKey()
-  if err != nil {
-    b.FailNow()
+  c := make(chan int, b.N)
+
+  for i := 0; i<b.N; i++ {
+    go prfOnce(c)
   }
 
-  prf, err := NewPrf(key)
-  if err != nil {
-    b.FailNow()
+  for i := 0; i<b.N; i++ {
+    <-c
   }
-
-  buf := make([]byte, b.N * (1<<20))
-  prf.Evaluate(buf)
 }
+
+func prfOnce(c chan int) {
+  key, _ := NewKey()
+  prf, _ := NewPrf(key)
+
+  buf := make([]byte, (1<<20))
+  prf.Evaluate(buf)
+  c <-0
+}
+

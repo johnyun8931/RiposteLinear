@@ -114,6 +114,7 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
 
       // Wait until we get MAX_QUERY_SIZE queries
       default:
+        //continue
         return n
     }
   }
@@ -606,6 +607,18 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 
   return t
 }
+
+func (t *Server) DoNothing(args *int, reply *int) error {
+  // Just use this to test number
+  // of requests can handle in a second
+  t.clientsServedMutex.Lock()
+  t.clientsServed++
+  log.Printf("Served %v", t.clientsServed)
+  t.clientsServedMutex.Unlock()
+
+  return nil
+}
+
 
 func init() {
   beginMergeMarkerCommit.Uuid = 0
