@@ -60,6 +60,8 @@ func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
     return
   }
 
+  log.Printf("Connected")
+
   if (*donothingFlag) {
     var a, b int
     err := client.Call("Server.DoNothing", &a, &b)
@@ -131,15 +133,19 @@ func main() {
 
   defer log.Printf("Client died.")
 
+  c := make(chan int, 1)
   // Make one request
   if !*hammerFlag {
     clientOnce(*bogusFlag)
   } else {
     // Make many requests concurrently
-    concurrent := 8
+    concurrent := 16
     for i := 0; i < concurrent; i++ {
-      clientHammer(*bogusFlag)
+      go clientHammer(*bogusFlag)
     }
+
+    // Wait forever
+    <-c
   }
 }
 
