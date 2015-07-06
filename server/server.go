@@ -13,8 +13,8 @@ import (
 )
 
 import (
-  "henrycg/email/db"
-  "henrycg/email/utils"
+  "henrycg/riposte/db"
+  "henrycg/riposte/utils"
 )
 
 func main() {

@@ -10,7 +10,7 @@ import (
 )
 
 import (
-  "henrycg/email/utils"
+  "henrycg/riposte/utils"
 )
 
 func readAll(p io.ReadCloser) {

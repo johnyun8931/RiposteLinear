@@ -10,7 +10,7 @@ import (
   "net/rpc"
   "time"
 
-  "henrycg/email/utils"
+  "henrycg/riposte/utils"
   "henrycg/zkp/group"
 )
 

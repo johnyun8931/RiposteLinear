@@ -4,9 +4,9 @@ import (
   "log"
   "math/big"
 
-  "henrycg/email/prf"
-  "henrycg/email/proof"
-  "henrycg/email/utils"
+  "henrycg/riposte/prf"
+  "henrycg/riposte/proof"
+  "henrycg/riposte/utils"
   "henrycg/zkp/group"
   "henrycg/zkp/schnorr"
 )

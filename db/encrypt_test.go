@@ -5,8 +5,8 @@ import (
   "crypto/rand"
   "testing"
 
-  "henrycg/email/prf"
-  "henrycg/email/utils"
+  "henrycg/riposte/prf"
+  "henrycg/riposte/utils"
 )
 
 func randomQuery(t *testing.T) InsertQuery {

@@ -4,7 +4,7 @@ import (
   "bytes"
   "math/big"
 
-  "henrycg/email/utils"
+  "henrycg/riposte/utils"
   "henrycg/zkp/group"
   "henrycg/zkp/schnorr"
 )

@@ -4,7 +4,7 @@ import (
   "bytes"
   "log"
 
-  "henrycg/email/prf"
+  "henrycg/riposte/prf"
 )
 
 func QueriesMatch(a, b *InsertQuery) bool {

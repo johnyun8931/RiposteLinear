@@ -7,8 +7,8 @@ import (
   "net/rpc"
   "log"
 
-  "henrycg/email/db"
-  "henrycg/email/utils"
+  "henrycg/riposte/db"
+  "henrycg/riposte/utils"
 )
 
 func tryUpload(client *rpc.Client, args db.UploadArgs) error {

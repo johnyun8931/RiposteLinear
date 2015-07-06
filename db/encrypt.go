@@ -7,7 +7,7 @@ import (
   "encoding/gob"
 
   "code.google.com/p/go.crypto/nacl/box"
-  "henrycg/email/utils"
+  "henrycg/riposte/utils"
 )
 
 // XXX This is a terrible way to implement this functionality.
