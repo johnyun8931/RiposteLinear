@@ -5,7 +5,7 @@ import (
   "crypto/rand"
   "math/big"
 
-  "henrycg/zkp/group"
+  "bitbucket.org/henrycg/zkp/group"
 )
 
 var CommonCurve = group.CurveP256()

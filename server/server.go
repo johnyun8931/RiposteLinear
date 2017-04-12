@@ -13,8 +13,8 @@ import (
 )
 
 import (
-  "henrycg/riposte/db"
-  "henrycg/riposte/utils"
+  "bitbucket.org/henrycg/riposte/db"
+  "bitbucket.org/henrycg/riposte/utils"
 )
 
 func main() {

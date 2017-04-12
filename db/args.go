@@ -4,11 +4,11 @@ import (
   "log"
   "math/big"
 
-  "henrycg/riposte/prf"
-  "henrycg/riposte/proof"
-  "henrycg/riposte/utils"
-  "henrycg/zkp/group"
-  "henrycg/zkp/schnorr"
+  "bitbucket.org/henrycg/riposte/prf"
+  "bitbucket.org/henrycg/riposte/proof"
+  "bitbucket.org/henrycg/riposte/utils"
+  "bitbucket.org/henrycg/zkp/group"
+  "bitbucket.org/henrycg/zkp/schnorr"
 )
 
 var curve = utils.CommonCurve

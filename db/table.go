@@ -2,7 +2,7 @@ package db
 
 import (
   //"log"
-  "henrycg/riposte/prf"
+  "bitbucket.org/henrycg/riposte/prf"
 )
 
 func NewBitMatrix() *BitMatrix {

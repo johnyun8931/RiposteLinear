@@ -6,8 +6,8 @@ import (
   "errors"
   "encoding/gob"
 
-  "code.google.com/p/go.crypto/nacl/box"
-  "henrycg/riposte/utils"
+  "golang.org/x/crypto/nacl/box"
+  "bitbucket.org/henrycg/riposte/utils"
 )
 
 // XXX This is a terrible way to implement this functionality.

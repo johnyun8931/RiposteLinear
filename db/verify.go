@@ -4,7 +4,7 @@ import (
   "bytes"
   "log"
 
-  "henrycg/riposte/prf"
+  "bitbucket.org/henrycg/riposte/prf"
 )
 
 func QueriesMatch(a, b *InsertQuery) bool {

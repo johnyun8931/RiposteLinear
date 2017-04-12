@@ -5,7 +5,7 @@ import (
   "sync"
 
 //  "code.google.com/p/go.crypto/nacl/box"
-  "henrycg/riposte/prf"
+  "bitbucket.org/henrycg/riposte/prf"
 )
 
 // Number of "dimensions" for PIR scheme

@@ -4,9 +4,9 @@ import (
   "bytes"
   "math/big"
 
-  "henrycg/riposte/utils"
-  "henrycg/zkp/group"
-  "henrycg/zkp/schnorr"
+  "bitbucket.org/henrycg/riposte/utils"
+  "bitbucket.org/henrycg/zkp/group"
+  "bitbucket.org/henrycg/zkp/schnorr"
 )
 
 var curve = utils.CommonCurve

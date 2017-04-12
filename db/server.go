@@ -10,8 +10,8 @@ import (
   "net/rpc"
   "time"
 
-  "henrycg/riposte/utils"
-  "henrycg/zkp/group"
+  "bitbucket.org/henrycg/riposte/utils"
+  "bitbucket.org/henrycg/zkp/group"
 )
 
 // Time to wait between merges (in seconds)

@@ -10,7 +10,7 @@ import (
 )
 
 import (
-  "henrycg/riposte/utils"
+  "bitbucket.org/henrycg/riposte/utils"
 )
 
 func readAll(p io.ReadCloser) {
