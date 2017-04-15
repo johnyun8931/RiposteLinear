@@ -1,0 +1,11 @@
+NOTE: This is the code used in the experiments for the proceedings version of
+the Riposte paper, which appeared at the 2017 IEEE Symposium on Security and
+Privacy. 
+
+To fix an error in the AlmostEqual protocol (Section 5.1) pointed out to us by
+Elette Boyle, we have slightly changed the checking protocol in an updated
+version of the paper. The revised paper is available at
+    https://arxiv.org/abs/1503.06115
+The protocol change should have a negligible performance impact and we leave
+the code used in the proceedings version here for reference.
+

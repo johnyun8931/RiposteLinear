@@ -1,24 +1,24 @@
 package db
 
 import (
-  "net/rpc"
-  "sync"
-  "time"
+	"net/rpc"
+	"sync"
+	"time"
 
-  "code.google.com/p/go.crypto/poly1305"
+	"golang.org/x/crypto/poly1305"
 
-  "henrycg/email/prf"
+	"bitbucket.org/henrycg/riposte/prf"
 )
 
 const AUDIT_SERVER int = 2
 
 // Number of "dimensions" for PIR scheme
 const NUM_DIMENSIONS = 2
-const NUM_SERVERS = 2//1 << NUM_DIMENSIONS
+const NUM_SERVERS = 2 //1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
 const TABLE_WIDTH int = 32768
-const TABLE_HEIGHT int = 65536/TABLE_WIDTH
+const TABLE_HEIGHT int = 65536 / TABLE_WIDTH
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 128
@@ -27,114 +27,114 @@ const REQ_BUFFER_SIZE int = 128
 const MAX_QUERY_SIZE int = 64
 
 // Length of plaintext messages (in bytes)
-const SLOT_LENGTH int = 160// 64 KB
+const SLOT_LENGTH int = 160 // 64 KB
 
 type BitMatrix [TABLE_HEIGHT]BitMatrixRow
-type BitMatrixRow [TABLE_WIDTH*SLOT_LENGTH]byte
+type BitMatrixRow [TABLE_WIDTH * SLOT_LENGTH]byte
 
 type SlotTable struct {
-  table BitMatrix
-  tableMutex sync.Mutex
+	table      BitMatrix
+	tableMutex sync.Mutex
 }
 
 type DbState int
+
 const (
-  State_Booting = iota
-  State_AcceptUpload = iota
-  State_PrepareForMerge = iota
-  State_Merge = iota
-  State_AcceptPlaintext = iota
+	State_Booting         = iota
+	State_AcceptUpload    = iota
+	State_PrepareForMerge = iota
+	State_Merge           = iota
+	State_AcceptPlaintext = iota
 )
 
 type SlotContents [SLOT_LENGTH]byte
 
 type EncryptedInsertQuery struct {
-  SenderPublicKey [32]byte
-  Nonce [24]byte
-  Ciphertext []byte
+	SenderPublicKey [32]byte
+	Nonce           [24]byte
+	Ciphertext      []byte
 }
 
 type EncryptedAuditQuery EncryptedInsertQuery
 
 type UploadArgs struct {
-  Query [NUM_SERVERS]EncryptedInsertQuery
+	Query [NUM_SERVERS]EncryptedInsertQuery
 }
 
 type InsertQuery struct {
-  Keys [TABLE_HEIGHT]prf.Key
-  KeyMask [TABLE_HEIGHT]bool
-  MessageMask BitMatrixRow
+	Keys        [TABLE_HEIGHT]prf.Key
+	KeyMask     [TABLE_HEIGHT]bool
+	MessageMask BitMatrixRow
 }
 
 type UploadReply struct {
-  Magic int
+	Magic int
 }
 
 type DumpReply struct {
-  Entries *BitMatrix
+	Entries *BitMatrix
 }
 
 type PrepareArgs struct {
-  Uuid int64
-  Queries []EncryptedInsertQuery
+	Uuid    int64
+	Queries []EncryptedInsertQuery
 }
 
 type PrepareReply struct {
-  // VOTE: YES/NO
-  QueryToAudit []EncryptedAuditQuery
-  Okay bool
+	// VOTE: YES/NO
+	QueryToAudit []EncryptedAuditQuery
+	Okay         bool
 }
 
 type AuditQuery struct {
-  MsgTest [][poly1305.TagSize]byte
-  KeyTest [][poly1305.TagSize]byte
+	MsgTest [][poly1305.TagSize]byte
+	KeyTest [][poly1305.TagSize]byte
 }
 
 type AuditArgs struct {
-  Uuid int64
-  QueriesToAudit [][NUM_SERVERS]EncryptedAuditQuery
+	Uuid           int64
+	QueriesToAudit [][NUM_SERVERS]EncryptedAuditQuery
 }
 
 type AuditReply struct {
-  Okay []bool
+	Okay []bool
 }
 
 type CommitArgs struct {
-  // COMMIT
-  Uuid int64
-  Commit []bool
+	// COMMIT
+	Uuid   int64
+	Commit []bool
 }
 
 type CommitReply struct {
-  // Ack
-  // uuid
+	// Ack
+	// uuid
 }
 
 type PlaintextArgs struct {
-  Plaintext *BitMatrix
+	Plaintext *BitMatrix
 }
 
 type PlaintextReply struct {
-  // Nothing
+	// Nothing
 }
 
 type Server struct {
-  ServerIdx int
-  State DbState
-  ServerAddrs []string
+	ServerIdx   int
+	State       DbState
+	ServerAddrs []string
 
-  clientsServed int
-  clientsServedStart time.Time
-  clientsServedMutex sync.Mutex
+	clientsServed      int
+	clientsServedStart time.Time
+	clientsServedMutex sync.Mutex
 
-  pending map[int64]([]*InsertQuery)
-  pendingMutex sync.Mutex
+	pending      map[int64]([]*InsertQuery)
+	pendingMutex sync.Mutex
 
-  entries *SlotTable
+	entries *SlotTable
 
-  plain *BitMatrix
-  plainMutex sync.Mutex
+	plain      *BitMatrix
+	plainMutex sync.Mutex
 
-  rpcClients [NUM_SERVERS+1]*rpc.Client
+	rpcClients [NUM_SERVERS + 1]*rpc.Client
 }
-

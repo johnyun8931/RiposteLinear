@@ -1,110 +1,109 @@
 package db
 
 import (
-  "bytes"
-  "crypto/rand"
-  "errors"
-  "encoding/gob"
+	"bytes"
+	"crypto/rand"
+	"encoding/gob"
+	"errors"
 
-  "code.google.com/p/go.crypto/nacl/box"
-  "henrycg/email/utils"
+	"bitbucket.org/henrycg/riposte/utils"
+	"golang.org/x/crypto/nacl/box"
 )
 
 func EncryptQuery(serverIdx int, query InsertQuery) (EncryptedInsertQuery, error) {
-  var out EncryptedInsertQuery
-  var buf bytes.Buffer
-  enc := gob.NewEncoder(&buf)
-  err := enc.Encode(query)
-  if err != nil {
-    return out, err
-  }
+	var out EncryptedInsertQuery
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err := enc.Encode(query)
+	if err != nil {
+		return out, err
+	}
 
-  return encryptBytes(serverIdx, buf.Bytes())
+	return encryptBytes(serverIdx, buf.Bytes())
 }
 
-
 func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (*InsertQuery, error) {
-  /*
-  log.Printf("pk   %v", enc.SenderPublicKey)
-  log.Printf("nc   %v", enc.Nonce)
-  log.Printf("ct   %v", enc.Ciphertext)
-  */
+	/*
+	  log.Printf("pk   %v", enc.SenderPublicKey)
+	  log.Printf("nc   %v", enc.Nonce)
+	  log.Printf("ct   %v", enc.Ciphertext)
+	*/
 
-  buf, err := decryptBytes(serverIdx, enc)
+	buf, err := decryptBytes(serverIdx, enc)
 
-  query := new(InsertQuery)
-  if err != nil {
-    return query, err
-  }
+	query := new(InsertQuery)
+	if err != nil {
+		return query, err
+	}
 
-  dec := gob.NewDecoder(bytes.NewBuffer(buf))
-  err = dec.Decode(&query)
-  return query, err
+	dec := gob.NewDecoder(bytes.NewBuffer(buf))
+	err = dec.Decode(&query)
+	return query, err
 }
 
 func EncryptAudit(query AuditQuery) (EncryptedAuditQuery, error) {
-  var out EncryptedAuditQuery
-  var buf bytes.Buffer
-  enc := gob.NewEncoder(&buf)
-  err := enc.Encode(query)
-  if err != nil {
-    return out, err
-  }
+	var out EncryptedAuditQuery
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err := enc.Encode(query)
+	if err != nil {
+		return out, err
+	}
 
-  q, err := encryptBytes(AUDIT_SERVER, buf.Bytes())
-  return EncryptedAuditQuery(q), err
+	q, err := encryptBytes(AUDIT_SERVER, buf.Bytes())
+	return EncryptedAuditQuery(q), err
 }
 
 func DecryptAudit(enc EncryptedAuditQuery) (*AuditQuery, error) {
-  buf, err := decryptBytes(AUDIT_SERVER, EncryptedInsertQuery(enc))
+	buf, err := decryptBytes(AUDIT_SERVER, EncryptedInsertQuery(enc))
 
-  query := new(AuditQuery)
-  if err != nil {
-    return query, err
-  }
+	query := new(AuditQuery)
+	if err != nil {
+		return query, err
+	}
 
-  dec := gob.NewDecoder(bytes.NewBuffer(buf))
-  err = dec.Decode(&query)
+	dec := gob.NewDecoder(bytes.NewBuffer(buf))
+	err = dec.Decode(&query)
 
-  return query, err
+	return query, err
 }
 
 /*** Helper Functions ***/
 
 func encryptBytes(serverIdx int, buf []byte) (EncryptedInsertQuery, error) {
-  var out EncryptedInsertQuery
-  serverPublicKey := utils.ServerBoxPublicKeys[serverIdx]
-  var nonce [24]byte
-  _, err := rand.Read(nonce[:])
-  if err != nil {
-    return out, err
-  }
+	var out EncryptedInsertQuery
+	serverPublicKey := utils.ServerBoxPublicKeys[serverIdx]
+	var nonce [24]byte
+	_, err := rand.Read(nonce[:])
+	if err != nil {
+		return out, err
+	}
 
-  myPublicKey, myPrivateKey, err := box.GenerateKey(rand.Reader)
+	myPublicKey, myPrivateKey, err := box.GenerateKey(rand.Reader)
 
-  out.SenderPublicKey = *myPublicKey
-  out.Nonce = nonce
-  out.Ciphertext = box.Seal(nil, buf, &nonce, serverPublicKey, myPrivateKey)
+	out.SenderPublicKey = *myPublicKey
+	out.Nonce = nonce
+	out.Ciphertext = box.Seal(nil, buf, &nonce, serverPublicKey, myPrivateKey)
 
-  /*
-  log.Printf("pk   %v", out.SenderPublicKey)
-  log.Printf("nc   %v", out.Nonce)
-  log.Printf("ct   %v", out.Ciphertext)
-  */
+	/*
+	  log.Printf("pk   %v", out.SenderPublicKey)
+	  log.Printf("nc   %v", out.Nonce)
+	  log.Printf("ct   %v", out.Ciphertext)
+	*/
 
-  return out, nil
+	return out, nil
 }
 
 func decryptBytes(serverIdx int, enc EncryptedInsertQuery) ([]byte, error) {
-  serverPrivateKey := utils.ServerBoxPrivateKeys[serverIdx]
+	serverPrivateKey := utils.ServerBoxPrivateKeys[serverIdx]
 
-  var buf []byte
-  buf, okay := box.Open(nil, enc.Ciphertext, &enc.Nonce,
-      &enc.SenderPublicKey, serverPrivateKey)
+	var buf []byte
+	buf, okay := box.Open(nil, enc.Ciphertext, &enc.Nonce,
+		&enc.SenderPublicKey, serverPrivateKey)
 
-  if !okay {
-    return buf, errors.New("Could not decrypt")
-  }
+	if !okay {
+		return buf, errors.New("Could not decrypt")
+	}
 
-  return buf, nil
+	return buf, nil
 }
