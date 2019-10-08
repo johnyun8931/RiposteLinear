@@ -15,15 +15,13 @@ import (
 )
 
 // Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 60 * 60 * 24
+const MERGE_TIME_DELAY time.Duration = 5
 
 var (
 	incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
-	auditReqs    = make(chan AuditArgs, REQ_BUFFER_SIZE)
 	commitReqs   = make(chan CommitArgs, REQ_BUFFER_SIZE)
 
 	beginMergeMarker       [NUM_SERVERS]EncryptedInsertQuery
-	beginMergeMarkerAudit  AuditArgs
 	beginMergeMarkerCommit CommitArgs
 )
 
@@ -140,7 +138,7 @@ func (t *Server) submitPrepares() {
 		n := readIncomingRequests(&preps, incomingReqs, &shouldMerge)
 		if n == 0 {
 			// Merge is starting, so send marker down pipeline
-			auditReqs <- beginMergeMarkerAudit
+			commitReqs <- beginMergeMarkerCommit
 		}
 
 		log.Printf("Send PREPARE %d", uuid)
@@ -168,50 +166,34 @@ func (t *Server) submitPrepares() {
 			}
 		}
 
-		var auditArgs AuditArgs
-		auditArgs.Uuid = uuid
-		if len(replies[0].QueryToAudit) != len(replies[1].QueryToAudit) {
-			panic("Length mismatch")
-		}
-
-		auditList := make([][NUM_SERVERS]EncryptedAuditQuery,
-			len(replies[0].QueryToAudit))
-		auditArgs.QueriesToAudit = auditList
-
-		okay := true
-		for i := 0; i < NUM_SERVERS; i++ {
-			if !replies[i].Okay {
-				log.Printf("Aborting commit")
-				okay = false
-			}
-
-			for j := range replies[i].QueryToAudit {
-				auditArgs.QueriesToAudit[j][i] = replies[i].QueryToAudit[j]
-			}
-		}
-
 		log.Printf("Done PREPARE %d", uuid)
 
 		// If merge is beginning, send marker down
 		// the pipeline
 		if shouldMerge {
-			auditReqs <- beginMergeMarkerAudit
+			commitReqs <- beginMergeMarkerCommit
 		}
 
+		// CHECK REQUEST HERE USING NEW STUFF
+		okay := true
+
 		if okay {
-			log.Printf("Putting audit request in pipeline %d", uuid)
-			auditReqs <- auditArgs
+			log.Printf("Telling servers to accept the commit %d", uuid)
 		} else {
 			log.Printf("Telling servers to abort the commit %d", uuid)
-			// Tell servers to abort the commit
-			var commitArgs CommitArgs
-			commitArgs.Uuid = preps[0].Uuid
-			commitArgs.Commit = make([]bool, len(replies[0].QueryToAudit))
-			commitReqs <- commitArgs
+		}
+
+		var commitArgs CommitArgs
+		commitArgs.Uuid = preps[0].Uuid
+		commitArgs.Commit = make([]bool, len(replies[0].QueryToAudit))
+		commitReqs <- commitArgs
+		for i := range commitArgs.Commit {
+			commitArgs.Commit[i] = okay
 		}
 	}
 }
 
+/*
 func (t *Server) submitAudits() {
 	for {
 		req := <-auditReqs
@@ -241,6 +223,7 @@ func (t *Server) submitAudits() {
 		log.Printf("Done AUDIT %d => Okay? %v", req.Uuid, a_reply.Okay)
 	}
 }
+*/
 
 func (t *Server) submitCommits() {
 	for {
@@ -280,7 +263,9 @@ func (t *Server) submitCommits() {
 
 func (t *Server) mergeWorker() {
 	for {
+		log.Printf("Mergeworker starts")
 		time.Sleep(MERGE_TIME_DELAY * time.Second)
+		log.Printf("Mergeworker fire!")
 		t.sendMergeRequest()
 	}
 }
@@ -365,7 +350,7 @@ func (t *Server) beginMerge() {
  */
 
 func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
-	var err error
+	//var err error
 	plainQueries := make([]*InsertQuery, len(prep.Queries))
 	reply.QueryToAudit = make([]EncryptedAuditQuery, len(prep.Queries))
 
@@ -389,7 +374,7 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	// Generate out each of the seeds and XOR into the database.
 	// At the same time, generate an XOR of all of the seed outputs.
 	log.Printf("XORing into table for %v", prep.Uuid)
-	rows, err := t.entries.processQueries(plainQueries)
+	_, err := t.entries.processQueries(plainQueries)
 	log.Printf("Done XORing into table for %v", prep.Uuid)
 	if err != nil {
 		reply.Okay = false
@@ -397,19 +382,21 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 		return err
 	}
 
-	for i := 0; i < n_queries; i++ {
-		go func(j int) {
-			log.Printf("Preparing audit for %v[%v]", prep.Uuid, j)
-			// Use the XORd seeds (row) to generate the audit request
-			reply.QueryToAudit[j] = prepareAudit(prep.Uuid, j, t.ServerIdx, plainQueries[j], &rows[j])
-			log.Printf("Done preparing audit for %v[%v]", prep.Uuid, j)
-			c <- 0
-		}(i)
-	}
+	/*
+		for i := 0; i < n_queries; i++ {
+			go func(j int) {
+				log.Printf("Preparing audit for %v[%v]", prep.Uuid, j)
+				// Use the XORd seeds (row) to generate the audit request
+				//reply.QueryToAudit[j] = prepareAudit(prep.Uuid, j, t.ServerIdx, plainQueries[j], &rows[j])
+				log.Printf("Done preparing audit for %v[%v]", prep.Uuid, j)
+				c <- 0
+			}(i)
+		}
 
-	for i := 0; i < n_queries; i++ {
-		<-c
-	}
+		for i := 0; i < n_queries; i++ {
+			<-c
+		}
+	*/
 
 	reply.Okay = true
 	t.pendingMutex.Lock()
@@ -467,17 +454,17 @@ func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) erro
 	log.Printf("Storing plaintext")
 	t.plainMutex.Lock()
 	t.plain = args.Plaintext
-	/*
-	  var zeros SlotContents
-	  for i := range t.plain {
-	    for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
-	      msg := t.plain[i][j:(j+SLOT_LENGTH)]
-	      if bytes.Compare(zeros[:], msg) != 0 {
-	        log.Printf("Got msg: %v", msg)
-	      }
-	    }
-	  }
-	*/
+
+	var zeros SlotContents
+	for i := range t.plain {
+		for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
+			msg := t.plain[i][j:(j + SLOT_LENGTH)]
+			if bytes.Compare(zeros[:], msg) != 0 {
+				log.Printf("Got msg: %v", msg)
+			}
+		}
+	}
+
 	t.plainMutex.Unlock()
 
 	t.State = State_AcceptUpload
@@ -546,9 +533,9 @@ func (t *Server) openConnections() error {
 func (t *Server) Initialize(*int, *int) error {
 	if t.isLeader() {
 		go t.submitPrepares()
-		go t.submitAudits()
 		go t.submitCommits()
 		go t.mergeWorker()
+
 		go func(t *Server) {
 			// HACK wait until other servers have started
 			time.Sleep(500 * time.Millisecond)

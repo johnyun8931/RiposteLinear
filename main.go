@@ -21,7 +21,7 @@ func main() {
 	var servers = []string{
 		"localhost:9090",
 		"localhost:9091",
-		"localhost:9092",
+		//"localhost:9092",
 	}
 
 	s := strings.Join(servers, ",")

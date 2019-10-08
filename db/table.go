@@ -2,6 +2,7 @@ package db
 
 import (
 	"bitbucket.org/henrycg/riposte/prf"
+	"fmt"
 	"log"
 )
 
@@ -113,14 +114,14 @@ func (t *SlotTable) Xor(other *BitMatrix) {
 }
 
 func (t *SlotTable) debugTable() {
-	/*
-	  fmt.Printf("---- Table ----\n")
-	  t.ForeachRow(func(idx int, row *BitMatrixRow) {
-	    for i := 0; i<len(row); i++ {
-	      fmt.Printf("%v ", row[i])
-	    }
-	    fmt.Printf ("\n")
-	  })
-	*/
+
+	fmt.Printf("---- Table ----\n")
+	t.ForeachRow(func(idx int, row *BitMatrixRow) {
+		for i := 0; i < len(row); i++ {
+			fmt.Printf("%v ", row[i])
+		}
+		fmt.Printf("\n")
+	})
+
 	return
 }

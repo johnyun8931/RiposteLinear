@@ -2,13 +2,9 @@ package db
 
 import (
 	"log"
-	"math/big"
 
 	"bitbucket.org/henrycg/riposte/prf"
-	"bitbucket.org/henrycg/riposte/proof"
 	"bitbucket.org/henrycg/riposte/utils"
-	"bitbucket.org/henrycg/zkp/group"
-	"bitbucket.org/henrycg/zkp/schnorr"
 )
 
 var curve = utils.CommonCurve
@@ -113,13 +109,6 @@ func ComputeProofVector(keys []prf.Key, keyMask []bool) [][]byte {
 	}
 
 	return vec
-}
-
-func computeProof(keys, keysP []prf.Key, keyMask, keyMaskP []bool, differAt int) (schnorr.ManyEvidence, []group.Element, []*big.Int, []group.Element, []*big.Int) {
-	vecA := ComputeProofVector(keys, keyMask)
-	vecB := ComputeProofVector(keysP, keyMaskP)
-
-	return proof.VectorProve(vecA, vecB, differAt)
 }
 
 func randomVectorKeys(lst []prf.Key) error {

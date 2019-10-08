@@ -103,15 +103,10 @@ func main() {
 		}()
 	}
 
-	if idx == db.AUDIT_SERVER {
-		auditor := new(db.Auditor)
-		rpc.Register(auditor)
-	} else {
-		var a int
-		slotTable := db.NewServer(idx, serverList)
-		slotTable.Initialize(&a, &a)
-		rpc.Register(slotTable)
-	}
+	var a int
+	slotTable := db.NewServer(idx, serverList)
+	slotTable.Initialize(&a, &a)
+	rpc.Register(slotTable)
 
 	var certs []tls.Certificate
 
