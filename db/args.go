@@ -22,7 +22,7 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 	var msgMask BitMatrixRow
 
 	randomVectorKeys(keys[:])
-	utils.RandomVector(keyMask[:])
+	utils.RandVectorBool(keyMask[:])
 
 	copy(keyMaskP[:], keyMask[:])
 	copy(keysP[:], keys[:])
@@ -49,13 +49,15 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 	for i := 0; i < NUM_SERVERS; i++ {
 		var plainQuery InsertQuery
 
-		plainQuery.MessageMask = msgMask
-		plainQuery.Keys = keys
-		plainQuery.KeyMask = keyMask
+		plainQuery.Key.KeyIndex = i
+		plainQuery.Key.MessageMask = msgMask
+		plainQuery.Key.Keys = keys
+		plainQuery.Key.KeyMask = keyMask
+		utils.RandBytes(plainQuery.Key.Nonce[:])
 
 		if (i & 1) > 0 {
-			plainQuery.Keys = keysP
-			plainQuery.KeyMask = keyMaskP
+			plainQuery.Key.Keys = keysP
+			plainQuery.Key.KeyMask = keyMaskP
 		}
 
 		var err error
@@ -136,14 +138,8 @@ func RandomMessage() (int, int, SlotContents, error) {
 	var xIdx, yIdx int
 	var msg SlotContents
 
-	xIdx, err = utils.RandomInt(TABLE_WIDTH)
-	if err != nil {
-		return 0, 0, msg, err
-	}
-	yIdx, err = utils.RandomInt(TABLE_HEIGHT)
-	if err != nil {
-		return 0, 0, msg, err
-	}
+	xIdx = utils.RandIntShort(TABLE_WIDTH)
+	yIdx = utils.RandIntShort(TABLE_HEIGHT)
 
 	msg, err = RandomSlot()
 	return xIdx, yIdx, msg, err

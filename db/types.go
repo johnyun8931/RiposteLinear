@@ -61,10 +61,24 @@ type UploadArgs struct {
 	Query [NUM_SERVERS]EncryptedInsertQuery
 }
 
-type InsertQuery struct {
+type DPFKey struct {
+	KeyIndex    int
 	Keys        [TABLE_HEIGHT]prf.Key
 	KeyMask     [TABLE_HEIGHT]bool
 	MessageMask BitMatrixRow
+
+	// Share of client's message
+	MessageShare SlotContents
+
+	// Random blinding value
+	Nonce [16]byte
+}
+
+type InsertQuery struct {
+	Key DPFKey
+
+	// TODO: Add real proof
+	Proof [32]byte
 }
 
 type UploadReply struct {

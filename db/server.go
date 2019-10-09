@@ -378,7 +378,7 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	log.Printf("Done XORing into table for %v", prep.Uuid)
 	if err != nil {
 		reply.Okay = false
-		log.Printf("Error in decrypt/audit: ", err)
+		log.Printf("Error in decrypt/audit: %v", err)
 		return err
 	}
 

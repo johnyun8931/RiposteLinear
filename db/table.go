@@ -12,12 +12,12 @@ import (
 
 func (t *SlotTable) expandRow(allTables []BitMatrix, queries []*InsertQuery, row int, c chan int) {
 	for q := 0; q < len(queries); q++ {
-		row_prf, err := prf.NewPrf(queries[q].Keys[row])
+		row_prf, err := prf.NewPrf(queries[q].Key.Keys[row])
 		if err != nil {
 			panic("Can't create PRG!")
 		}
 
-		rowBit := queries[q].KeyMask[row]
+		rowBit := queries[q].Key.KeyMask[row]
 		row_prf.Evaluate(allTables[q][row][:])
 
 		// XOR row i of query q into the database table
@@ -25,7 +25,7 @@ func (t *SlotTable) expandRow(allTables []BitMatrix, queries []*InsertQuery, row
 		if rowBit {
 			// If row bitmask is set, then XOR in the message mask to
 			// the table too
-			XorRows(&t.table[row], &queries[q].MessageMask)
+			XorRows(&t.table[row], &queries[q].Key.MessageMask)
 		}
 	}
 

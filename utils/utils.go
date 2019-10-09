@@ -41,23 +41,6 @@ func RandomInt64(max int64) (int64, error) {
 	return out.Int64(), nil
 }
 
-func RandomInt(max int) (int, error) {
-	num, err := RandomInt64(int64(max))
-	return int(num), err
-}
-
-func RandomVector(lst []bool) error {
-	for i := 0; i < len(lst); i++ {
-		bit, err := RandomInt(2)
-		if err != nil {
-			return err
-		}
-		lst[i] = (bit != 0)
-	}
-
-	return nil
-}
-
 func HashString(b []byte) *big.Int {
 	h := sha256.Sum224(b)
 	return new(big.Int).SetBytes(h[:])
