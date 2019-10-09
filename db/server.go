@@ -19,7 +19,8 @@ const MERGE_TIME_DELAY time.Duration = 5
 
 var (
 	incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
-	commitReqs   = make(chan CommitArgs, REQ_BUFFER_SIZE)
+	//	auditReqs    = make(chan AuditArgs, REQ_BUFFER_SIZE)
+	commitReqs = make(chan CommitArgs, REQ_BUFFER_SIZE)
 
 	beginMergeMarker       [NUM_SERVERS]EncryptedInsertQuery
 	beginMergeMarkerCommit CommitArgs
@@ -64,60 +65,24 @@ func (t *Server) Upload(args *UploadArgs, reply *UploadReply) error {
 	return nil
 }
 
+/*
+func handleRequest(args *UploadArgs) {
+
+}
+*/
+
 func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
-	c chan [NUM_SERVERS]EncryptedInsertQuery, shouldMerge *bool) int {
-
-	// Read once, then read until we get to
-	// the end
-
-	n := 0
-	appendOnce := func(queryList [NUM_SERVERS]EncryptedInsertQuery) {
-		for i := 0; i < NUM_SERVERS; i++ {
-			(*preps)[i].Queries = append((*preps)[i].Queries, queryList[i])
-		}
-		n++
+	c chan [NUM_SERVERS]EncryptedInsertQuery) bool {
+	queryList := <-c
+	if queryList[0].Ciphertext == nil {
+		return true
 	}
 
-	isEmpty := func(q [NUM_SERVERS]EncryptedInsertQuery) bool {
-		return q[0].Ciphertext == nil
+	for i := 0; i < NUM_SERVERS; i++ {
+		(*preps)[i].Query = queryList[i]
 	}
 
-	first := <-c
-	if isEmpty(first) {
-		return n
-	} else {
-		appendOnce(first)
-	}
-
-	//time.Sleep(1*time.Second)
-
-	*shouldMerge = false
-	for {
-		select {
-		// Each element of incomingReqs has an array
-		// of queries -- one for each server
-		case queryList := <-c:
-			// If we're starting to merge, then the marker down
-			// the pipeline
-			if isEmpty(queryList) {
-				*shouldMerge = true
-				return n
-			} else {
-				appendOnce(queryList)
-				if len(preps[0].Queries) >= MAX_QUERY_SIZE {
-					return n
-				}
-			}
-			continue
-
-		// Wait until we get MAX_QUERY_SIZE queries
-		default:
-			//continue
-			return n
-		}
-	}
-
-	return n
+	return false
 }
 
 func (t *Server) submitPrepares() {
@@ -131,12 +96,10 @@ func (t *Server) submitPrepares() {
 		var preps [NUM_SERVERS]PrepareArgs
 		for i := 0; i < NUM_SERVERS; i++ {
 			preps[i].Uuid = uuid
-			preps[i].Queries = make([]EncryptedInsertQuery, 0)
 		}
 
-		var shouldMerge bool
-		n := readIncomingRequests(&preps, incomingReqs, &shouldMerge)
-		if n == 0 {
+		shouldMerge := readIncomingRequests(&preps, incomingReqs)
+		if shouldMerge {
 			// Merge is starting, so send marker down pipeline
 			commitReqs <- beginMergeMarkerCommit
 		}
@@ -185,11 +148,8 @@ func (t *Server) submitPrepares() {
 
 		var commitArgs CommitArgs
 		commitArgs.Uuid = preps[0].Uuid
-		commitArgs.Commit = make([]bool, len(replies[0].QueryToAudit))
+		commitArgs.Commit = okay
 		commitReqs <- commitArgs
-		for i := range commitArgs.Commit {
-			commitArgs.Commit[i] = okay
-		}
 	}
 }
 
@@ -350,31 +310,16 @@ func (t *Server) beginMerge() {
  */
 
 func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
-	//var err error
-	plainQueries := make([]*InsertQuery, len(prep.Queries))
-	reply.QueryToAudit = make([]EncryptedAuditQuery, len(prep.Queries))
-
-	n_queries := len(prep.Queries)
-	c := make(chan int, n_queries)
-	for i := 0; i < n_queries; i++ {
-		go func(j int) {
-			var err2 error
-			plainQueries[j], err2 = DecryptQuery(t.ServerIdx, prep.Queries[j])
-			if err2 != nil {
-				panic("Decryption error")
-			}
-			c <- 0
-		}(i)
-	}
-
-	for i := 0; i < n_queries; i++ {
-		<-c
+	plainQuery, err := DecryptQuery(t.ServerIdx, prep.Query)
+	log.Printf("Hash: %v", hashDpfKey(&plainQuery.Key))
+	if err != nil {
+		panic("Decryption error")
 	}
 
 	// Generate out each of the seeds and XOR into the database.
 	// At the same time, generate an XOR of all of the seed outputs.
 	log.Printf("XORing into table for %v", prep.Uuid)
-	_, err := t.entries.processQueries(plainQueries)
+	t.entries.processQuery(plainQuery)
 	log.Printf("Done XORing into table for %v", prep.Uuid)
 	if err != nil {
 		reply.Okay = false
@@ -382,25 +327,9 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 		return err
 	}
 
-	/*
-		for i := 0; i < n_queries; i++ {
-			go func(j int) {
-				log.Printf("Preparing audit for %v[%v]", prep.Uuid, j)
-				// Use the XORd seeds (row) to generate the audit request
-				//reply.QueryToAudit[j] = prepareAudit(prep.Uuid, j, t.ServerIdx, plainQueries[j], &rows[j])
-				log.Printf("Done preparing audit for %v[%v]", prep.Uuid, j)
-				c <- 0
-			}(i)
-		}
-
-		for i := 0; i < n_queries; i++ {
-			<-c
-		}
-	*/
-
 	reply.Okay = true
 	t.pendingMutex.Lock()
-	t.pending[prep.Uuid] = plainQueries
+	t.pending[prep.Uuid] = plainQuery
 	t.pendingMutex.Unlock()
 
 	return nil
@@ -408,7 +337,7 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 
 func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 	t.pendingMutex.Lock()
-	queries, ok := t.pending[com.Uuid]
+	query, ok := t.pending[com.Uuid]
 	t.pendingMutex.Unlock()
 
 	if !ok {
@@ -416,18 +345,11 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 		return err
 	}
 
-	bogus := make([]*InsertQuery, 0)
-	for i := range queries {
-		if !com.Commit[i] {
-			// Remove query from the database, since it
-			// was malformed.
-			log.Printf("Removing bogus query %v[%v] from DB", com.Uuid, i)
-			bogus = append(bogus, queries[i])
-		}
-	}
-
-	if len(bogus) > 0 {
-		t.entries.processQueries(bogus)
+	if !com.Commit {
+		// Remove query from the database, since it
+		// was malformed.
+		log.Printf("Removing bogus query %v from DB", com.Uuid)
+		t.entries.processQuery(query)
 	}
 
 	t.pendingMutex.Lock()
@@ -435,8 +357,8 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 	t.pendingMutex.Unlock()
 
 	t.clientsServedMutex.Lock()
-	t.clientsServed += len(queries)
-	rate := float64(len(queries)) / time.Now().Sub(t.clientsServedStart).Seconds()
+	t.clientsServed += 1
+	rate := float64(1) / time.Now().Sub(t.clientsServedStart).Seconds()
 	log.Printf("Processed %v queries at rate %v reqs/sec | table size %d", t.clientsServed, rate,
 		TABLE_WIDTH*TABLE_HEIGHT*SLOT_LENGTH)
 	t.clientsServedStart = time.Now()
@@ -587,7 +509,7 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 	t.ServerAddrs = serverAddrs
 	t.clientsServed = 0
 	t.clientsServedStart = time.Now()
-	t.pending = map[int64]([]*InsertQuery){}
+	t.pending = map[int64](*InsertQuery){}
 
 	return t
 }

@@ -1,7 +1,11 @@
 package db
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/json"
 	"log"
+	"math/big"
 
 	"bitbucket.org/henrycg/riposte/prf"
 	"bitbucket.org/henrycg/riposte/utils"
@@ -35,6 +39,7 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 		return err
 	}
 
+	msgInt, shares := computeMessageShares(msg)
 	msgMask, err = computeMessageMask(keys[yIdx], keysP[yIdx], msg, xIdx)
 	if err != nil {
 		return err
@@ -46,28 +51,50 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 		keys[1][1] = 0xff
 	}
 
+	plainQueries := make([]InsertQuery, 2)
 	for i := 0; i < NUM_SERVERS; i++ {
-		var plainQuery InsertQuery
-
-		plainQuery.Key.KeyIndex = i
-		plainQuery.Key.MessageMask = msgMask
-		plainQuery.Key.Keys = keys
-		plainQuery.Key.KeyMask = keyMask
-		utils.RandBytes(plainQuery.Key.Nonce[:])
+		plainQueries[i].Key.KeyIndex = i
+		plainQueries[i].Key.MessageMask = msgMask
+		plainQueries[i].Key.MessageShare = shares[i]
+		plainQueries[i].Key.Keys = keys
+		plainQueries[i].Key.KeyMask = keyMask
+		utils.RandBytes(plainQueries[i].Key.Nonce[:])
 
 		if (i & 1) > 0 {
-			plainQuery.Key.Keys = keysP
-			plainQuery.Key.KeyMask = keyMaskP
+			plainQueries[i].Key.Keys = keysP
+			plainQueries[i].Key.KeyMask = keyMaskP
 		}
+	}
 
+	var chal [sha256.Size]byte
+	for i := 0; i < NUM_SERVERS; i++ {
+		// Get Fiat-Shamir challenge
+		h := hashDpfKey(&plainQueries[i].Key)
+		xorEq(chal[:], h[:])
+	}
+
+	proofs := makeProof(chal, msgInt, xyToInt(xIdx, yIdx))
+
+	// Compute proof
+	for i := 0; i < NUM_SERVERS; i++ {
+		plainQueries[i].Proof = proofs[i]
+	}
+
+	for i := 0; i < NUM_SERVERS; i++ {
 		var err error
-		args.Query[i], err = EncryptQuery(i, plainQuery)
+		args.Query[i], err = EncryptQuery(i, plainQueries[i])
+		h := hashDpfKey(&plainQueries[i].Key)
+		log.Printf("hash: %v", h)
 		if err != nil {
 			log.Fatal("Could not encrypt: ", err)
 		}
 	}
-
 	return nil
+}
+
+func computeMessageShares(msg SlotContents) (*big.Int, []*big.Int) {
+	h := SlotToInt(msg)
+	return h, Share(h)
 }
 
 func computeMessageMask(key prf.Key, keyP prf.Key,
@@ -133,6 +160,10 @@ func boolToInt(b bool) int64 {
 	}
 }
 
+func xyToInt(xIdx, yIdx int) int {
+	return xIdx*TABLE_WIDTH + yIdx
+}
+
 func RandomMessage() (int, int, SlotContents, error) {
 	var err error
 	var xIdx, yIdx int
@@ -143,4 +174,15 @@ func RandomMessage() (int, int, SlotContents, error) {
 
 	msg, err = RandomSlot()
 	return xIdx, yIdx, msg, err
+}
+
+func hashDpfKey(key *DPFKey) [sha256.Size]byte {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	err := enc.Encode(key)
+	if err != nil {
+		panic("Gob error!")
+	}
+
+	return sha256.Sum256(buf.Bytes())
 }

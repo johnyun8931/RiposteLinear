@@ -41,33 +41,6 @@ func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (*InsertQuery, error)
 	return query, err
 }
 
-func EncryptAudit(query AuditQuery) (EncryptedAuditQuery, error) {
-	var out EncryptedAuditQuery
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	err := enc.Encode(query)
-	if err != nil {
-		return out, err
-	}
-
-	q, err := encryptBytes(AUDIT_SERVER, buf.Bytes())
-	return EncryptedAuditQuery(q), err
-}
-
-func DecryptAudit(enc EncryptedAuditQuery) (*AuditQuery, error) {
-	buf, err := decryptBytes(AUDIT_SERVER, EncryptedInsertQuery(enc))
-
-	query := new(AuditQuery)
-	if err != nil {
-		return query, err
-	}
-
-	dec := gob.NewDecoder(bytes.NewBuffer(buf))
-	err = dec.Decode(&query)
-
-	return query, err
-}
-
 /*** Helper Functions ***/
 
 func encryptBytes(serverIdx int, buf []byte) (EncryptedInsertQuery, error) {

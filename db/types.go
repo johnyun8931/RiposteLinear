@@ -1,11 +1,10 @@
 package db
 
 import (
+	"math/big"
 	"net/rpc"
 	"sync"
 	"time"
-
-	"golang.org/x/crypto/poly1305"
 
 	"bitbucket.org/henrycg/riposte/prf"
 )
@@ -23,9 +22,6 @@ const TABLE_HEIGHT int = 10 //100 / TABLE_WIDTH
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 128
 
-// Maximum number of queries to bundle together
-const MAX_QUERY_SIZE int = 64
-
 // Length of plaintext messages (in bytes)
 const SLOT_LENGTH int = 8 // 64 KB
 
@@ -36,6 +32,8 @@ type SlotTable struct {
 	table      BitMatrix
 	tableMutex sync.Mutex
 }
+
+var IntModulus *big.Int
 
 type DbState int
 
@@ -68,17 +66,20 @@ type DPFKey struct {
 	MessageMask BitMatrixRow
 
 	// Share of client's message
-	MessageShare SlotContents
+	MessageShare *big.Int
 
 	// Random blinding value
 	Nonce [16]byte
+}
+
+type CorProof struct {
 }
 
 type InsertQuery struct {
 	Key DPFKey
 
 	// TODO: Add real proof
-	Proof [32]byte
+	Proof CorProof
 }
 
 type UploadReply struct {
@@ -90,38 +91,30 @@ type DumpReply struct {
 }
 
 type PrepareArgs struct {
-	Uuid    int64
-	Queries []EncryptedInsertQuery
+	Uuid  int64
+	Query EncryptedInsertQuery
 }
 
 type PrepareReply struct {
 	// VOTE: YES/NO
-	QueryToAudit []EncryptedAuditQuery
+	QueryToAudit EncryptedAuditQuery
 	Okay         bool
-}
-
-type AuditQuery struct {
-	MsgTest [][poly1305.TagSize]byte
-	KeyTest [][poly1305.TagSize]byte
 }
 
 /*
 type AuditArgs struct {
-	Uuid           int64
-	QueriesToAudit [][NUM_SERVERS]EncryptedAuditQuery
+	Uuid      int64
+	Challenge *big.Int
 }
-*/
 
-/*
 type AuditReply struct {
-	Okay []bool
-}
-*/
+	Okay bool
+}*/
 
 type CommitArgs struct {
 	// COMMIT
 	Uuid   int64
-	Commit []bool
+	Commit bool
 }
 
 type CommitReply struct {
@@ -146,7 +139,7 @@ type Server struct {
 	clientsServedStart time.Time
 	clientsServedMutex sync.Mutex
 
-	pending      map[int64]([]*InsertQuery)
+	pending      map[int64](*InsertQuery)
 	pendingMutex sync.Mutex
 
 	entries *SlotTable
@@ -155,4 +148,14 @@ type Server struct {
 	plainMutex sync.Mutex
 
 	rpcClients [NUM_SERVERS + 1]*rpc.Client
+}
+
+func init() {
+	IntModulus = fromString("2000000000000000000000000000000000000000000000000000000000000040001")
+}
+
+func fromString(s string) *big.Int {
+	out := new(big.Int)
+	out.SetString(s, 16)
+	return out
 }

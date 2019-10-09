@@ -10,26 +10,25 @@ import (
  * Actual DB manipulation
  */
 
-func (t *SlotTable) expandRow(allTables []BitMatrix, queries []*InsertQuery, row int, c chan int) {
-	for q := 0; q < len(queries); q++ {
-		row_prf, err := prf.NewPrf(queries[q].Key.Keys[row])
-		if err != nil {
-			panic("Can't create PRG!")
-		}
-
-		rowBit := queries[q].Key.KeyMask[row]
-		row_prf.Evaluate(allTables[q][row][:])
-
-		// XOR row i of query q into the database table
-		XorRows(&t.table[row], &allTables[q][row])
-		if rowBit {
-			// If row bitmask is set, then XOR in the message mask to
-			// the table too
-			XorRows(&t.table[row], &queries[q].Key.MessageMask)
-		}
+func (t *SlotTable) expandRow(query *InsertQuery, row int) {
+	var rowData BitMatrixRow
+	row_prf, err := prf.NewPrf(query.Key.Keys[row])
+	if err != nil {
+		panic("Can't create PRG!")
 	}
 
-	c <- 0
+	rowBit := query.Key.KeyMask[row]
+	row_prf.Evaluate(rowData[:])
+
+	// XOR row i of query q into the database table
+	t.tableMutex.Lock()
+	XorRows(&t.table[row], &rowData)
+	if rowBit {
+		// If row bitmask is set, then XOR in the message mask to
+		// the table too
+		XorRows(&t.table[row], &query.Key.MessageMask)
+	}
+	t.tableMutex.Unlock()
 }
 
 // XOR all of the rows in src into dst
@@ -41,37 +40,16 @@ func xorTable(dst *BitMatrixRow, src *BitMatrix, c chan int) {
 	c <- 0
 }
 
-func (t *SlotTable) processQueries(queries []*InsertQuery) ([]BitMatrixRow, error) {
-	t.tableMutex.Lock()
+func (t *SlotTable) processQuery(query *InsertQuery) {
 
-	// For each query, expand seeds to the size of the whole DB table
-	allTables := make([]BitMatrix, len(queries))
-	allRows := make([]BitMatrixRow, len(queries))
+	// Expand seeds to the size of the whole DB table
 
 	log.Printf("Making allTables")
 	// For each row i and query q, XOR allTables[q][i] into table[i]
-	c := make(chan int, len(queries))
 	for i := 0; i < TABLE_HEIGHT; i++ {
-		go t.expandRow(allTables, queries, i, c)
+		t.expandRow(query, i)
 	}
 
-	for i := 0; i < TABLE_HEIGHT; i++ {
-		<-c
-	}
-
-	log.Printf("Making allRows")
-	// For each query q and row i, XOR allTables[q][i] into allRows[q]
-	for q := 0; q < len(queries); q++ {
-		go xorTable(&allRows[q], &allTables[q], c)
-	}
-
-	for i := 0; i < len(queries); i++ {
-		<-c
-	}
-
-	t.tableMutex.Unlock()
-
-	return allRows, nil
 }
 
 type ForeachFunc func(row int, value *BitMatrixRow)
