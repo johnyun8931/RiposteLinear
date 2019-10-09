@@ -9,8 +9,6 @@ import (
 	"bitbucket.org/henrycg/riposte/prf"
 )
 
-const AUDIT_SERVER int = 2
-
 // Number of "dimensions" for PIR scheme
 const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2 //1 << NUM_DIMENSIONS
@@ -101,7 +99,6 @@ type PrepareReply struct {
 	Okay         bool
 }
 
-/*
 type AuditArgs struct {
 	Uuid      int64
 	Challenge *big.Int
@@ -109,7 +106,7 @@ type AuditArgs struct {
 
 type AuditReply struct {
 	Okay bool
-}*/
+}
 
 type CommitArgs struct {
 	// COMMIT

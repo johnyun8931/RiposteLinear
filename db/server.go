@@ -19,10 +19,11 @@ const MERGE_TIME_DELAY time.Duration = 5
 
 var (
 	incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
-	//	auditReqs    = make(chan AuditArgs, REQ_BUFFER_SIZE)
-	commitReqs = make(chan CommitArgs, REQ_BUFFER_SIZE)
+	auditReqs    = make(chan AuditArgs, REQ_BUFFER_SIZE)
+	commitReqs   = make(chan CommitArgs, REQ_BUFFER_SIZE)
 
 	beginMergeMarker       [NUM_SERVERS]EncryptedInsertQuery
+	beginMergeMarkerAudit  AuditArgs
 	beginMergeMarkerCommit CommitArgs
 )
 
@@ -101,7 +102,7 @@ func (t *Server) submitPrepares() {
 		shouldMerge := readIncomingRequests(&preps, incomingReqs)
 		if shouldMerge {
 			// Merge is starting, so send marker down pipeline
-			commitReqs <- beginMergeMarkerCommit
+			auditReqs <- beginMergeMarkerAudit
 		}
 
 		log.Printf("Send PREPARE %d", uuid)
@@ -134,7 +135,7 @@ func (t *Server) submitPrepares() {
 		// If merge is beginning, send marker down
 		// the pipeline
 		if shouldMerge {
-			commitReqs <- beginMergeMarkerCommit
+			auditReqs <- beginMergeMarkerAudit
 		}
 
 		// CHECK REQUEST HERE USING NEW STUFF
@@ -146,14 +147,13 @@ func (t *Server) submitPrepares() {
 			log.Printf("Telling servers to abort the commit %d", uuid)
 		}
 
-		var commitArgs CommitArgs
-		commitArgs.Uuid = preps[0].Uuid
-		commitArgs.Commit = okay
-		commitReqs <- commitArgs
+		var auditArgs AuditArgs
+		auditArgs.Uuid = preps[0].Uuid
+		//auditArgs.Commit = okay
+		auditReqs <- auditArgs
 	}
 }
 
-/*
 func (t *Server) submitAudits() {
 	for {
 		req := <-auditReqs
@@ -163,27 +163,47 @@ func (t *Server) submitAudits() {
 			continue
 		}
 
-		// Send out AUDIT request
-		var a_reply AuditReply
-		err := t.rpcClients[AUDIT_SERVER].Call("Auditor.Audit", req, &a_reply)
-		if err != nil {
-			log.Fatal("Error in audit: ", err)
+		var audits [NUM_SERVERS]AuditArgs
+		for i := 0; i < NUM_SERVERS; i++ {
+			audits[i].Uuid = req.Uuid
+		}
+
+		// Send out PREPARE request
+		c := make(chan error, NUM_SERVERS)
+		var replies [NUM_SERVERS]AuditReply
+		for i := 0; i < NUM_SERVERS; i++ {
+			go func(aud *AuditArgs, reply *AuditReply, j int) {
+				err := t.rpcClients[j].Call("Server.Audit", aud, reply)
+				if err != nil {
+					c <- err
+				} else {
+					c <- nil
+				}
+			}(&audits[i], &replies[i], i)
+		}
+
+		// Wait for responses
+		var r error
+		for i := 0; i < NUM_SERVERS; i++ {
+			r = <-c
+			if r != nil {
+				log.Fatal("Error in prepare: ", r)
+			}
 		}
 
 		var commitArgs CommitArgs
 		commitArgs.Uuid = req.Uuid
-		commitArgs.Commit = a_reply.Okay
+
+		// XXX do checking here
+		commitArgs.Commit = replies[0].Okay
 		commitReqs <- commitArgs
-		for i := range a_reply.Okay {
-			if !a_reply.Okay[i] {
-				log.Printf("FAILED audit, uuid: %v[%v]", req.Uuid, i)
-			}
+		if !replies[0].Okay {
+			log.Printf("FAILED audit, uuid: %v", req.Uuid)
 		}
 
-		log.Printf("Done AUDIT %d => Okay? %v", req.Uuid, a_reply.Okay)
+		log.Printf("Done AUDIT %d => Okay? %v", req.Uuid, replies[0].Okay)
 	}
 }
-*/
 
 func (t *Server) submitCommits() {
 	for {
@@ -335,6 +355,11 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	return nil
 }
 
+func (t *Server) Audit(audit *AuditArgs, reply *AuditReply) error {
+	reply.Okay = true
+	return nil
+}
+
 func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 	t.pendingMutex.Lock()
 	query, ok := t.pending[com.Uuid]
@@ -455,6 +480,7 @@ func (t *Server) openConnections() error {
 func (t *Server) Initialize(*int, *int) error {
 	if t.isLeader() {
 		go t.submitPrepares()
+		go t.submitAudits()
 		go t.submitCommits()
 		go t.mergeWorker()
 
