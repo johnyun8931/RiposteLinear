@@ -138,16 +138,14 @@ func (t *Server) submitPrepares() {
 			auditReqs <- beginMergeMarkerAudit
 		}
 
-		// CHECK REQUEST HERE USING NEW STUFF
-		okay := true
+		var auditArgs AuditArgs
 
-		if okay {
-			log.Printf("Telling servers to accept the commit %d", uuid)
-		} else {
-			log.Printf("Telling servers to abort the commit %d", uuid)
+		for i := 0; i < NUM_SERVERS; i++ {
+			xorEq(auditArgs.Challenge[:], replies[i].ChallengeShare[:])
 		}
 
-		var auditArgs AuditArgs
+		log.Printf("Challenge: %v", auditArgs.Challenge)
+
 		auditArgs.Uuid = preps[0].Uuid
 		//auditArgs.Commit = okay
 		auditReqs <- auditArgs
@@ -339,15 +337,14 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	// Generate out each of the seeds and XOR into the database.
 	// At the same time, generate an XOR of all of the seed outputs.
 	log.Printf("XORing into table for %v", prep.Uuid)
-	t.entries.processQuery(plainQuery)
 	log.Printf("Done XORing into table for %v", prep.Uuid)
 	if err != nil {
-		reply.Okay = false
 		log.Printf("Error in decrypt/audit: %v", err)
 		return err
 	}
 
-	reply.Okay = true
+	reply.ChallengeShare = hashDpfKey(&plainQuery.Key)
+
 	t.pendingMutex.Lock()
 	t.pending[prep.Uuid] = plainQuery
 	t.pendingMutex.Unlock()
@@ -370,7 +367,9 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 		return err
 	}
 
-	if !com.Commit {
+	if com.Commit {
+		t.entries.processQuery(query)
+	} else {
 		// Remove query from the database, since it
 		// was malformed.
 		log.Printf("Removing bogus query %v from DB", com.Uuid)

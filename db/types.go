@@ -95,13 +95,13 @@ type PrepareArgs struct {
 
 type PrepareReply struct {
 	// VOTE: YES/NO
-	QueryToAudit EncryptedAuditQuery
-	Okay         bool
+	QueryToAudit   EncryptedAuditQuery
+	ChallengeShare [32]byte
 }
 
 type AuditArgs struct {
 	Uuid      int64
-	Challenge *big.Int
+	Challenge [32]byte
 }
 
 type AuditReply struct {

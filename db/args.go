@@ -73,6 +73,8 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 		xorEq(chal[:], h[:])
 	}
 
+	log.Printf("Final challenge: %v", chal)
+
 	proofs := makeProof(chal, msgInt, xyToInt(xIdx, yIdx))
 
 	// Compute proof
@@ -161,7 +163,7 @@ func boolToInt(b bool) int64 {
 }
 
 func xyToInt(xIdx, yIdx int) int {
-	return xIdx*TABLE_WIDTH + yIdx
+	return xIdx*TABLE_HEIGHT + yIdx
 }
 
 func RandomMessage() (int, int, SlotContents, error) {

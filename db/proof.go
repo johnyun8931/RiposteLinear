@@ -47,6 +47,24 @@ func getTestValues(key []byte, msg *big.Int, idx int) (*big.Int, *big.Int) {
 	return z1, z2
 }
 
+func getTestValueShares(key []byte, msg *big.Int) (*big.Int, *big.Int) {
+	maxLen := xyToInt(TABLE_WIDTH-1, TABLE_HEIGHT-1)
+
+	t1share := new(big.Int)
+	t2share := new(big.Int)
+
+	for i := 0; i < maxLen; i++ {
+		h_i = hashSlot(
+
+		// Compute [z1] = <[x_i], [r_i]>
+		
+		// Compute [z2] = <[x_i], [r^2_i]>
+
+	}
+
+	return t1share, t2share
+}
+
 func makeProof(chal [sha256.Size]byte, msg *big.Int, idx int) []CorProof {
 	out := make([]CorProof, 2)
 	var seed utils.PRGKey
