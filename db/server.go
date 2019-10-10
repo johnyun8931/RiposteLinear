@@ -101,9 +101,12 @@ func (t *Server) Upload3(args *UploadArgs3, reply *UploadReply3) error {
 	log.Printf("Got Upload3 request")
 	//log.Printf("Request:", args)
 
-	t.acceptedMutex.RLock()
+	t.acceptedMutex.Lock()
 	data, okay := t.accepted[args.Uuid]
-	t.acceptedMutex.RUnlock()
+	if okay {
+		data.args3 = args
+	}
+	t.acceptedMutex.Unlock()
 
 	if !okay || !bytes.Equal(data.hashKey[:], args.HashKey[:]) {
 		return errors.New("Bogus UUID")
@@ -154,7 +157,7 @@ func (t *Server) submitPrepares(uuid int64) bool {
 		preps[i].Uuid = uuid
 		preps[i].Query1 = tup.args1.Query[i]
 		preps[i].Query2 = tup.args2.Query[i]
-		//preps[i].Query3 = tup.args3.Query[i]
+		preps[i].Query3 = tup.args3.Query[i]
 	}
 	delete(t.accepted, uuid)
 	t.acceptedMutex.Unlock()
@@ -315,9 +318,16 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 		panic("Decryption error")
 	}
 
+	err = DecryptQuery(t.ServerIdx, prep.Query3, &tup.q3)
+	if err != nil {
+		panic("Decryption error")
+	}
+
 	t.pendingMutex.Lock()
 	t.pending[prep.Uuid] = tup
 	t.pendingMutex.Unlock()
+
+	t.entries.processQuery(tup)
 
 	return nil
 }
@@ -332,9 +342,7 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 		return err
 	}
 
-	if com.Commit {
-		t.entries.processQuery(query)
-	} else {
+	if !com.Commit {
 		// Remove query from the database, since it
 		// was malformed.
 		log.Printf("Removing bogus query %v from DB", com.Uuid)
