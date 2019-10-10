@@ -53,13 +53,10 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 		return err
 	}
 
-	var upArgs3 db.UploadArgs3
 	var upRes3 db.UploadReply3
+	upArgs3 := db.SetUploadArgs3(msg, &upArgs1, &upRes1, upArgs2, &upRes2)
 
-	copy(upArgs3.HashKey[:], upRes1.HashKey[:])
-	upArgs3.Uuid = upRes1.Uuid
-
-	// Get second msg
+	// Get third msg
 	err = client.Call("Server.Upload3", &upArgs3, &upRes3)
 	if err != nil {
 		log.Printf("Error:", err)

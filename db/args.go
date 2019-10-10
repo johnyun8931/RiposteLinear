@@ -50,7 +50,6 @@ func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) err
 	for i := 0; i < NUM_SERVERS; i++ {
 		plainQueries[i].KeyIndex = i
 		plainQueries[i].MessageMask = msgMask
-		//plainQueries[i].Key.MessageShare = shares[i]
 		plainQueries[i].Keys = keys
 		plainQueries[i].KeyMask = keyMask
 
@@ -84,6 +83,30 @@ func SetUploadArgs2(msg *Plaintext, upArgs1 *UploadArgs1, upRes1 *UploadReply1) 
 	for i := 0; i < len(queries); i++ {
 		queries[i].MsgShare = shares[i]
 		log.Printf("%v => %v", shares[i])
+		out.Query[i], err = EncryptQuery(i, &queries[i])
+		if err != nil {
+			panic("Encrypt error")
+		}
+	}
+
+	return out
+}
+
+func SetUploadArgs3(msg *Plaintext,
+	upArgs1 *UploadArgs1, upRes1 *UploadReply1,
+	upArgs2 *UploadArgs2, upRes2 *UploadReply2) *UploadArgs3 {
+	out := new(UploadArgs3)
+	copy(out.HashKey[:], upRes1.HashKey[:])
+	out.Uuid = upRes1.Uuid
+
+	// Compute test values and proof
+	//makeProof()
+
+	var err error
+	var queries [2]InsertQuery3
+	for i := 0; i < len(queries); i++ {
+		//queries[i].MsgShare = shares[i]
+		//log.Printf("%v => %v", shares[i])
 		out.Query[i], err = EncryptQuery(i, &queries[i])
 		if err != nil {
 			panic("Encrypt error")

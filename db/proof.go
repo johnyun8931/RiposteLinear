@@ -4,7 +4,6 @@ import (
 	"log"
 
 	"crypto/aes"
-	"crypto/sha256"
 	"encoding/binary"
 	"math/big"
 
@@ -66,8 +65,8 @@ func getTestValueShares(key []byte, msg *big.Int) (*big.Int, *big.Int) {
 }
 */
 
-func makeProof(chal [sha256.Size]byte, msg *big.Int, idx int) []CorProof {
-	out := make([]CorProof, 2)
+func makeProof(chal [16]byte, msg *big.Int, idx int) []MulProof {
+	out := make([]MulProof, 2)
 	var seed utils.PRGKey
 	copy(seed[:], chal[0:16])
 

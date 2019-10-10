@@ -37,7 +37,7 @@ func (t *Server) Upload1(args *UploadArgs1, reply *UploadReply1) error {
 	}
 	<-t.incoming1
 
-	//log.Printf("Got upload request")
+	log.Printf("Got upload request")
 	//log.Printf("Request:", args)
 
 	uuid, err := utils.RandomInt64(math.MaxInt64)
@@ -72,12 +72,13 @@ func (t *Server) Upload2(args *UploadArgs2, reply *UploadReply2) error {
 	}
 	<-t.incoming2
 
-	//log.Printf("Got Upload2 request")
+	log.Printf("Got Upload2 request")
 
 	t.acceptedMutex.Lock()
 	data, okay := t.accepted[args.Uuid]
 	if okay {
 		data.args2 = args
+		copy(reply.Challenge[:], data.challenge[:])
 	}
 	t.acceptedMutex.Unlock()
 
@@ -97,7 +98,7 @@ func (t *Server) Upload3(args *UploadArgs3, reply *UploadReply3) error {
 	}
 	<-t.incoming3
 
-	//log.Printf("Got Upload3 request")
+	log.Printf("Got Upload3 request")
 	//log.Printf("Request:", args)
 
 	t.acceptedMutex.RLock()
@@ -147,7 +148,7 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
 
 func (t *Server) submitPrepares(uuid int64) bool {
 	var preps [NUM_SERVERS]PrepareArgs
-	t.acceptedMutex.RLock()
+	t.acceptedMutex.Lock()
 	tup := t.accepted[uuid]
 	for i := 0; i < NUM_SERVERS; i++ {
 		preps[i].Uuid = uuid
@@ -155,7 +156,8 @@ func (t *Server) submitPrepares(uuid int64) bool {
 		preps[i].Query2 = tup.args2.Query[i]
 		//preps[i].Query3 = tup.args3.Query[i]
 	}
-	t.acceptedMutex.RUnlock()
+	delete(t.accepted, uuid)
+	t.acceptedMutex.Unlock()
 
 	//log.Printf("Send PREPARE %d", uuid)
 
@@ -303,12 +305,12 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
 func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	tup := new(InsertQueryTuple)
 
-	err := DecryptQuery1(t.ServerIdx, prep.Query1, &tup.q1)
+	err := DecryptQuery(t.ServerIdx, prep.Query1, &tup.q1)
 	if err != nil {
 		panic("Decryption error")
 	}
 
-	err = DecryptQuery2(t.ServerIdx, prep.Query2, &tup.q2)
+	err = DecryptQuery(t.ServerIdx, prep.Query2, &tup.q2)
 	if err != nil {
 		panic("Decryption error")
 	}

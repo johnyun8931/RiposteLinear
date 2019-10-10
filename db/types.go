@@ -76,7 +76,10 @@ type UploadArgs3 struct {
 	Query   [NUM_SERVERS]EncryptedInsertQuery
 }
 
-type CorProof struct {
+type MulProof struct {
+	F0 *big.Int
+	G0 *big.Int
+	H  [3]*big.Int
 }
 
 type AcceptQueryTuple struct {
@@ -120,7 +123,7 @@ type UploadReply1 struct {
 }
 
 type UploadReply2 struct {
-	Challenge *big.Int
+	Challenge [16]byte
 	Magic     int
 }
 
