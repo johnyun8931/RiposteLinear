@@ -4,7 +4,6 @@ import (
 	"math/big"
 	"net/rpc"
 	"sync"
-	"time"
 
 	"bitbucket.org/henrycg/riposte/prf"
 )
@@ -35,14 +34,6 @@ var IntModulus *big.Int
 
 type DbState int
 
-const (
-	State_Booting         = iota
-	State_AcceptUpload    = iota
-	State_PrepareForMerge = iota
-	State_Merge           = iota
-	State_AcceptPlaintext = iota
-)
-
 type SlotContents [SLOT_LENGTH]byte
 
 type EncryptedInsertQuery struct {
@@ -68,11 +59,15 @@ type UploadArgs1 struct {
 }
 
 type UploadArgs2 struct {
-	Query [NUM_SERVERS]EncryptedInsertQuery
+	Uuid    int64
+	HashKey [32]byte
+	Query   [NUM_SERVERS]EncryptedInsertQuery
 }
 
 type UploadArgs3 struct {
-	Query [NUM_SERVERS]EncryptedInsertQuery
+	Uuid    int64
+	HashKey [32]byte
+	Query   [NUM_SERVERS]EncryptedInsertQuery
 }
 
 type DPFKey struct {
@@ -88,7 +83,19 @@ type DPFKey struct {
 type CorProof struct {
 }
 
+type AcceptQueryTuple struct {
+	hashKey   [32]byte
+	challenge [16]byte
+
+	args1 *UploadArgs1
+	args2 *UploadArgs2
+	args3 *UploadArgs3
+}
+
 type InsertQueryTuple struct {
+	hashKey   [32]byte
+	challenge [16]byte
+
 	q1 *InsertQuery1
 	q2 *InsertQuery2
 	q3 *InsertQuery3
@@ -102,12 +109,17 @@ type InsertQuery1 struct {
 }
 
 type InsertQuery2 struct {
+	Uuid int64
+	Tag  int64
 }
 
 type InsertQuery3 struct {
+	Uuid int64
+	Tag  int64
 }
 
 type UploadReply1 struct {
+	Uuid    int64
 	HashKey [32]byte
 }
 
@@ -131,8 +143,7 @@ type PrepareArgs struct {
 }
 
 type PrepareReply struct {
-	// VOTE: YES/NO
-	ChallengeShare [32]byte
+	QueryAnswers *big.Int
 }
 
 type CommitArgs struct {
@@ -159,17 +170,28 @@ type Server struct {
 	State       DbState
 	ServerAddrs []string
 
+	clientsTotal       int
 	clientsServed      int
-	clientsServedStart time.Time
 	clientsServedMutex sync.Mutex
 
+	accepted      map[int64](*AcceptQueryTuple)
+	acceptedMutex sync.RWMutex
+
+	incoming1 chan bool
+	incoming2 chan bool
+	incoming3 chan bool
+	ready     chan int64
+
 	pending      map[int64](*InsertQueryTuple)
-	pendingMutex sync.Mutex
+	pendingMutex sync.RWMutex
 
 	entries *SlotTable
 
 	plain      *BitMatrix
 	plainMutex sync.Mutex
+
+	// Hold this in write mode while aggregating
+	amPublishingMutex sync.RWMutex
 
 	rpcClients [NUM_SERVERS + 1]*rpc.Client
 }

@@ -17,63 +17,116 @@ import (
 // Time to wait between merges (in seconds)
 const MERGE_TIME_DELAY time.Duration = 5
 
-var (
-	incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
-	commitReqs   = make(chan CommitArgs, REQ_BUFFER_SIZE)
+// Number of pending requests that leader can buffer
+const READY_BUFFER_SIZE = 10
 
-	beginMergeMarker       [NUM_SERVERS]EncryptedInsertQuery
-	beginMergeMarkerCommit CommitArgs
-)
+// Number of server-side requests to allow in flight
+const WORKER_THREADS = 128
 
 func (t *Server) isLeader() bool {
 	return (t.ServerIdx == 0)
 }
 
-// Upload from client to leader
-// Check validity of first msg
-// Send msg to other nodes
-
-// First phase from leader to node PREPARE
-// Check validity of msg
-
-// First phase from node to leader VOTE
-// Add to pending pool or return NO
-
-// Second phase from leader to node COMMIT
-
-// Second phase from node to leader ACK
-
 /*******************
  * Leader code
  */
 
-func (t *Server) Upload(args *UploadArgs1, reply *UploadReply1) error {
+func (t *Server) Upload1(args *UploadArgs1, reply *UploadReply1) error {
 	if !t.isLeader() {
 		return errors.New("Only leader can accept uploads")
 	}
+	<-t.incoming1
 
 	log.Printf("Got upload request")
 	//log.Printf("Request:", args)
 
-	if t.State != State_AcceptUpload {
-		return errors.New("Not accepting uploads")
+	uuid, err := utils.RandomInt64(math.MaxInt64)
+	if err != nil {
+		log.Printf("error in random")
+		return err
 	}
 
-	incomingReqs <- args.Query
+	tup := new(AcceptQueryTuple)
+	tup.args1 = args
 
 	// In a secure implementation, these bytes would be derived pseudorandomly
 	// from a seed picked collaboratively by all of the servers in a one-time
 	// setup phase.
-	utils.RandBytes(reply.HashKey[:])
+	utils.RandBytes(tup.hashKey[:])
+	utils.RandBytes(tup.challenge[:])
+
+	reply.Uuid = uuid
+	copy(reply.HashKey[:], tup.hashKey[:])
+
+	t.acceptedMutex.Lock()
+	t.accepted[uuid] = tup
+	t.acceptedMutex.Unlock()
+	t.incoming1 <- true
 
 	return nil
 }
 
-/*
-func handleRequest(args *UploadArgs) {
+func (t *Server) Upload2(args *UploadArgs2, reply *UploadReply2) error {
+	if !t.isLeader() {
+		return errors.New("Only leader can accept uploads")
+	}
+	<-t.incoming2
 
+	log.Printf("Got Upload2 request")
+
+	t.acceptedMutex.RLock()
+	data, okay := t.accepted[args.Uuid]
+	t.acceptedMutex.RUnlock()
+
+	if !okay || !bytes.Equal(data.hashKey[:], args.HashKey[:]) {
+		//log.Printf("left: %v, right: %v", data.hashKey[:], args.HashKey[:])
+		return errors.New("Bogus UUID")
+	}
+
+	log.Printf("Upload2 OK")
+	t.incoming2 <- true
+	return nil
 }
-*/
+
+func (t *Server) Upload3(args *UploadArgs3, reply *UploadReply3) error {
+	if !t.isLeader() {
+		return errors.New("Only leader can accept uploads")
+	}
+	<-t.incoming3
+
+	log.Printf("Got Upload3 request")
+	//log.Printf("Request:", args)
+
+	t.acceptedMutex.RLock()
+	data, okay := t.accepted[args.Uuid]
+	t.acceptedMutex.RUnlock()
+
+	if !okay || !bytes.Equal(data.hashKey[:], args.HashKey[:]) {
+		return errors.New("Bogus UUID")
+	}
+
+	t.ready <- args.Uuid
+	t.incoming3 <- true
+
+	return nil
+}
+
+// Do everything
+func (t *Server) processRequest() {
+	for {
+		uuid := <-t.ready
+		t.amPublishingMutex.RLock()
+
+		t.clientsServedMutex.Lock()
+		t.clientsServed += 1
+		t.clientsServedMutex.Unlock()
+
+		shouldCommit := t.submitPrepares(uuid)
+		t.submitCommits(uuid, shouldCommit)
+
+		t.amPublishingMutex.RUnlock()
+	}
+}
 
 func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
 	c chan [NUM_SERVERS]EncryptedInsertQuery) bool {
@@ -89,93 +142,80 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
 	return false
 }
 
-func (t *Server) submitPrepares() {
-	for {
-		uuid, err := utils.RandomInt64(math.MaxInt64)
-		if err != nil {
-			log.Printf("error in random")
-			continue
-		}
-
-		var preps [NUM_SERVERS]PrepareArgs
-		for i := 0; i < NUM_SERVERS; i++ {
-			preps[i].Uuid = uuid
-		}
-
-		shouldMerge := readIncomingRequests(&preps, incomingReqs)
-		if shouldMerge {
-			// Merge is starting, so send marker down pipeline
-			commitReqs <- beginMergeMarkerCommit
-		}
-
-		log.Printf("Send PREPARE %d", uuid)
-
-		// Send out PREPARE request
-		c := make(chan error, NUM_SERVERS)
-		var replies [NUM_SERVERS]PrepareReply
-		for i := 0; i < NUM_SERVERS; i++ {
-			go func(prep *PrepareArgs, reply *PrepareReply, j int) {
-				err := t.rpcClients[j].Call("Server.Prepare", prep, reply)
-				if err != nil {
-					c <- err
-				} else {
-					c <- nil
-				}
-			}(&preps[i], &replies[i], i)
-		}
-
-		// Wait for responses
-		var r error
-		for i := 0; i < NUM_SERVERS; i++ {
-			r = <-c
-			if r != nil {
-				log.Fatal("Error in prepare: ", r)
-			}
-		}
-
-		var commitArgs CommitArgs
-		log.Printf("Done PREPARE %d", uuid)
-
-		commitArgs.Uuid = preps[0].Uuid
-		commitArgs.Commit = true
-		commitReqs <- commitArgs
+func (t *Server) submitPrepares(uuid int64) bool {
+	var preps [NUM_SERVERS]PrepareArgs
+	t.acceptedMutex.RLock()
+	tup := t.accepted[uuid]
+	for i := 0; i < NUM_SERVERS; i++ {
+		preps[i].Uuid = uuid
+		preps[i].Query1 = tup.args1.Query[i]
+		//preps[i].Query2 = tup.args2.Query[i]
+		//preps[i].Query3 = tup.args3.Query[i]
 	}
+	t.acceptedMutex.RUnlock()
+
+	log.Printf("Send PREPARE %d", uuid)
+
+	// Send out PREPARE request
+	c := make(chan error, NUM_SERVERS)
+	var replies [NUM_SERVERS]PrepareReply
+	for i := 0; i < NUM_SERVERS; i++ {
+		go func(prep *PrepareArgs, reply *PrepareReply, j int) {
+			err := t.rpcClients[j].Call("Server.Prepare", prep, reply)
+			if err != nil {
+				c <- err
+			} else {
+				c <- nil
+			}
+		}(&preps[i], &replies[i], i)
+	}
+
+	// Wait for responses
+	var r error
+	for i := 0; i < NUM_SERVERS; i++ {
+		r = <-c
+		if r != nil {
+			log.Fatal("Error in prepare: ", r)
+		}
+	}
+
+	// Insert error checking here
+	okay := true
+	return okay
 }
 
-func (t *Server) submitCommits() {
-	for {
-		com := <-commitReqs
-		if com.Uuid == beginMergeMarkerCommit.Uuid {
-			t.sendMergeRequest()
-		}
-		log.Printf("Send COMMIT %d", com.Uuid)
+func (t *Server) submitCommits(uuid int64, shouldCommit bool) {
+	var com CommitArgs
+	com.Uuid = uuid
+	com.Commit = shouldCommit
 
-		// Send out COMMIT request
-		c := make(chan error, NUM_SERVERS)
-		var replies [NUM_SERVERS]CommitReply
-		for i := 0; i < NUM_SERVERS; i++ {
-			go func(com *CommitArgs, reply *CommitReply, j int) {
-				err := t.rpcClients[j].Call("Server.Commit", com, reply)
-				if err != nil {
-					c <- err
-				} else {
-					c <- nil
-				}
-			}(&com, &replies[i], i)
-		}
+	log.Printf("Send COMMIT %d", com.Uuid)
 
-		// Wait for responses
-		var r error
-		for i := 0; i < NUM_SERVERS; i++ {
-			r = <-c
-			if r != nil {
-				log.Fatal("Error in commit: ", r)
+	// Send out COMMIT request
+	c := make(chan error, NUM_SERVERS)
+	var replies [NUM_SERVERS]CommitReply
+	for i := 0; i < NUM_SERVERS; i++ {
+		go func(com *CommitArgs, reply *CommitReply, j int) {
+			err := t.rpcClients[j].Call("Server.Commit", com, reply)
+			if err != nil {
+				c <- err
+			} else {
+				c <- nil
 			}
-			log.Printf("Got commit %v/%v", i, NUM_SERVERS)
-		}
-
-		log.Printf("Done COMMIT %d", com.Uuid)
+		}(&com, &replies[i], i)
 	}
+
+	// Wait for responses
+	var r error
+	for i := 0; i < NUM_SERVERS; i++ {
+		r = <-c
+		if r != nil {
+			log.Fatal("Error in commit: ", r)
+		}
+		log.Printf("Got commit %v/%v", i, NUM_SERVERS)
+	}
+
+	log.Printf("Done COMMIT %d", com.Uuid)
 }
 
 func (t *Server) mergeWorker() {
@@ -188,6 +228,15 @@ func (t *Server) mergeWorker() {
 }
 
 func (t *Server) sendMergeRequest() {
+	t.acceptedMutex.Lock()
+	t.clientsServedMutex.Lock()
+	t.clientsTotal += t.clientsServed
+	t.clientsServedMutex.Unlock()
+
+	rate := float64(t.clientsServed) / float64(MERGE_TIME_DELAY)
+	log.Printf("Served %v requests at %v reqs/sec [since start: %v]", t.clientsServed, rate, t.clientsTotal)
+	t.clientsServed = 0
+
 	// Call each server and ask for their data
 	// Send out COMMIT request
 	c := make(chan error, NUM_SERVERS)
@@ -216,24 +265,15 @@ func (t *Server) sendMergeRequest() {
 	var parg PlaintextArgs
 	parg.Plaintext = revealCleartext(replies)
 
-	c = make(chan error, NUM_SERVERS)
-	for i := 0; i < NUM_SERVERS; i++ {
-		go func(j int) {
-			var p_reply PlaintextReply
-			err := t.rpcClients[j].Call("Server.StorePlaintext", &parg, &p_reply)
-			c <- err
-		}(i)
-	}
+	var p_reply PlaintextReply
+	err := t.rpcClients[0].Call("Server.StorePlaintext", &parg, &p_reply)
 
-	// Wait for responses
-	for i := 0; i < NUM_SERVERS; i++ {
-		r = <-c
-		if r != nil {
-			log.Fatal("Error in plaintext: ", r)
-		}
+	if err != nil {
+		log.Fatal("Error in plaintext: ", r)
 	}
 
 	log.Printf("Done MERGE")
+	t.acceptedMutex.Unlock()
 	MemCleanup()
 }
 
@@ -253,22 +293,13 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
 	return b
 }
 
-func (t *Server) beginMerge() {
-	// Stop accepting uploads
-	t.State = State_PrepareForMerge
-
-	// Insert a nil request into the pipeline so that we can figure
-	// out when all pending requests have been processed.
-	incomingReqs <- beginMergeMarker
-}
-
 /**************
  * Handle Updates
  */
 
 func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	plainQuery := new(InsertQuery1)
-	err := DecryptQuery(t.ServerIdx, prep.Query1, plainQuery)
+	err := DecryptQuery1(t.ServerIdx, prep.Query1, plainQuery)
 	log.Printf("Hash: %v", hashDpfKey(&plainQuery.Key))
 	if err != nil {
 		panic("Decryption error")
@@ -283,9 +314,11 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 		return err
 	}
 
-	reply.ChallengeShare = hashDpfKey(&plainQuery.Key)
+	// Put query replies here
+	// reply.QueryAnswers =
 
 	t.pendingMutex.Lock()
+	t.pending[prep.Uuid] = new(InsertQueryTuple)
 	t.pending[prep.Uuid].q1 = plainQuery
 	t.pendingMutex.Unlock()
 
@@ -315,22 +348,10 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 	delete(t.pending, com.Uuid)
 	t.pendingMutex.Unlock()
 
-	t.clientsServedMutex.Lock()
-	t.clientsServed += 1
-	rate := float64(1) / time.Now().Sub(t.clientsServedStart).Seconds()
-	log.Printf("Processed %v queries at rate %v reqs/sec | table size %d", t.clientsServed, rate,
-		TABLE_WIDTH*TABLE_HEIGHT*SLOT_LENGTH)
-	t.clientsServedStart = time.Now()
-	t.clientsServedMutex.Unlock()
-
 	return nil
 }
 
 func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) error {
-	t.clientsServedMutex.Lock()
-	t.clientsServed = 0
-	t.clientsServedStart = time.Now()
-	t.clientsServedMutex.Unlock()
 
 	log.Printf("Storing plaintext")
 	t.plainMutex.Lock()
@@ -347,8 +368,6 @@ func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) erro
 	}
 
 	t.plainMutex.Unlock()
-
-	t.State = State_AcceptUpload
 
 	MemCleanup()
 	return nil
@@ -405,17 +424,28 @@ func (t *Server) openConnections() error {
 
 	if failed {
 		return errors.New("Connection failed")
-	} else {
-		t.State = State_AcceptUpload
-		return nil
 	}
+
+	return nil
 }
 
 func (t *Server) Initialize(*int, *int) error {
 	if t.isLeader() {
-		go t.submitPrepares()
-		go t.submitCommits()
+		t.incoming1 = make(chan bool, READY_BUFFER_SIZE)
+		t.incoming2 = make(chan bool, READY_BUFFER_SIZE)
+		t.incoming3 = make(chan bool, READY_BUFFER_SIZE)
+		t.ready = make(chan int64, READY_BUFFER_SIZE)
 		go t.mergeWorker()
+
+		for i := 0; i < WORKER_THREADS; i++ {
+			go t.processRequest()
+		}
+
+		for i := 0; i < READY_BUFFER_SIZE; i++ {
+			t.incoming1 <- true
+			t.incoming2 <- true
+			t.incoming3 <- true
+		}
 
 		go func(t *Server) {
 			// HACK wait until other servers have started
@@ -466,9 +496,8 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 	t.plain = new(BitMatrix)
 	t.ServerIdx = serverIdx
 	t.ServerAddrs = serverAddrs
-	t.clientsServed = 0
-	t.clientsServedStart = time.Now()
 	t.pending = map[int64](*InsertQueryTuple){}
+	t.accepted = map[int64](*AcceptQueryTuple){}
 
 	return t
 }
@@ -476,14 +505,10 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 func (t *Server) DoNothing(args *int, reply *int) error {
 	// Just use this to test number
 	// of requests can handle in a second
-	t.clientsServedMutex.Lock()
+	t.acceptedMutex.Lock()
 	t.clientsServed++
 	log.Printf("Served %v", t.clientsServed)
-	t.clientsServedMutex.Unlock()
+	t.acceptedMutex.Unlock()
 
 	return nil
-}
-
-func init() {
-	beginMergeMarkerCommit.Uuid = 0
 }

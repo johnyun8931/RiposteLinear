@@ -85,7 +85,7 @@ func InitializeUploadArgs(args *UploadArgs1, xIdx int, yIdx int,
 
 	for i := 0; i < NUM_SERVERS; i++ {
 		var err error
-		args.Query[i], err = EncryptQuery(i, plainQueries[i])
+		args.Query[i], err = EncryptQuery1(i, &plainQueries[i])
 		h := hashDpfKey(&plainQueries[i].Key)
 		log.Printf("hash: %v", h)
 		if err != nil {

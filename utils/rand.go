@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"io"
+	"log"
 	"math/big"
 	"sync"
 )
@@ -43,15 +44,19 @@ func RandVectorBool(lst []bool) {
 }
 
 func RandBytes(out []byte) {
-	prgMutex.Lock()
-	n, err := bufPrgReader.stream.Read(out)
-	if err != nil || n != len(out) {
-		panic("Error in PRG")
-	}
-	prgMutex.Unlock()
-}
+	total := 0
+	for total < len(out) {
+		prgMutex.Lock()
+		n, err := bufPrgReader.stream.Read(out[total:])
+		prgMutex.Unlock()
 
-// Generate a random permutation of the ints specified in input.
+		total += n
+		if err != nil {
+			log.Printf("Error: %v", err)
+			panic("Error in PRG")
+		}
+	}
+}
 
 // We use the AES-CTR to generate pseudo-random  numbers using a
 // stream cipher. Go's native rand.Reader is extremely slow because

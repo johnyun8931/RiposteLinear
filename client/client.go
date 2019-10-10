@@ -22,8 +22,8 @@ var leaderFlag = flag.String("leader", "", "Leader IP and port")
 var logFlag = flag.String("log", "", "Location of log file")
 var threadsFlag = flag.Uint("threads", 1, "Number of threads to use")
 
-func tryUpload(client *rpc.Client, args db.UploadArgs) error {
-	var upRes db.UploadReply
+func tryUpload(client *rpc.Client, args db.UploadArgs1) error {
+	var upRes1 db.UploadReply1
 
 	var buf []byte
 	b := bytes.NewBuffer(buf)
@@ -31,13 +31,39 @@ func tryUpload(client *rpc.Client, args db.UploadArgs) error {
 	g.Encode(args)
 	log.Printf("Buffer len %v", b.Len())
 
-	err := client.Call("Server.Upload", args, &upRes)
+	err := client.Call("Server.Upload1", args, &upRes1)
 	if err != nil {
 		log.Printf("Error:", err)
 		return err
 	}
 
-	log.Printf("Got message!", upRes)
+	var upArgs2 db.UploadArgs2
+	var upRes2 db.UploadReply2
+
+	copy(upArgs2.HashKey[:], upRes1.HashKey[:])
+	upArgs2.Uuid = upRes1.Uuid
+
+	// Get second msg
+	err = client.Call("Server.Upload2", &upArgs2, &upRes2)
+	if err != nil {
+		log.Printf("Error:", err)
+		return err
+	}
+
+	var upArgs3 db.UploadArgs3
+	var upRes3 db.UploadReply3
+
+	copy(upArgs3.HashKey[:], upRes1.HashKey[:])
+	upArgs3.Uuid = upRes1.Uuid
+
+	// Get second msg
+	err = client.Call("Server.Upload3", &upArgs3, &upRes3)
+	if err != nil {
+		log.Printf("Error:", err)
+		return err
+	}
+
+	log.Printf("Got message!", upRes1)
 	return nil
 }
 
@@ -51,7 +77,7 @@ func tryDumpTable(client *rpc.Client) db.DumpReply {
 	return tab
 }
 
-func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
+func runClient(server string, args db.UploadArgs1, tab *db.DumpReply) {
 	certs := make([]tls.Certificate, 1)
 	certs[0] = utils.LeaderCertificate
 	client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
@@ -82,7 +108,7 @@ func runClient(server string, args db.UploadArgs, tab *db.DumpReply) {
 }
 
 func clientOnce(bogus bool) {
-	var args db.UploadArgs
+	var args db.UploadArgs1
 	var table db.DumpReply
 
 	if !*donothingFlag {
