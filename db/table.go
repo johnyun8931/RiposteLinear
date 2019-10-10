@@ -3,7 +3,7 @@ package db
 import (
 	"bitbucket.org/henrycg/riposte/prf"
 	"fmt"
-	"log"
+	//	"log"
 )
 
 /************
@@ -12,12 +12,12 @@ import (
 
 func (t *SlotTable) expandRow(query *InsertQuery1, row int) {
 	var rowData BitMatrixRow
-	row_prf, err := prf.NewPrf(query.Key.Keys[row])
+	row_prf, err := prf.NewPrf(query.Keys[row])
 	if err != nil {
 		panic("Can't create PRG!")
 	}
 
-	rowBit := query.Key.KeyMask[row]
+	rowBit := query.KeyMask[row]
 	row_prf.Evaluate(rowData[:])
 
 	// XOR row i of query q into the database table
@@ -26,7 +26,7 @@ func (t *SlotTable) expandRow(query *InsertQuery1, row int) {
 	if rowBit {
 		// If row bitmask is set, then XOR in the message mask to
 		// the table too
-		XorRows(&t.table[row], &query.Key.MessageMask)
+		XorRows(&t.table[row], &query.MessageMask)
 	}
 	t.tableMutex.Unlock()
 }
@@ -44,10 +44,10 @@ func (t *SlotTable) processQuery(query *InsertQueryTuple) {
 
 	// Expand seeds to the size of the whole DB table
 
-	log.Printf("Making allTables")
+	//log.Printf("Making allTables")
 	// For each row i and query q, XOR allTables[q][i] into table[i]
 	for i := 0; i < TABLE_HEIGHT; i++ {
-		t.expandRow(query.q1, i)
+		t.expandRow(&query.q1, i)
 	}
 
 }

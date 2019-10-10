@@ -2,16 +2,17 @@ package db
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"math/big"
 	"reflect"
 	"unsafe"
+
+	"golang.org/x/crypto/poly1305"
 )
 
-func MessageToRow(msg SlotContents, xIdx int) BitMatrixRow {
+func MessageToRow(msg *Plaintext) BitMatrixRow {
 	var res BitMatrixRow
-	start := SLOT_LENGTH * xIdx
-	copy(res[start:], msg[:])
+	start := SLOT_LENGTH * msg.X
+	copy(res[start:], msg.Message[:])
 	return res
 }
 
@@ -19,18 +20,19 @@ func XorRows(dest, add *BitMatrixRow) {
 	xorEq(dest[:], add[:])
 }
 
-func RandomSlot() (SlotContents, error) {
-	var msg SlotContents
-	_, err := rand.Read(msg[:])
-	return msg, err
+func RandomSlot(slot *SlotContents) error {
+	_, err := rand.Read(slot[:])
+	return err
 }
 
-func HashSlot(slot SlotContents) [sha256.Size]byte {
-	return sha256.Sum256(slot[:])
+func HashSlot(hashKey *[32]byte, slot *SlotContents) [16]byte {
+	var out [16]byte
+	poly1305.Sum(&out, slot[:], hashKey)
+	return out
 }
 
-func SlotToInt(slot SlotContents) *big.Int {
-	h := HashSlot(slot)
+func SlotToInt(hashKey *[32]byte, slot *SlotContents) *big.Int {
+	h := HashSlot(hashKey, slot)
 	out := new(big.Int)
 	out.SetBytes(h[:])
 	return out

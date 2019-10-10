@@ -13,8 +13,8 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2 //1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 10
-const TABLE_HEIGHT int = 10 //100 / TABLE_WIDTH
+const TABLE_WIDTH int = 32
+const TABLE_HEIGHT int = 32 //100 / TABLE_WIDTH
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 128
@@ -35,6 +35,12 @@ var IntModulus *big.Int
 type DbState int
 
 type SlotContents [SLOT_LENGTH]byte
+
+type Plaintext struct {
+	Message SlotContents
+	X       int
+	Y       int
+}
 
 type EncryptedInsertQuery struct {
 	SenderPublicKey [32]byte
@@ -70,16 +76,6 @@ type UploadArgs3 struct {
 	Query   [NUM_SERVERS]EncryptedInsertQuery
 }
 
-type DPFKey struct {
-	KeyIndex    int
-	Keys        [TABLE_HEIGHT]prf.Key
-	KeyMask     [TABLE_HEIGHT]bool
-	MessageMask BitMatrixRow
-
-	// Share of client's message
-	//MessageShare *big.Int
-}
-
 type CorProof struct {
 }
 
@@ -96,21 +92,21 @@ type InsertQueryTuple struct {
 	hashKey   [32]byte
 	challenge [16]byte
 
-	q1 *InsertQuery1
-	q2 *InsertQuery2
-	q3 *InsertQuery3
+	q1 InsertQuery1
+	q2 InsertQuery2
+	q3 InsertQuery3
 }
 
 type InsertQuery1 struct {
-	Key DPFKey
-
-	// TODO: Add real proof
-	Proof CorProof
+	KeyIndex    int
+	Keys        [TABLE_HEIGHT]prf.Key
+	KeyMask     [TABLE_HEIGHT]bool
+	MessageMask BitMatrixRow
 }
 
 type InsertQuery2 struct {
-	Uuid int64
-	Tag  int64
+	Uuid     int64
+	MsgShare *big.Int
 }
 
 type InsertQuery3 struct {
@@ -124,7 +120,8 @@ type UploadReply1 struct {
 }
 
 type UploadReply2 struct {
-	Magic int
+	Challenge *big.Int
+	Magic     int
 }
 
 type UploadReply3 struct {
@@ -197,7 +194,8 @@ type Server struct {
 }
 
 func init() {
-	IntModulus = fromString("2000000000000000000000000000000000000000000000000000000000000040001")
+	// This is a 109-bit modulus
+	IntModulus = fromString("80000000000000000000080001")
 }
 
 func fromString(s string) *big.Int {

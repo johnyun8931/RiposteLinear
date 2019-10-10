@@ -18,7 +18,7 @@ import (
 const MERGE_TIME_DELAY time.Duration = 5
 
 // Number of pending requests that leader can buffer
-const READY_BUFFER_SIZE = 10
+const READY_BUFFER_SIZE = 100
 
 // Number of server-side requests to allow in flight
 const WORKER_THREADS = 128
@@ -37,7 +37,7 @@ func (t *Server) Upload1(args *UploadArgs1, reply *UploadReply1) error {
 	}
 	<-t.incoming1
 
-	log.Printf("Got upload request")
+	//log.Printf("Got upload request")
 	//log.Printf("Request:", args)
 
 	uuid, err := utils.RandomInt64(math.MaxInt64)
@@ -72,18 +72,21 @@ func (t *Server) Upload2(args *UploadArgs2, reply *UploadReply2) error {
 	}
 	<-t.incoming2
 
-	log.Printf("Got Upload2 request")
+	//log.Printf("Got Upload2 request")
 
-	t.acceptedMutex.RLock()
+	t.acceptedMutex.Lock()
 	data, okay := t.accepted[args.Uuid]
-	t.acceptedMutex.RUnlock()
+	if okay {
+		data.args2 = args
+	}
+	t.acceptedMutex.Unlock()
 
 	if !okay || !bytes.Equal(data.hashKey[:], args.HashKey[:]) {
 		//log.Printf("left: %v, right: %v", data.hashKey[:], args.HashKey[:])
 		return errors.New("Bogus UUID")
 	}
 
-	log.Printf("Upload2 OK")
+	//log.Printf("Upload2 OK")
 	t.incoming2 <- true
 	return nil
 }
@@ -94,7 +97,7 @@ func (t *Server) Upload3(args *UploadArgs3, reply *UploadReply3) error {
 	}
 	<-t.incoming3
 
-	log.Printf("Got Upload3 request")
+	//log.Printf("Got Upload3 request")
 	//log.Printf("Request:", args)
 
 	t.acceptedMutex.RLock()
@@ -149,12 +152,12 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	for i := 0; i < NUM_SERVERS; i++ {
 		preps[i].Uuid = uuid
 		preps[i].Query1 = tup.args1.Query[i]
-		//preps[i].Query2 = tup.args2.Query[i]
+		preps[i].Query2 = tup.args2.Query[i]
 		//preps[i].Query3 = tup.args3.Query[i]
 	}
 	t.acceptedMutex.RUnlock()
 
-	log.Printf("Send PREPARE %d", uuid)
+	//log.Printf("Send PREPARE %d", uuid)
 
 	// Send out PREPARE request
 	c := make(chan error, NUM_SERVERS)
@@ -189,7 +192,7 @@ func (t *Server) submitCommits(uuid int64, shouldCommit bool) {
 	com.Uuid = uuid
 	com.Commit = shouldCommit
 
-	log.Printf("Send COMMIT %d", com.Uuid)
+	//log.Printf("Send COMMIT %d", com.Uuid)
 
 	// Send out COMMIT request
 	c := make(chan error, NUM_SERVERS)
@@ -212,10 +215,10 @@ func (t *Server) submitCommits(uuid int64, shouldCommit bool) {
 		if r != nil {
 			log.Fatal("Error in commit: ", r)
 		}
-		log.Printf("Got commit %v/%v", i, NUM_SERVERS)
+		//log.Printf("Got commit %v/%v", i, NUM_SERVERS)
 	}
 
-	log.Printf("Done COMMIT %d", com.Uuid)
+	//log.Printf("Done COMMIT %d", com.Uuid)
 }
 
 func (t *Server) mergeWorker() {
@@ -282,13 +285,13 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
 
 	// XOR all of the tables together and save
 	// it in the plaintext table
-	log.Printf("Revealing cleartext")
+	//log.Printf("Revealing cleartext")
 	for serv := 0; serv < NUM_SERVERS; serv++ {
 		for i := 0; i < TABLE_HEIGHT; i++ {
 			XorRows(&b[i], &tables[serv].Entries[i])
 		}
 	}
-	log.Printf("Done revealing cleartext")
+	//log.Printf("Done revealing cleartext")
 
 	return b
 }
@@ -298,28 +301,20 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
  */
 
 func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
-	plainQuery := new(InsertQuery1)
-	err := DecryptQuery1(t.ServerIdx, prep.Query1, plainQuery)
-	log.Printf("Hash: %v", hashDpfKey(&plainQuery.Key))
+	tup := new(InsertQueryTuple)
+
+	err := DecryptQuery1(t.ServerIdx, prep.Query1, &tup.q1)
 	if err != nil {
 		panic("Decryption error")
 	}
 
-	// Generate out each of the seeds and XOR into the database.
-	// At the same time, generate an XOR of all of the seed outputs.
-	log.Printf("XORing into table for %v", prep.Uuid)
-	log.Printf("Done XORing into table for %v", prep.Uuid)
+	err = DecryptQuery2(t.ServerIdx, prep.Query2, &tup.q2)
 	if err != nil {
-		log.Printf("Error in decrypt/audit: %v", err)
-		return err
+		panic("Decryption error")
 	}
 
-	// Put query replies here
-	// reply.QueryAnswers =
-
 	t.pendingMutex.Lock()
-	t.pending[prep.Uuid] = new(InsertQueryTuple)
-	t.pending[prep.Uuid].q1 = plainQuery
+	t.pending[prep.Uuid] = tup
 	t.pendingMutex.Unlock()
 
 	return nil
@@ -352,20 +347,21 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 }
 
 func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) error {
-
-	log.Printf("Storing plaintext")
+	//log.Printf("Storing plaintext")
 	t.plainMutex.Lock()
 	t.plain = args.Plaintext
 
-	var zeros SlotContents
-	for i := range t.plain {
-		for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
-			msg := t.plain[i][j:(j + SLOT_LENGTH)]
-			if bytes.Compare(zeros[:], msg) != 0 {
-				log.Printf("Got msg: %v", msg)
+	/*
+		var zeros SlotContents
+		for i := range t.plain {
+			for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
+				msg := t.plain[i][j:(j + SLOT_LENGTH)]
+				if bytes.Compare(zeros[:], msg) != 0 {
+					log.Printf("Got msg: %v", msg)
+				}
 			}
 		}
-	}
+	*/
 
 	t.plainMutex.Unlock()
 

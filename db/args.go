@@ -1,9 +1,6 @@
 package db
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/json"
 	"log"
 	"math/big"
 
@@ -13,8 +10,7 @@ import (
 
 var curve = utils.CommonCurve
 
-func InitializeUploadArgs(args *UploadArgs1, xIdx int, yIdx int,
-	msg SlotContents, corrupted bool) error {
+func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) error {
 
 	// Create random values for secret sharing
 	var keys [TABLE_HEIGHT]prf.Key
@@ -31,16 +27,15 @@ func InitializeUploadArgs(args *UploadArgs1, xIdx int, yIdx int,
 	copy(keyMaskP[:], keyMask[:])
 	copy(keysP[:], keys[:])
 
-	keyMaskP[yIdx] = !keyMask[yIdx]
+	keyMaskP[msg.Y] = !keyMask[msg.Y]
 
 	var err error
-	keysP[yIdx], err = prf.NewKey()
+	keysP[msg.Y], err = prf.NewKey()
 	if err != nil {
 		return err
 	}
 
-	//msgInt, shares := computeMessageShares(msg)
-	msgMask, err = computeMessageMask(keys[yIdx], keysP[yIdx], msg, xIdx)
+	msgMask, err = computeMessageMask(keys[msg.Y], keysP[msg.Y], msg)
 	if err != nil {
 		return err
 	}
@@ -53,41 +48,21 @@ func InitializeUploadArgs(args *UploadArgs1, xIdx int, yIdx int,
 
 	plainQueries := make([]InsertQuery1, 2)
 	for i := 0; i < NUM_SERVERS; i++ {
-		plainQueries[i].Key.KeyIndex = i
-		plainQueries[i].Key.MessageMask = msgMask
+		plainQueries[i].KeyIndex = i
+		plainQueries[i].MessageMask = msgMask
 		//plainQueries[i].Key.MessageShare = shares[i]
-		plainQueries[i].Key.Keys = keys
-		plainQueries[i].Key.KeyMask = keyMask
+		plainQueries[i].Keys = keys
+		plainQueries[i].KeyMask = keyMask
 
 		if (i & 1) > 0 {
-			plainQueries[i].Key.Keys = keysP
-			plainQueries[i].Key.KeyMask = keyMaskP
+			plainQueries[i].Keys = keysP
+			plainQueries[i].KeyMask = keyMaskP
 		}
 	}
-
-	var chal [sha256.Size]byte
-	for i := 0; i < NUM_SERVERS; i++ {
-		// Get Fiat-Shamir challenge
-		h := hashDpfKey(&plainQueries[i].Key)
-		xorEq(chal[:], h[:])
-	}
-
-	log.Printf("Final challenge: %v", chal)
-
-	//proofs := makeProof(chal, msgInt, xyToInt(xIdx, yIdx))
-
-	// Compute proof
-	/*
-		for i := 0; i < NUM_SERVERS; i++ {
-			plainQueries[i].Proof = proofs[i]
-		}
-	*/
 
 	for i := 0; i < NUM_SERVERS; i++ {
 		var err error
-		args.Query[i], err = EncryptQuery1(i, &plainQueries[i])
-		h := hashDpfKey(&plainQueries[i].Key)
-		log.Printf("hash: %v", h)
+		args.Query[i], err = EncryptQuery(i, &plainQueries[i])
 		if err != nil {
 			log.Fatal("Could not encrypt: ", err)
 		}
@@ -95,13 +70,35 @@ func InitializeUploadArgs(args *UploadArgs1, xIdx int, yIdx int,
 	return nil
 }
 
-func computeMessageShares(msg SlotContents) (*big.Int, []*big.Int) {
-	h := SlotToInt(msg)
+func SetUploadArgs2(msg *Plaintext, upArgs1 *UploadArgs1, upRes1 *UploadReply1) *UploadArgs2 {
+	out := new(UploadArgs2)
+	copy(out.HashKey[:], upRes1.HashKey[:])
+	out.Uuid = upRes1.Uuid
+
+	// Hash message using hash fn specified by HashKey
+	_, shares := computeMessageShares(&out.HashKey, &msg.Message)
+
+	// Split hash into shares
+	var err error
+	var queries [2]InsertQuery2
+	for i := 0; i < len(queries); i++ {
+		queries[i].MsgShare = shares[i]
+		log.Printf("%v => %v", shares[i])
+		out.Query[i], err = EncryptQuery(i, &queries[i])
+		if err != nil {
+			panic("Encrypt error")
+		}
+	}
+
+	return out
+}
+
+func computeMessageShares(hashKey *[32]byte, msg *SlotContents) (*big.Int, []*big.Int) {
+	h := SlotToInt(hashKey, msg)
 	return h, Share(h)
 }
 
-func computeMessageMask(key prf.Key, keyP prf.Key,
-	msg SlotContents, xIdx int) (BitMatrixRow, error) {
+func computeMessageMask(key prf.Key, keyP prf.Key, msg *Plaintext) (BitMatrixRow, error) {
 
 	var msgMask BitMatrixRow
 	prfA, err := prf.NewPrf(key)
@@ -117,7 +114,7 @@ func computeMessageMask(key prf.Key, keyP prf.Key,
 	prfA.Evaluate(msgMask[:])
 	prfB.Evaluate(msgMask[:])
 
-	msg_row := MessageToRow(msg, xIdx)
+	msg_row := MessageToRow(msg)
 	XorRows(&msgMask, &msg_row)
 
 	return msgMask, nil
@@ -167,25 +164,13 @@ func xyToInt(xIdx, yIdx int) int {
 	return xIdx*TABLE_HEIGHT + yIdx
 }
 
-func RandomMessage() (int, int, SlotContents, error) {
+func RandomMessage() (*Plaintext, error) {
+	out := new(Plaintext)
 	var err error
-	var xIdx, yIdx int
-	var msg SlotContents
 
-	xIdx = utils.RandIntShort(TABLE_WIDTH)
-	yIdx = utils.RandIntShort(TABLE_HEIGHT)
+	out.X = utils.RandIntShort(TABLE_WIDTH)
+	out.Y = utils.RandIntShort(TABLE_HEIGHT)
 
-	msg, err = RandomSlot()
-	return xIdx, yIdx, msg, err
-}
-
-func hashDpfKey(key *DPFKey) [sha256.Size]byte {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	err := enc.Encode(key)
-	if err != nil {
-		panic("Gob error!")
-	}
-
-	return sha256.Sum256(buf.Bytes())
+	err = RandomSlot(&out.Message)
+	return out, err
 }
