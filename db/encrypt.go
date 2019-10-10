@@ -10,7 +10,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 )
 
-func EncryptQuery(serverIdx int, query InsertQuery) (EncryptedInsertQuery, error) {
+func EncryptQuery(serverIdx int, query interface{}) (EncryptedInsertQuery, error) {
 	var out EncryptedInsertQuery
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
@@ -22,23 +22,14 @@ func EncryptQuery(serverIdx int, query InsertQuery) (EncryptedInsertQuery, error
 	return encryptBytes(serverIdx, buf.Bytes())
 }
 
-func DecryptQuery(serverIdx int, enc EncryptedInsertQuery) (*InsertQuery, error) {
-	/*
-	  log.Printf("pk   %v", enc.SenderPublicKey)
-	  log.Printf("nc   %v", enc.Nonce)
-	  log.Printf("ct   %v", enc.Ciphertext)
-	*/
-
+func DecryptQuery(serverIdx int, enc EncryptedInsertQuery, output interface{}) error {
 	buf, err := decryptBytes(serverIdx, enc)
-
-	query := new(InsertQuery)
 	if err != nil {
-		return query, err
+		return err
 	}
 
 	dec := gob.NewDecoder(bytes.NewBuffer(buf))
-	err = dec.Decode(&query)
-	return query, err
+	return dec.Decode(&output)
 }
 
 /*** Helper Functions ***/

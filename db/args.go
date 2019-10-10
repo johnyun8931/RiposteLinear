@@ -13,7 +13,7 @@ import (
 
 var curve = utils.CommonCurve
 
-func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
+func InitializeUploadArgs(args *UploadArgs1, xIdx int, yIdx int,
 	msg SlotContents, corrupted bool) error {
 
 	// Create random values for secret sharing
@@ -39,7 +39,7 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 		return err
 	}
 
-	msgInt, shares := computeMessageShares(msg)
+	//msgInt, shares := computeMessageShares(msg)
 	msgMask, err = computeMessageMask(keys[yIdx], keysP[yIdx], msg, xIdx)
 	if err != nil {
 		return err
@@ -51,14 +51,13 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 		keys[1][1] = 0xff
 	}
 
-	plainQueries := make([]InsertQuery, 2)
+	plainQueries := make([]InsertQuery1, 2)
 	for i := 0; i < NUM_SERVERS; i++ {
 		plainQueries[i].Key.KeyIndex = i
 		plainQueries[i].Key.MessageMask = msgMask
-		plainQueries[i].Key.MessageShare = shares[i]
+		//plainQueries[i].Key.MessageShare = shares[i]
 		plainQueries[i].Key.Keys = keys
 		plainQueries[i].Key.KeyMask = keyMask
-		utils.RandBytes(plainQueries[i].Key.Nonce[:])
 
 		if (i & 1) > 0 {
 			plainQueries[i].Key.Keys = keysP
@@ -75,12 +74,14 @@ func InitializeUploadArgs(args *UploadArgs, xIdx int, yIdx int,
 
 	log.Printf("Final challenge: %v", chal)
 
-	proofs := makeProof(chal, msgInt, xyToInt(xIdx, yIdx))
+	//proofs := makeProof(chal, msgInt, xyToInt(xIdx, yIdx))
 
 	// Compute proof
-	for i := 0; i < NUM_SERVERS; i++ {
-		plainQueries[i].Proof = proofs[i]
-	}
+	/*
+		for i := 0; i < NUM_SERVERS; i++ {
+			plainQueries[i].Proof = proofs[i]
+		}
+	*/
 
 	for i := 0; i < NUM_SERVERS; i++ {
 		var err error

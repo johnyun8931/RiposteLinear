@@ -19,11 +19,9 @@ const MERGE_TIME_DELAY time.Duration = 5
 
 var (
 	incomingReqs = make(chan [NUM_SERVERS]EncryptedInsertQuery, REQ_BUFFER_SIZE)
-	auditReqs    = make(chan AuditArgs, REQ_BUFFER_SIZE)
 	commitReqs   = make(chan CommitArgs, REQ_BUFFER_SIZE)
 
 	beginMergeMarker       [NUM_SERVERS]EncryptedInsertQuery
-	beginMergeMarkerAudit  AuditArgs
 	beginMergeMarkerCommit CommitArgs
 )
 
@@ -49,7 +47,7 @@ func (t *Server) isLeader() bool {
  * Leader code
  */
 
-func (t *Server) Upload(args *UploadArgs, reply *UploadReply) error {
+func (t *Server) Upload(args *UploadArgs1, reply *UploadReply1) error {
 	if !t.isLeader() {
 		return errors.New("Only leader can accept uploads")
 	}
@@ -62,7 +60,12 @@ func (t *Server) Upload(args *UploadArgs, reply *UploadReply) error {
 	}
 
 	incomingReqs <- args.Query
-	reply.Magic = 5
+
+	// In a secure implementation, these bytes would be derived pseudorandomly
+	// from a seed picked collaboratively by all of the servers in a one-time
+	// setup phase.
+	utils.RandBytes(reply.HashKey[:])
+
 	return nil
 }
 
@@ -80,7 +83,7 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
 	}
 
 	for i := 0; i < NUM_SERVERS; i++ {
-		(*preps)[i].Query = queryList[i]
+		(*preps)[i].Query1 = queryList[i]
 	}
 
 	return false
@@ -102,7 +105,7 @@ func (t *Server) submitPrepares() {
 		shouldMerge := readIncomingRequests(&preps, incomingReqs)
 		if shouldMerge {
 			// Merge is starting, so send marker down pipeline
-			auditReqs <- beginMergeMarkerAudit
+			commitReqs <- beginMergeMarkerCommit
 		}
 
 		log.Printf("Send PREPARE %d", uuid)
@@ -130,76 +133,12 @@ func (t *Server) submitPrepares() {
 			}
 		}
 
+		var commitArgs CommitArgs
 		log.Printf("Done PREPARE %d", uuid)
 
-		// If merge is beginning, send marker down
-		// the pipeline
-		if shouldMerge {
-			auditReqs <- beginMergeMarkerAudit
-		}
-
-		var auditArgs AuditArgs
-
-		for i := 0; i < NUM_SERVERS; i++ {
-			xorEq(auditArgs.Challenge[:], replies[i].ChallengeShare[:])
-		}
-
-		log.Printf("Challenge: %v", auditArgs.Challenge)
-
-		auditArgs.Uuid = preps[0].Uuid
-		//auditArgs.Commit = okay
-		auditReqs <- auditArgs
-	}
-}
-
-func (t *Server) submitAudits() {
-	for {
-		req := <-auditReqs
-		log.Printf("Send AUDIT %d", req.Uuid)
-		if req.Uuid == beginMergeMarkerCommit.Uuid {
-			commitReqs <- beginMergeMarkerCommit
-			continue
-		}
-
-		var audits [NUM_SERVERS]AuditArgs
-		for i := 0; i < NUM_SERVERS; i++ {
-			audits[i].Uuid = req.Uuid
-		}
-
-		// Send out PREPARE request
-		c := make(chan error, NUM_SERVERS)
-		var replies [NUM_SERVERS]AuditReply
-		for i := 0; i < NUM_SERVERS; i++ {
-			go func(aud *AuditArgs, reply *AuditReply, j int) {
-				err := t.rpcClients[j].Call("Server.Audit", aud, reply)
-				if err != nil {
-					c <- err
-				} else {
-					c <- nil
-				}
-			}(&audits[i], &replies[i], i)
-		}
-
-		// Wait for responses
-		var r error
-		for i := 0; i < NUM_SERVERS; i++ {
-			r = <-c
-			if r != nil {
-				log.Fatal("Error in prepare: ", r)
-			}
-		}
-
-		var commitArgs CommitArgs
-		commitArgs.Uuid = req.Uuid
-
-		// XXX do checking here
-		commitArgs.Commit = replies[0].Okay
+		commitArgs.Uuid = preps[0].Uuid
+		commitArgs.Commit = true
 		commitReqs <- commitArgs
-		if !replies[0].Okay {
-			log.Printf("FAILED audit, uuid: %v", req.Uuid)
-		}
-
-		log.Printf("Done AUDIT %d => Okay? %v", req.Uuid, replies[0].Okay)
 	}
 }
 
@@ -328,7 +267,8 @@ func (t *Server) beginMerge() {
  */
 
 func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
-	plainQuery, err := DecryptQuery(t.ServerIdx, prep.Query)
+	plainQuery := new(InsertQuery1)
+	err := DecryptQuery(t.ServerIdx, prep.Query1, plainQuery)
 	log.Printf("Hash: %v", hashDpfKey(&plainQuery.Key))
 	if err != nil {
 		panic("Decryption error")
@@ -346,14 +286,9 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	reply.ChallengeShare = hashDpfKey(&plainQuery.Key)
 
 	t.pendingMutex.Lock()
-	t.pending[prep.Uuid] = plainQuery
+	t.pending[prep.Uuid].q1 = plainQuery
 	t.pendingMutex.Unlock()
 
-	return nil
-}
-
-func (t *Server) Audit(audit *AuditArgs, reply *AuditReply) error {
-	reply.Okay = true
 	return nil
 }
 
@@ -479,7 +414,6 @@ func (t *Server) openConnections() error {
 func (t *Server) Initialize(*int, *int) error {
 	if t.isLeader() {
 		go t.submitPrepares()
-		go t.submitAudits()
 		go t.submitCommits()
 		go t.mergeWorker()
 
@@ -534,7 +468,7 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 	t.ServerAddrs = serverAddrs
 	t.clientsServed = 0
 	t.clientsServedStart = time.Now()
-	t.pending = map[int64](*InsertQuery){}
+	t.pending = map[int64](*InsertQueryTuple){}
 
 	return t
 }

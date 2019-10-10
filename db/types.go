@@ -51,9 +51,27 @@ type EncryptedInsertQuery struct {
 	Ciphertext      []byte
 }
 
-type EncryptedAuditQuery EncryptedInsertQuery
+type EncryptedInsertQuery2 struct {
+	SenderPublicKey [32]byte
+	Nonce           [24]byte
+	Ciphertext      []byte
+}
 
-type UploadArgs struct {
+type EncryptedInsertQuery3 struct {
+	SenderPublicKey [32]byte
+	Nonce           [24]byte
+	Ciphertext      []byte
+}
+
+type UploadArgs1 struct {
+	Query [NUM_SERVERS]EncryptedInsertQuery
+}
+
+type UploadArgs2 struct {
+	Query [NUM_SERVERS]EncryptedInsertQuery
+}
+
+type UploadArgs3 struct {
 	Query [NUM_SERVERS]EncryptedInsertQuery
 }
 
@@ -64,23 +82,40 @@ type DPFKey struct {
 	MessageMask BitMatrixRow
 
 	// Share of client's message
-	MessageShare *big.Int
-
-	// Random blinding value
-	Nonce [16]byte
+	//MessageShare *big.Int
 }
 
 type CorProof struct {
 }
 
-type InsertQuery struct {
+type InsertQueryTuple struct {
+	q1 *InsertQuery1
+	q2 *InsertQuery2
+	q3 *InsertQuery3
+}
+
+type InsertQuery1 struct {
 	Key DPFKey
 
 	// TODO: Add real proof
 	Proof CorProof
 }
 
-type UploadReply struct {
+type InsertQuery2 struct {
+}
+
+type InsertQuery3 struct {
+}
+
+type UploadReply1 struct {
+	HashKey [32]byte
+}
+
+type UploadReply2 struct {
+	Magic int
+}
+
+type UploadReply3 struct {
 	Magic int
 }
 
@@ -89,23 +124,15 @@ type DumpReply struct {
 }
 
 type PrepareArgs struct {
-	Uuid  int64
-	Query EncryptedInsertQuery
+	Uuid   int64
+	Query1 EncryptedInsertQuery
+	Query2 EncryptedInsertQuery
+	Query3 EncryptedInsertQuery
 }
 
 type PrepareReply struct {
 	// VOTE: YES/NO
-	QueryToAudit   EncryptedAuditQuery
 	ChallengeShare [32]byte
-}
-
-type AuditArgs struct {
-	Uuid      int64
-	Challenge [32]byte
-}
-
-type AuditReply struct {
-	Okay bool
 }
 
 type CommitArgs struct {
@@ -136,7 +163,7 @@ type Server struct {
 	clientsServedStart time.Time
 	clientsServedMutex sync.Mutex
 
-	pending      map[int64](*InsertQuery)
+	pending      map[int64](*InsertQueryTuple)
 	pendingMutex sync.Mutex
 
 	entries *SlotTable

@@ -10,7 +10,7 @@ import (
  * Actual DB manipulation
  */
 
-func (t *SlotTable) expandRow(query *InsertQuery, row int) {
+func (t *SlotTable) expandRow(query *InsertQuery1, row int) {
 	var rowData BitMatrixRow
 	row_prf, err := prf.NewPrf(query.Key.Keys[row])
 	if err != nil {
@@ -40,14 +40,14 @@ func xorTable(dst *BitMatrixRow, src *BitMatrix, c chan int) {
 	c <- 0
 }
 
-func (t *SlotTable) processQuery(query *InsertQuery) {
+func (t *SlotTable) processQuery(query *InsertQueryTuple) {
 
 	// Expand seeds to the size of the whole DB table
 
 	log.Printf("Making allTables")
 	// For each row i and query q, XOR allTables[q][i] into table[i]
 	for i := 0; i < TABLE_HEIGHT; i++ {
-		t.expandRow(query, i)
+		t.expandRow(query.q1, i)
 	}
 
 }
