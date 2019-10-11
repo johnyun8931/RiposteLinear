@@ -13,6 +13,8 @@ import (
 var curve = utils.CommonCurve
 
 func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) ([]SlotContents, error) {
+
+	log.Printf("Msg: %v", msg.Message)
 	// Create random values for secret sharing
 	var keys [TABLE_HEIGHT]prf.Key
 	var keysP [TABLE_HEIGHT]prf.Key
@@ -90,7 +92,7 @@ func SetUploadArgs2(msgBitShares []SlotContents,
 		if i == 1 {
 			queries[i].MsgShare.Sub(IntModulus, queries[i].MsgShare)
 		}
-		log.Printf("%v => %v", upRes1.HashKey, queries[i].MsgShare)
+		//log.Printf("%v => %v", upRes1.HashKey, queries[i].MsgShare)
 		out.Query[i], err = EncryptQuery(i, &queries[i])
 		if err != nil {
 			panic("Encrypt error")
@@ -99,7 +101,7 @@ func SetUploadArgs2(msgBitShares []SlotContents,
 		mint.Add(mint, queries[i].MsgShare)
 	}
 	mint.Mod(mint, IntModulus)
-	log.Printf("mint: %v", mint)
+	//log.Printf("mint: %v", mint)
 	return mint, out
 }
 

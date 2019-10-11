@@ -57,8 +57,6 @@ func (t *Server) Upload1(args *UploadArgs1, reply *UploadReply1) error {
 	utils.RandBytes(tup.hashKey[:])
 	utils.RandBytes(tup.challenge[:])
 
-	log.Printf("HashKey1=%v", tup.hashKey)
-
 	reply.Uuid = uuid
 	copy(reply.HashKey[:], tup.hashKey[:])
 
@@ -87,7 +85,6 @@ func (t *Server) Upload2(args *UploadArgs2, reply *UploadReply2) error {
 	t.acceptedMutex.Unlock()
 
 	if !okay || !bytes.Equal(data.hashKey[:], args.HashKey[:]) {
-		log.Printf("left: %v, right: %v", data.hashKey[:], args.HashKey[:])
 		return errors.New("Bogus UUID")
 	}
 
@@ -166,7 +163,6 @@ func (t *Server) submitPrepares(uuid int64) bool {
 		preps[i].RandomPoint = randPt
 		copy(preps[i].HashKey[:], tup.hashKey[:])
 		copy(preps[i].Challenge[:], tup.challenge[:])
-		log.Printf("Hashkey %v", preps[i].HashKey)
 		preps[i].Query1 = tup.args1.Query[i]
 		preps[i].Query2 = tup.args2.Query[i]
 		preps[i].Query3 = tup.args3.Query[i]
@@ -198,64 +194,11 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	}
 
 	out := new(big.Int)
-	z1 := new(big.Int)
-	z2 := new(big.Int)
-	t1 := new(big.Int)
-	t2 := new(big.Int)
-	msg := new(big.Int)
 	for i := 0; i < NUM_SERVERS; i++ {
 		out.Add(out, replies[i].OutShare)
-		t1.Add(t1, replies[i].TShare1)
-		t2.Add(t2, replies[i].TShare2)
-		z1.Add(z1, replies[i].ZShare1)
-		z2.Add(z2, replies[i].ZShare2)
-		msg.Add(msg, replies[i].MsgShare)
 	}
 
 	out.Mod(out, IntModulus)
-	z1.Mod(z1, IntModulus)
-	z2.Mod(z2, IntModulus)
-	t1.Mod(t1, IntModulus)
-	t2.Mod(t2, IntModulus)
-	msg.Mod(msg, IntModulus)
-
-	tmp := new(big.Int)
-	// t1 = z1^2
-	tmp.Mul(z1, z1)
-	tmp.Mod(tmp, IntModulus)
-	if tmp.Cmp(t1) != 0 {
-		log.Printf("t1 != z1^2")
-		log.Printf("t1 %v", t1)
-		log.Printf("z1 %v", z1)
-	}
-
-	// t2 = m * z2
-	tmp.Mul(msg, z2)
-	tmp.Mod(tmp, IntModulus)
-	if tmp.Cmp(t2) != 0 {
-		log.Printf("t2 != m*z2")
-		log.Printf("t2 %v", t2)
-		log.Printf("z2 %v", z2)
-	}
-
-	// z1^1 =? m * z2
-	tmp2 := new(big.Int)
-	tmp.Mul(z1, z1)
-	tmp.Mod(tmp, IntModulus)
-	tmp2.Mul(msg, z2)
-	tmp2.Mod(tmp2, IntModulus)
-	if tmp.Cmp(tmp2) != 0 {
-		log.Printf("z1^2 != m*z2")
-	} else {
-		log.Printf("VERY GOOD")
-	}
-
-	// out = t1 - t2
-	tmp.Sub(t1, t2)
-	tmp.Mod(tmp, IntModulus)
-	if tmp.Cmp(out) != 0 {
-		log.Printf("out != t1 - t2")
-	}
 
 	if out.Sign() != 0 {
 		log.Printf("FAIL!!!!!!!! <<<<< 1")
@@ -433,12 +376,6 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	reply.AnsShare2 = mulproof.Query(IntModulus, prep.RandomPoint, &tup.q3.TProof2,
 		tup.q2.MsgShare, zShare2, tup.q3.TShare2)
 
-	reply.ZShare1 = zShare1
-	reply.ZShare2 = zShare2
-	reply.TShare1 = tup.q3.TShare1
-	reply.TShare2 = tup.q3.TShare2
-	reply.MsgShare = tup.q2.MsgShare
-
 	return nil
 }
 
@@ -475,17 +412,15 @@ func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) erro
 	t.plainMutex.Lock()
 	t.plain = args.Plaintext
 
-	/*
-		var zeros SlotContents
-		for i := range t.plain {
-			for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
-				msg := t.plain[i][j:(j + SLOT_LENGTH)]
-				if bytes.Compare(zeros[:], msg) != 0 {
-					log.Printf("Got msg: %v", msg)
-				}
+	var zeros SlotContents
+	for i := range t.plain {
+		for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
+			msg := t.plain[i][j:(j + SLOT_LENGTH)]
+			if bytes.Compare(zeros[:], msg) != 0 {
+				log.Printf("Got msg: %v", msg)
 			}
 		}
-	*/
+	}
 
 	t.plainMutex.Unlock()
 

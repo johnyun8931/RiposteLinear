@@ -14,8 +14,8 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2 //1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 1
-const TABLE_HEIGHT int = 1 //100 / TABLE_WIDTH
+const TABLE_WIDTH int = 64
+const TABLE_HEIGHT int = 32 //100 / TABLE_WIDTH
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 128
@@ -144,12 +144,6 @@ type PrepareArgs struct {
 type PrepareReply struct {
 	AnsShare1 *mulproof.AnsShare
 	AnsShare2 *mulproof.AnsShare
-
-	ZShare1  *big.Int
-	ZShare2  *big.Int
-	TShare1  *big.Int
-	TShare2  *big.Int
-	MsgShare *big.Int
 
 	OutShare *big.Int
 }

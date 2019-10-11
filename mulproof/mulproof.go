@@ -1,7 +1,6 @@
 package mulproof
 
 import (
-	"log"
 	"math/big"
 
 	"bitbucket.org/henrycg/riposte/prg"
@@ -174,7 +173,6 @@ func Decide(mod *big.Int, pfs []*AnsShare) bool {
 	// Test f(R)*g(R) = h(R) ?
 	fR.Mul(fR, gR)
 	fR.Mod(fR, mod)
-	log.Printf("f=%v, g=%v, h=%v", fR, gR, hR)
 
 	return fR.Cmp(hR) == 0
 }

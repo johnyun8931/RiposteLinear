@@ -1,8 +1,6 @@
 package db
 
 import (
-	"log"
-
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
@@ -46,8 +44,6 @@ func updateTestValues(z1, z2, m, r, tmp *big.Int) {
 	tmp.Mul(tmp, r)
 	z2.Add(z2, tmp)
 	z2.Mod(z2, IntModulus)
-
-	log.Printf("Lin comb = %v", r)
 }
 
 func updateRowTestValues(row *BitMatrixRow, yIdx int, isServerB bool,
@@ -62,10 +58,7 @@ func updateRowTestValues(row *BitMatrixRow, yIdx int, isServerB bool,
 
 		// Compute sketch values
 		idx := xyToInt(x, yIdx)
-		//log.Printf("Idx", idx)
 		r := proofPrfEval(aes, idx)
-
-		log.Printf("HashKey: %v  at (%v) yields %v", hashKey, idx, r)
 
 		// Update sketch values
 		updateTestValues(z1, z2, msg, r, tmp)
@@ -76,10 +69,8 @@ func getTestValues(challenge *[16]byte,
 	hashKey *[32]byte, plain *Plaintext, msgInt,
 	z1, z2, t1, t2 *big.Int) {
 	idx := xyToInt(plain.X, plain.Y)
-	log.Printf("HashKey: %v  at (%v)", hashKey, idx)
 	r := proofPrfEval(proofPrfSetup(challenge[:]), idx)
 
-	log.Printf("HashKey: %v  at (%v) yields %v", hashKey, idx, r)
 	// Set
 	//  z1 = <m, r>
 	//  z2 = <m, r^2>
