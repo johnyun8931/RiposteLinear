@@ -39,6 +39,7 @@ func SlotToInt(hashKey *[32]byte, slot []byte) *big.Int {
 	//log.Printf("h=%v", h)
 	out := new(big.Int)
 	out.SetBytes(h[:])
+	out.Mod(out, IntModulus)
 	return out
 }
 

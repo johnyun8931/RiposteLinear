@@ -46,17 +46,15 @@ func xorTable(dst *BitMatrixRow, src *BitMatrix, c chan int) {
 	c <- 0
 }
 
-func (t *SlotTable) processQuery(query *InsertQueryTuple, reply *PrepareReply, isServerB bool) {
+func (t *SlotTable) processQuery(query *InsertQueryTuple, reply *PrepareReply, isServerB bool,
+	zShare1, zShare2 *big.Int) {
 	tmp := new(big.Int)
-	reply.ZShare1 = new(big.Int)
-	reply.ZShare2 = new(big.Int)
-	reply.MsgShare = query.q2.MsgShare
 	aes := proofPrfSetup(query.challenge[:])
 
 	// For each row i and query q, XOR allTables[q][i] into table[i]
 	for i := 0; i < TABLE_HEIGHT; i++ {
 		t.expandRow(&query.q1, i, isServerB, &query.hashKey, aes,
-			reply.ZShare1, reply.ZShare2, tmp)
+			zShare1, zShare2, tmp)
 	}
 }
 

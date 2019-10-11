@@ -5,6 +5,7 @@ import (
 	"net/rpc"
 	"sync"
 
+	"bitbucket.org/henrycg/riposte/mulproof"
 	"bitbucket.org/henrycg/riposte/prf"
 )
 
@@ -20,7 +21,7 @@ const TABLE_HEIGHT int = 32 //100 / TABLE_WIDTH
 const REQ_BUFFER_SIZE int = 128
 
 // Length of plaintext messages (in bytes)
-const SLOT_LENGTH int = 32 // 64 KB
+const SLOT_LENGTH int = 256 // 64 KB
 
 type BitMatrix [TABLE_HEIGHT]BitMatrixRow
 type BitMatrixRow [TABLE_WIDTH * SLOT_LENGTH]byte
@@ -76,12 +77,6 @@ type UploadArgs3 struct {
 	Query   [NUM_SERVERS]EncryptedInsertQuery
 }
 
-type MulProof struct {
-	F0 *big.Int
-	G0 *big.Int
-	H  [3]*big.Int
-}
-
 type AcceptQueryTuple struct {
 	hashKey   [32]byte
 	challenge [16]byte
@@ -114,6 +109,8 @@ type InsertQuery2 struct {
 type InsertQuery3 struct {
 	TShare1 *big.Int
 	TShare2 *big.Int
+	TProof1 mulproof.ProofShare
+	TProof2 mulproof.ProofShare
 }
 
 type UploadReply1 struct {
@@ -135,23 +132,24 @@ type DumpReply struct {
 }
 
 type PrepareArgs struct {
-	Uuid      int64
-	HashKey   [32]byte
-	Challenge [16]byte
-	Query1    EncryptedInsertQuery
-	Query2    EncryptedInsertQuery
-	Query3    EncryptedInsertQuery
+	Uuid        int64
+	HashKey     [32]byte
+	Challenge   [16]byte
+	RandomPoint *big.Int
+	Query1      EncryptedInsertQuery
+	Query2      EncryptedInsertQuery
+	Query3      EncryptedInsertQuery
 }
 
 type PrepareReply struct {
-	QueryAnswers *big.Int
-	MsgShare     *big.Int
+	AnsShare1 *mulproof.AnsShare
+	AnsShare2 *mulproof.AnsShare
 
-	ZShare1 *big.Int
-	ZShare2 *big.Int
-
-	TShare1 *big.Int
-	TShare2 *big.Int
+	ZShare1  *big.Int
+	ZShare2  *big.Int
+	TShare1  *big.Int
+	TShare2  *big.Int
+	MsgShare *big.Int
 
 	OutShare *big.Int
 }

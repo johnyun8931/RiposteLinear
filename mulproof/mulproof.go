@@ -26,6 +26,14 @@ type AnsShare struct {
 
 // Prove that a*b = c
 func Prove(mod *big.Int, nShares int, a, b, c *big.Int) []ProofShare {
+	/*
+		tmp := new(big.Int)
+		tmp.Mul(a, b)
+		tmp.Mod(tmp, mod)
+		if tmp.Cmp(c) != 0 {
+			panic("Invalid")
+		}*/
+
 	f0 := utils.RandInt(mod)
 	g0 := utils.RandInt(mod)
 	h0 := new(big.Int)

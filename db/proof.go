@@ -50,17 +50,6 @@ func updateTestValues(z1, z2, m, r, tmp *big.Int) {
 	//log.Printf("z1=%v, z2=%v, m=%v, r=%v", z1, z2, m, r)
 }
 
-/*
-func getTestValues(key []byte, msg *big.Int, idx int) (*big.Int, *big.Int) {
-	z1 := new(big.Int)
-	z2 := new(big.Int)
-	tmp := new(big.Int)
-
-	r := proofPrfEval(proofPrfSetup(key), idx)
-	updateTestValues(z1, z2, msg, r, tmp)
-	return z1, z2
-}*/
-
 func updateRowTestValues(row *BitMatrixRow, yIdx int, isServerB bool,
 	hashKey *[32]byte, aes cipher.Block, z1 *big.Int, z2 *big.Int, tmp *big.Int) {
 
@@ -81,22 +70,23 @@ func updateRowTestValues(row *BitMatrixRow, yIdx int, isServerB bool,
 	}
 }
 
-func getTestValues(hashKey *[32]byte, plain *Plaintext, msgInt, t1, t2 *big.Int) {
+func getTestValues(hashKey *[32]byte, plain *Plaintext, msgInt,
+	z1, z2, t1, t2 *big.Int) {
 	idx := xyToInt(plain.X, plain.Y)
 	r := proofPrfEval(proofPrfSetup(hashKey[:]), idx)
 
 	// Set
 	//  z1 = <m, r>
 	//  z2 = <m, r^2>
-	updateTestValues(t1, t2, msgInt, r, new(big.Int))
+	updateTestValues(z1, z2, msgInt, r, new(big.Int))
 
 	// Set
 	//  t1 = z1^2
 	//  t2 = z2*m
 
-	t1.Mul(t1, t1)
+	t1.Mul(z1, z1)
 	t1.Mod(t1, IntModulus)
 
-	t2.Mul(t2, msgInt)
+	t2.Mul(z2, msgInt)
 	t2.Mod(t2, IntModulus)
 }

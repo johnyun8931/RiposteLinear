@@ -4,6 +4,7 @@ import (
 	"log"
 	"math/big"
 
+	"bitbucket.org/henrycg/riposte/mulproof"
 	"bitbucket.org/henrycg/riposte/prf"
 	"bitbucket.org/henrycg/riposte/prg"
 	"bitbucket.org/henrycg/riposte/utils"
@@ -111,17 +112,25 @@ func SetUploadArgs3(msg *Plaintext, msgInt *big.Int,
 
 	t1 := new(big.Int)
 	t2 := new(big.Int)
-	// Compute test values and proof
-	getTestValues(&upRes1.HashKey, msg, msgInt, t1, t2)
+	z1 := new(big.Int)
+	z2 := new(big.Int)
 
-	t1Shares := prg.Share(IntModulus, t1)
-	t2Shares := prg.Share(IntModulus, t2)
+	// Compute test values and proof
+	getTestValues(&upRes1.HashKey, msg, msgInt, z1, z2, t1, t2)
+
+	t1Shares := prg.Share(IntModulus, 2, t1)
+	t2Shares := prg.Share(IntModulus, 2, t2)
+
+	t1Proof := mulproof.Prove(IntModulus, 2, z1, z1, t1)
+	t2Proof := mulproof.Prove(IntModulus, 2, msgInt, z2, t2)
 
 	var err error
 	var queries [2]InsertQuery3
 	for i := 0; i < len(queries); i++ {
 		queries[i].TShare1 = t1Shares[i]
 		queries[i].TShare2 = t2Shares[i]
+		queries[i].TProof1 = t1Proof[i]
+		queries[i].TProof2 = t2Proof[i]
 		//log.Printf("%v => %v", shares[i])
 		out.Query[i], err = EncryptQuery(i, &queries[i])
 		if err != nil {

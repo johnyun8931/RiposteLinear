@@ -11,6 +11,7 @@ import (
 	"net/rpc"
 	"time"
 
+	"bitbucket.org/henrycg/riposte/mulproof"
 	"bitbucket.org/henrycg/riposte/utils"
 	"bitbucket.org/henrycg/zkp/group"
 )
@@ -156,8 +157,13 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	var preps [NUM_SERVERS]PrepareArgs
 	t.acceptedMutex.Lock()
 	tup := t.accepted[uuid]
+	delete(t.accepted, uuid)
+	t.acceptedMutex.Unlock()
+
+	randPt := utils.RandInt(IntModulus)
 	for i := 0; i < NUM_SERVERS; i++ {
 		preps[i].Uuid = uuid
+		preps[i].RandomPoint = randPt
 		copy(preps[i].HashKey[:], tup.hashKey[:])
 		copy(preps[i].Challenge[:], tup.challenge[:])
 		log.Printf("Hashkey %v", preps[i].HashKey)
@@ -165,8 +171,6 @@ func (t *Server) submitPrepares(uuid int64) bool {
 		preps[i].Query2 = tup.args2.Query[i]
 		preps[i].Query3 = tup.args3.Query[i]
 	}
-	delete(t.accepted, uuid)
-	t.acceptedMutex.Unlock()
 
 	//log.Printf("Send PREPARE %d", uuid)
 
@@ -175,12 +179,6 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	var replies [NUM_SERVERS]PrepareReply
 	for i := 0; i < NUM_SERVERS; i++ {
 		go func(prep *PrepareArgs, reply *PrepareReply, j int) {
-			reply.QueryAnswers = new(big.Int)
-			reply.ZShare1 = new(big.Int)
-			reply.ZShare2 = new(big.Int)
-			reply.TShare1 = new(big.Int)
-			reply.TShare2 = new(big.Int)
-			reply.MsgShare = new(big.Int)
 			err := t.rpcClients[j].Call("Server.Prepare", prep, reply)
 			if err != nil {
 				c <- err
@@ -199,47 +197,71 @@ func (t *Server) submitPrepares(uuid int64) bool {
 		}
 	}
 
-	// Insert error checking here
+	out := new(big.Int)
 	z1 := new(big.Int)
 	z2 := new(big.Int)
 	t1 := new(big.Int)
 	t2 := new(big.Int)
-	out := new(big.Int)
 	msg := new(big.Int)
-
 	for i := 0; i < NUM_SERVERS; i++ {
-		z1.Add(z1, replies[i].ZShare1)
-		z2.Add(z2, replies[i].ZShare2)
+		out.Add(out, replies[i].OutShare)
 		t1.Add(t1, replies[i].TShare1)
 		t2.Add(t2, replies[i].TShare2)
-		out.Add(out, replies[i].OutShare)
+		z1.Add(z1, replies[i].ZShare1)
+		z2.Add(z2, replies[i].ZShare2)
 		msg.Add(msg, replies[i].MsgShare)
 	}
 
+	out.Mod(out, IntModulus)
 	z1.Mod(z1, IntModulus)
 	z2.Mod(z2, IntModulus)
 	t1.Mod(t1, IntModulus)
 	t2.Mod(t2, IntModulus)
-	out.Mod(out, IntModulus)
 	msg.Mod(msg, IntModulus)
+
+	tmp := new(big.Int)
+	// t1 = z1^2
+	tmp.Mul(z1, z1)
+	tmp.Mod(tmp, IntModulus)
+	if tmp.Cmp(t1) != 0 {
+		log.Printf("t1 != z1^2")
+		log.Printf("t1 %v", t1)
+		log.Printf("z1 %v", z1)
+	}
+
+	// t2 = m * z2
+	tmp.Mul(msg, z2)
+	tmp.Mod(tmp, IntModulus)
+	if tmp.Cmp(t2) != 0 {
+		log.Printf("t2 != m*z2")
+		log.Printf("t2 %v", t2)
+		log.Printf("z2 %v", z2)
+	}
+
+	// out = t1 - t2
+	tmp.Sub(t1, t2)
+	tmp.Mod(tmp, IntModulus)
+	if tmp.Cmp(out) != 0 {
+		log.Printf("out != t1 - t2")
+	}
 
 	if out.Sign() != 0 {
 		log.Printf("FAIL!!!!!!!! <<<<< 1")
 	}
 
-	// Want that t1 = t2
-	if t1.Cmp(t2) != 0 {
-		log.Printf("FAIL!!!!!!!! <<<<< 1")
+	proofs1 := make([]*mulproof.AnsShare, NUM_SERVERS)
+	proofs2 := make([]*mulproof.AnsShare, NUM_SERVERS)
+	for i := 0; i < NUM_SERVERS; i++ {
+		proofs1[i] = replies[i].AnsShare1
+		proofs2[i] = replies[i].AnsShare2
 	}
 
-	// Want that z1^2 = m * z2
-	z2.Mul(z2, msg)
-	z1.Mul(z1, z1)
-	z1.Mod(z1, IntModulus)
-	z2.Mod(z2, IntModulus)
-	log.Printf("m=%v, z1=%v, z2=%v, t1=%v, t2=%v", msg, z1, z2, t1, t2)
-	if z1.Cmp(z2) != 0 {
-		log.Printf("FAIL!!!!!!!")
+	if !mulproof.Decide(IntModulus, proofs1) {
+		log.Printf("Proof 1 FAIL!!!!!!!! <<<<< :(")
+	}
+
+	if !mulproof.Decide(IntModulus, proofs2) {
+		log.Printf("Proof 2 FAIL!!!!!!!! <<<<< :(")
 	}
 
 	okay := true
@@ -383,19 +405,35 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	t.pending[prep.Uuid] = tup
 	t.pendingMutex.Unlock()
 
-	reply.TShare1 = tup.q3.TShare1
-	reply.TShare2 = tup.q3.TShare2
-
 	reply.OutShare = new(big.Int)
 	reply.OutShare.Sub(tup.q3.TShare1, tup.q3.TShare2)
 	reply.OutShare.Mod(reply.OutShare, IntModulus)
 
-	t.entries.processQuery(tup, reply, t.ServerIdx == 1)
+	zShare1 := new(big.Int)
+	zShare2 := new(big.Int)
+	t.entries.processQuery(tup, reply, t.ServerIdx == 1, zShare1, zShare2)
+	log.Printf("z1=%v, z2=%v", zShare1, zShare2)
 
-	log.Printf("t1 = %v", reply.TShare1)
-	log.Printf("t2 = %v", reply.TShare2)
-	log.Printf("z1 = %v", reply.ZShare1)
-	log.Printf("z2 = %v", reply.ZShare2)
+	// Check that t1 = z1^2
+	reply.AnsShare1 = mulproof.Query(IntModulus, prep.RandomPoint, &tup.q3.TProof1,
+		zShare1, zShare1, tup.q3.TShare1)
+
+	log.Printf("Ans %v, %v, %v", reply.AnsShare1.F_R, reply.AnsShare1.G_R, reply.AnsShare1.H_R)
+	// Check that t2 = m*z2
+	reply.AnsShare2 = mulproof.Query(IntModulus, prep.RandomPoint, &tup.q3.TProof2,
+		tup.q2.MsgShare, zShare2, tup.q3.TShare2)
+
+	log.Printf("PT = %v", prep.RandomPoint)
+	log.Printf("F_0 = %v", tup.q3.TProof1.F_0)
+	log.Printf("F_0 = %v", tup.q3.TProof2.F_0)
+	log.Printf("T1 = %v", tup.q3.TShare1)
+	log.Printf("T2 = %v", tup.q3.TShare2)
+
+	reply.ZShare1 = zShare1
+	reply.ZShare2 = zShare2
+	reply.TShare1 = tup.q3.TShare1
+	reply.TShare2 = tup.q3.TShare2
+	reply.MsgShare = tup.q2.MsgShare
 
 	return nil
 }
