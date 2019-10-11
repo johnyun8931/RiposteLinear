@@ -2,15 +2,18 @@ package db
 
 import (
 	"bitbucket.org/henrycg/riposte/prf"
+	"crypto/cipher"
 	"fmt"
-	//	"log"
+	"math/big"
 )
 
 /************
  * Actual DB manipulation
  */
 
-func (t *SlotTable) expandRow(query *InsertQuery1, row int) {
+func (t *SlotTable) expandRow(query *InsertQuery1, row int, isServerB bool,
+	hashKey *[32]byte, aes cipher.Block,
+	z1, z2, tmp *big.Int) {
 	var rowData BitMatrixRow
 	row_prf, err := prf.NewPrf(query.Keys[row])
 	if err != nil {
@@ -19,15 +22,18 @@ func (t *SlotTable) expandRow(query *InsertQuery1, row int) {
 
 	rowBit := query.KeyMask[row]
 	row_prf.Evaluate(rowData[:])
+	if rowBit {
+		// If row bitmask is set, then XOR in the message mask to
+		// the table too
+		XorRows(&rowData, &query.MessageMask)
+	}
+
+	updateRowTestValues(&rowData, row, isServerB,
+		hashKey, aes, z1, z2, tmp)
 
 	// XOR row i of query q into the database table
 	t.tableMutex.Lock()
 	XorRows(&t.table[row], &rowData)
-	if rowBit {
-		// If row bitmask is set, then XOR in the message mask to
-		// the table too
-		XorRows(&t.table[row], &query.MessageMask)
-	}
 	t.tableMutex.Unlock()
 }
 
@@ -40,16 +46,18 @@ func xorTable(dst *BitMatrixRow, src *BitMatrix, c chan int) {
 	c <- 0
 }
 
-func (t *SlotTable) processQuery(query *InsertQueryTuple) {
+func (t *SlotTable) processQuery(query *InsertQueryTuple, reply *PrepareReply, isServerB bool) {
+	tmp := new(big.Int)
+	reply.ZShare1 = new(big.Int)
+	reply.ZShare2 = new(big.Int)
+	reply.MsgShare = query.q2.MsgShare
+	aes := proofPrfSetup(query.challenge[:])
 
-	// Expand seeds to the size of the whole DB table
-
-	//log.Printf("Making allTables")
 	// For each row i and query q, XOR allTables[q][i] into table[i]
 	for i := 0; i < TABLE_HEIGHT; i++ {
-		t.expandRow(&query.q1, i)
+		t.expandRow(&query.q1, i, isServerB, &query.hashKey, aes,
+			reply.ZShare1, reply.ZShare2, tmp)
 	}
-
 }
 
 type ForeachFunc func(row int, value *BitMatrixRow)

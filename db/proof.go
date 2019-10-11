@@ -1,49 +1,84 @@
 package db
 
 import (
-	"log"
+	//	"log"
 
 	"crypto/aes"
+	"crypto/cipher"
 	"encoding/binary"
 	"math/big"
-
-	"bitbucket.org/henrycg/riposte/utils"
+	//"bitbucket.org/henrycg/riposte/utils"
 )
 
-func prfEval(key []byte, idx int) *big.Int {
+func proofPrfSetup(key []byte) cipher.Block {
+	cipher, err := aes.NewCipher(key)
+	if err != nil {
+		panic("Cipher error")
+	}
+	return cipher
+}
+
+func proofPrfEval(aes cipher.Block, idx int) *big.Int {
 	//size := 16
 	out := new(big.Int)
-	cipher, _ := aes.NewCipher(key)
-	enc := make([]byte, 32)
+	enc := make([]byte, 16)
 	in := make([]byte, 16)
 
 	binary.LittleEndian.PutUint64(in[0:], uint64(idx))
-	cipher.Encrypt(enc, in)
-
-	binary.LittleEndian.PutUint64(in[8:], 1)
-	cipher.Encrypt(enc[16:], in)
+	aes.Encrypt(enc, in)
 
 	out.SetBytes(enc)
 	out.Mod(out, IntModulus)
 	return out
 }
 
-func getTestValues(key []byte, msg *big.Int, idx int) (*big.Int, *big.Int) {
-	r := prfEval(key, idx)
-
+// Set
+//   z1 = z1 + (m*r)
+//   z2 = z2 + (m*r^2)
+// Tmp is a temporary value
+func updateTestValues(z1, z2, m, r, tmp *big.Int) {
 	// z1 = <m, r_i>
-	z1 := new(big.Int)
-	z1.Mul(r, msg)
+	tmp.Mul(r, m)
+	z1.Add(z1, tmp)
 	z1.Mod(z1, IntModulus)
 
 	// z2 = <m, r^2_i>
-	z2 := new(big.Int)
-	z2.Mul(r, r)
-	z2.Mod(z2, IntModulus)
-	z2.Mul(msg, z2)
+	tmp.Mul(tmp, r)
+	z2.Add(z2, tmp)
 	z2.Mod(z2, IntModulus)
 
+	//log.Printf("z1=%v, z2=%v, m=%v, r=%v", z1, z2, m, r)
+}
+
+/*
+func getTestValues(key []byte, msg *big.Int, idx int) (*big.Int, *big.Int) {
+	z1 := new(big.Int)
+	z2 := new(big.Int)
+	tmp := new(big.Int)
+
+	r := proofPrfEval(proofPrfSetup(key), idx)
+	updateTestValues(z1, z2, msg, r, tmp)
 	return z1, z2
+}*/
+
+func updateRowTestValues(row *BitMatrixRow, yIdx int, isServerB bool,
+	hashKey *[32]byte, aes cipher.Block, z1 *big.Int, z2 *big.Int, tmp *big.Int) {
+
+	for x := 0; x < TABLE_WIDTH; x++ {
+		// Hash contents of row using poly1305
+		msg := SlotToInt(hashKey, row[x*SLOT_LENGTH:(x+1)*SLOT_LENGTH])
+		if isServerB {
+			msg.Sub(IntModulus, msg)
+		}
+
+		// Compute sketch values
+		idx := xyToInt(x, yIdx)
+		//log.Printf("Idx", idx)
+		r := proofPrfEval(aes, idx)
+
+		// Update sketch values
+		updateTestValues(z1, z2, msg, r, tmp)
+	}
 }
 
 /*
@@ -65,17 +100,13 @@ func getTestValueShares(key []byte, msg *big.Int) (*big.Int, *big.Int) {
 }
 */
 
+/*
 func makeProof(chal [16]byte, msg *big.Int, idx int) []MulProof {
 	out := make([]MulProof, 2)
-	var seed utils.PRGKey
-	copy(seed[:], chal[0:16])
 
-	prg := NewReplayPRG()
-	prg.Import(seed)
+	z1, z2 := getTestValues(chal[:], msg, idx)
 
-	prfKey := chal[16:]
-	z1, z2 := getTestValues(prfKey, msg, idx)
-
+	log.Printf("REMOVE SANITY CHECK")
 	// Sanity test
 	//   Should be that z1^2 = m . z_2
 	t1 := new(big.Int)
@@ -95,3 +126,4 @@ func makeProof(chal [16]byte, msg *big.Int, idx int) []MulProof {
 
 	return out
 }
+*/

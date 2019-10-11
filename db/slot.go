@@ -2,6 +2,7 @@ package db
 
 import (
 	"crypto/rand"
+	//"log"
 	"math/big"
 	"reflect"
 	"unsafe"
@@ -25,14 +26,17 @@ func RandomSlot(slot *SlotContents) error {
 	return err
 }
 
-func HashSlot(hashKey *[32]byte, slot *SlotContents) [16]byte {
+func HashSlot(hashKey *[32]byte, slot []byte) [16]byte {
 	var out [16]byte
-	poly1305.Sum(&out, slot[:], hashKey)
+	//log.Printf("slot %v", slot)
+	//log.Printf("key %v", hashKey)
+	poly1305.Sum(&out, slot, hashKey)
 	return out
 }
 
-func SlotToInt(hashKey *[32]byte, slot *SlotContents) *big.Int {
-	h := HashSlot(hashKey, slot)
+func SlotToInt(hashKey *[32]byte, slot []byte) *big.Int {
+	h := HashSlot(hashKey, slot[:])
+	//log.Printf("h=%v", h)
 	out := new(big.Int)
 	out.SetBytes(h[:])
 	return out

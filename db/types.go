@@ -13,14 +13,14 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2 //1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 32
+const TABLE_WIDTH int = 128
 const TABLE_HEIGHT int = 32 //100 / TABLE_WIDTH
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 128
 
 // Length of plaintext messages (in bytes)
-const SLOT_LENGTH int = 8 // 64 KB
+const SLOT_LENGTH int = 32 // 64 KB
 
 type BitMatrix [TABLE_HEIGHT]BitMatrixRow
 type BitMatrixRow [TABLE_WIDTH * SLOT_LENGTH]byte
@@ -136,14 +136,19 @@ type DumpReply struct {
 }
 
 type PrepareArgs struct {
-	Uuid   int64
-	Query1 EncryptedInsertQuery
-	Query2 EncryptedInsertQuery
-	Query3 EncryptedInsertQuery
+	Uuid      int64
+	HashKey   [32]byte
+	Challenge [16]byte
+	Query1    EncryptedInsertQuery
+	Query2    EncryptedInsertQuery
+	Query3    EncryptedInsertQuery
 }
 
 type PrepareReply struct {
 	QueryAnswers *big.Int
+	ZShare1      *big.Int
+	ZShare2      *big.Int
+	MsgShare     *big.Int
 }
 
 type CommitArgs struct {

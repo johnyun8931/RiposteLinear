@@ -26,7 +26,7 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	var upRes1 db.UploadReply1
 	var upArgs1 db.UploadArgs1
 
-	err := db.InitializeUploadArgs(&upArgs1, msg, *bogusFlag)
+	msgBitShares, err := db.InitializeUploadArgs(&upArgs1, msg, *bogusFlag)
 	if err != nil {
 		panic("Error initializing upload args")
 	}
@@ -44,7 +44,7 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	}
 
 	var upRes2 db.UploadReply2
-	upArgs2 := db.SetUploadArgs2(msg, &upArgs1, &upRes1)
+	upArgs2 := db.SetUploadArgs2(msgBitShares, &upArgs1, &upRes1)
 
 	// Get second msg
 	err = client.Call("Server.Upload2", &upArgs2, &upRes2)

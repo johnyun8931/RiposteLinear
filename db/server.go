@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/big"
 	"net/rpc"
 	"time"
 
@@ -55,6 +56,8 @@ func (t *Server) Upload1(args *UploadArgs1, reply *UploadReply1) error {
 	utils.RandBytes(tup.hashKey[:])
 	utils.RandBytes(tup.challenge[:])
 
+	log.Printf("HashKey1=%v", tup.hashKey)
+
 	reply.Uuid = uuid
 	copy(reply.HashKey[:], tup.hashKey[:])
 
@@ -83,7 +86,7 @@ func (t *Server) Upload2(args *UploadArgs2, reply *UploadReply2) error {
 	t.acceptedMutex.Unlock()
 
 	if !okay || !bytes.Equal(data.hashKey[:], args.HashKey[:]) {
-		//log.Printf("left: %v, right: %v", data.hashKey[:], args.HashKey[:])
+		log.Printf("left: %v, right: %v", data.hashKey[:], args.HashKey[:])
 		return errors.New("Bogus UUID")
 	}
 
@@ -155,6 +158,9 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	tup := t.accepted[uuid]
 	for i := 0; i < NUM_SERVERS; i++ {
 		preps[i].Uuid = uuid
+		copy(preps[i].HashKey[:], tup.hashKey[:])
+		copy(preps[i].Challenge[:], tup.challenge[:])
+		log.Printf("Hashkey %v", preps[i].HashKey)
 		preps[i].Query1 = tup.args1.Query[i]
 		preps[i].Query2 = tup.args2.Query[i]
 		preps[i].Query3 = tup.args3.Query[i]
@@ -169,6 +175,10 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	var replies [NUM_SERVERS]PrepareReply
 	for i := 0; i < NUM_SERVERS; i++ {
 		go func(prep *PrepareArgs, reply *PrepareReply, j int) {
+			reply.QueryAnswers = new(big.Int)
+			reply.ZShare1 = new(big.Int)
+			reply.ZShare2 = new(big.Int)
+			reply.MsgShare = new(big.Int)
 			err := t.rpcClients[j].Call("Server.Prepare", prep, reply)
 			if err != nil {
 				c <- err
@@ -188,6 +198,30 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	}
 
 	// Insert error checking here
+	z1 := new(big.Int)
+	z2 := new(big.Int)
+	msg := new(big.Int)
+
+	for i := 0; i < NUM_SERVERS; i++ {
+		z1.Add(z1, replies[i].ZShare1)
+		z2.Add(z2, replies[i].ZShare2)
+		msg.Add(msg, replies[i].MsgShare)
+	}
+
+	z1.Mod(z1, IntModulus)
+	z2.Mod(z2, IntModulus)
+	msg.Mod(msg, IntModulus)
+
+	// Want that z1^2 = m * z2
+	z2.Mul(z2, msg)
+	z1.Mul(z1, z1)
+	z1.Mod(z1, IntModulus)
+	z2.Mod(z2, IntModulus)
+	log.Printf("m=%v, z1=%v, z2=%v", msg, z1, z2)
+	if z1.Cmp(z2) != 0 {
+		log.Printf("FAIL!!!!!!!")
+	}
+
 	okay := true
 	return okay
 }
@@ -308,6 +342,8 @@ func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
 func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	tup := new(InsertQueryTuple)
 
+	copy(tup.hashKey[:], prep.HashKey[:])
+	copy(tup.challenge[:], prep.Challenge[:])
 	err := DecryptQuery(t.ServerIdx, prep.Query1, &tup.q1)
 	if err != nil {
 		panic("Decryption error")
@@ -327,14 +363,17 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	t.pending[prep.Uuid] = tup
 	t.pendingMutex.Unlock()
 
-	t.entries.processQuery(tup)
+	t.entries.processQuery(tup, reply, t.ServerIdx == 1)
+
+	log.Printf("z1 = %v", reply.ZShare1)
+	log.Printf("z2 = %v", reply.ZShare2)
 
 	return nil
 }
 
 func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 	t.pendingMutex.Lock()
-	query, ok := t.pending[com.Uuid]
+	_, ok := t.pending[com.Uuid]
 	t.pendingMutex.Unlock()
 
 	if !ok {
@@ -346,7 +385,11 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 		// Remove query from the database, since it
 		// was malformed.
 		log.Printf("Removing bogus query %v from DB", com.Uuid)
-		t.entries.processQuery(query)
+
+		panic("Got bogus query")
+		// XXX: In a production implementation, we would expand
+		// the DPF key and remove this bogus update to the database
+		// by XORing the DPF key back into the database shares.
 	}
 
 	t.pendingMutex.Lock()

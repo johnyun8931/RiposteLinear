@@ -10,8 +10,7 @@ import (
 
 var curve = utils.CommonCurve
 
-func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) error {
-
+func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) ([]SlotContents, error) {
 	// Create random values for secret sharing
 	var keys [TABLE_HEIGHT]prf.Key
 	var keysP [TABLE_HEIGHT]prf.Key
@@ -32,19 +31,21 @@ func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) err
 	var err error
 	keysP[msg.Y], err = prf.NewKey()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	msgMask, err = computeMessageMask(keys[msg.Y], keysP[msg.Y], msg)
+	msgMask, msgBitShares, err := computeMessageMask(keys[msg.Y], keysP[msg.Y], msg, keyMask[msg.Y])
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if corrupted {
-		log.Printf("Bogus!")
-		msgMask[2] = 0xff
-		keys[1][1] = 0xff
-	}
+	/*
+		if corrupted {
+			log.Printf("Bogus!")
+			msgMask[2] = 0xff
+			keys[1][1] = 0xff
+		}
+	*/
 
 	plainQueries := make([]InsertQuery1, 2)
 	for i := 0; i < NUM_SERVERS; i++ {
@@ -66,29 +67,37 @@ func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) err
 			log.Fatal("Could not encrypt: ", err)
 		}
 	}
-	return nil
+
+	return msgBitShares, nil
 }
 
-func SetUploadArgs2(msg *Plaintext, upArgs1 *UploadArgs1, upRes1 *UploadReply1) *UploadArgs2 {
+func SetUploadArgs2(msgIntShares []SlotContents,
+	upArgs1 *UploadArgs1, upRes1 *UploadReply1) *UploadArgs2 {
 	out := new(UploadArgs2)
 	copy(out.HashKey[:], upRes1.HashKey[:])
 	out.Uuid = upRes1.Uuid
 
-	// Hash message using hash fn specified by HashKey
-	_, shares := computeMessageShares(&out.HashKey, &msg.Message)
+	//log.Printf("msgInt=%v", msgInt)
 
 	// Split hash into shares
 	var err error
 	var queries [2]InsertQuery2
+	mint := new(big.Int)
 	for i := 0; i < len(queries); i++ {
-		queries[i].MsgShare = shares[i]
-		log.Printf("%v => %v", shares[i])
+		queries[i].MsgShare = SlotToInt(&upRes1.HashKey, msgIntShares[i][:])
+		if i == 1 {
+			queries[i].MsgShare.Sub(IntModulus, queries[i].MsgShare)
+		}
+		log.Printf("%v => %v", upRes1.HashKey, queries[i].MsgShare)
 		out.Query[i], err = EncryptQuery(i, &queries[i])
 		if err != nil {
 			panic("Encrypt error")
 		}
-	}
 
+		mint.Add(mint, queries[i].MsgShare)
+	}
+	mint.Mod(mint, IntModulus)
+	log.Printf("mint: %v", mint)
 	return out
 }
 
@@ -116,31 +125,44 @@ func SetUploadArgs3(msg *Plaintext,
 	return out
 }
 
-func computeMessageShares(hashKey *[32]byte, msg *SlotContents) (*big.Int, []*big.Int) {
-	h := SlotToInt(hashKey, msg)
-	return h, Share(h)
-}
-
-func computeMessageMask(key prf.Key, keyP prf.Key, msg *Plaintext) (BitMatrixRow, error) {
+func computeMessageMask(key prf.Key, keyP prf.Key, msg *Plaintext, xorBit bool) (BitMatrixRow,
+	[]SlotContents, error) {
+	slotShares := make([]SlotContents, 2)
 
 	var msgMask BitMatrixRow
-	prfA, err := prf.NewPrf(key)
+	var prfOut0 BitMatrixRow
+	var prfOut1 BitMatrixRow
+	prf0, err := prf.NewPrf(key)
 	if err != nil {
-		return msgMask, err
+		return msgMask, slotShares, err
 	}
 
-	prfB, err := prf.NewPrf(keyP)
+	prf1, err := prf.NewPrf(keyP)
 	if err != nil {
-		return msgMask, err
+		return msgMask, slotShares, err
 	}
 
-	prfA.Evaluate(msgMask[:])
-	prfB.Evaluate(msgMask[:])
+	prf0.Evaluate(prfOut0[:])
+	prf1.Evaluate(prfOut1[:])
 
 	msg_row := MessageToRow(msg)
+	XorRows(&msgMask, &prfOut0)
+	XorRows(&msgMask, &prfOut1)
 	XorRows(&msgMask, &msg_row)
 
-	return msgMask, nil
+	start := msg.X * SLOT_LENGTH
+	end := (msg.X + 1) * SLOT_LENGTH
+	if xorBit {
+		xorEq(slotShares[0][:], msg.Message[:])
+		xorEq(slotShares[0][:], prfOut1[start:end])
+		copy(slotShares[1][:], prfOut1[start:end])
+	} else {
+		xorEq(slotShares[0][:], prfOut0[start:end])
+		xorEq(slotShares[1][:], msg.Message[:])
+		xorEq(slotShares[1][:], prfOut0[start:end])
+	}
+
+	return msgMask, slotShares, nil
 }
 
 func ComputeProofVector(keys []prf.Key, keyMask []bool) [][]byte {
