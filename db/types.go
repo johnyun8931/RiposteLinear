@@ -108,13 +108,12 @@ type InsertQuery1 struct {
 }
 
 type InsertQuery2 struct {
-	Uuid     int64
 	MsgShare *big.Int
 }
 
 type InsertQuery3 struct {
-	Uuid int64
-	Tag  int64
+	TShare1 *big.Int
+	TShare2 *big.Int
 }
 
 type UploadReply1 struct {
@@ -146,9 +145,15 @@ type PrepareArgs struct {
 
 type PrepareReply struct {
 	QueryAnswers *big.Int
-	ZShare1      *big.Int
-	ZShare2      *big.Int
 	MsgShare     *big.Int
+
+	ZShare1 *big.Int
+	ZShare2 *big.Int
+
+	TShare1 *big.Int
+	TShare2 *big.Int
+
+	OutShare *big.Int
 }
 
 type CommitArgs struct {

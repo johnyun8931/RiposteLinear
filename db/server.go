@@ -178,6 +178,8 @@ func (t *Server) submitPrepares(uuid int64) bool {
 			reply.QueryAnswers = new(big.Int)
 			reply.ZShare1 = new(big.Int)
 			reply.ZShare2 = new(big.Int)
+			reply.TShare1 = new(big.Int)
+			reply.TShare2 = new(big.Int)
 			reply.MsgShare = new(big.Int)
 			err := t.rpcClients[j].Call("Server.Prepare", prep, reply)
 			if err != nil {
@@ -200,24 +202,42 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	// Insert error checking here
 	z1 := new(big.Int)
 	z2 := new(big.Int)
+	t1 := new(big.Int)
+	t2 := new(big.Int)
+	out := new(big.Int)
 	msg := new(big.Int)
 
 	for i := 0; i < NUM_SERVERS; i++ {
 		z1.Add(z1, replies[i].ZShare1)
 		z2.Add(z2, replies[i].ZShare2)
+		t1.Add(t1, replies[i].TShare1)
+		t2.Add(t2, replies[i].TShare2)
+		out.Add(out, replies[i].OutShare)
 		msg.Add(msg, replies[i].MsgShare)
 	}
 
 	z1.Mod(z1, IntModulus)
 	z2.Mod(z2, IntModulus)
+	t1.Mod(t1, IntModulus)
+	t2.Mod(t2, IntModulus)
+	out.Mod(out, IntModulus)
 	msg.Mod(msg, IntModulus)
+
+	if out.Sign() != 0 {
+		log.Printf("FAIL!!!!!!!! <<<<< 1")
+	}
+
+	// Want that t1 = t2
+	if t1.Cmp(t2) != 0 {
+		log.Printf("FAIL!!!!!!!! <<<<< 1")
+	}
 
 	// Want that z1^2 = m * z2
 	z2.Mul(z2, msg)
 	z1.Mul(z1, z1)
 	z1.Mod(z1, IntModulus)
 	z2.Mod(z2, IntModulus)
-	log.Printf("m=%v, z1=%v, z2=%v", msg, z1, z2)
+	log.Printf("m=%v, z1=%v, z2=%v, t1=%v, t2=%v", msg, z1, z2, t1, t2)
 	if z1.Cmp(z2) != 0 {
 		log.Printf("FAIL!!!!!!!")
 	}
@@ -363,8 +383,17 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	t.pending[prep.Uuid] = tup
 	t.pendingMutex.Unlock()
 
+	reply.TShare1 = tup.q3.TShare1
+	reply.TShare2 = tup.q3.TShare2
+
+	reply.OutShare = new(big.Int)
+	reply.OutShare.Sub(tup.q3.TShare1, tup.q3.TShare2)
+	reply.OutShare.Mod(reply.OutShare, IntModulus)
+
 	t.entries.processQuery(tup, reply, t.ServerIdx == 1)
 
+	log.Printf("t1 = %v", reply.TShare1)
+	log.Printf("t2 = %v", reply.TShare2)
 	log.Printf("z1 = %v", reply.ZShare1)
 	log.Printf("z2 = %v", reply.ZShare2)
 

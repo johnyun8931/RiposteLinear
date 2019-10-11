@@ -44,7 +44,7 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	}
 
 	var upRes2 db.UploadReply2
-	upArgs2 := db.SetUploadArgs2(msgBitShares, &upArgs1, &upRes1)
+	mint, upArgs2 := db.SetUploadArgs2(msgBitShares, &upArgs1, &upRes1)
 
 	// Get second msg
 	err = client.Call("Server.Upload2", &upArgs2, &upRes2)
@@ -54,7 +54,7 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	}
 
 	var upRes3 db.UploadReply3
-	upArgs3 := db.SetUploadArgs3(msg, &upArgs1, &upRes1, upArgs2, &upRes2)
+	upArgs3 := db.SetUploadArgs3(msg, mint, &upArgs1, &upRes1, upArgs2, &upRes2)
 
 	// Get third msg
 	err = client.Call("Server.Upload3", &upArgs3, &upRes3)

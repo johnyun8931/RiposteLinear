@@ -5,6 +5,7 @@ import (
 	"math/big"
 
 	"bitbucket.org/henrycg/riposte/prf"
+	"bitbucket.org/henrycg/riposte/prg"
 	"bitbucket.org/henrycg/riposte/utils"
 )
 
@@ -71,8 +72,8 @@ func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) ([]
 	return msgBitShares, nil
 }
 
-func SetUploadArgs2(msgIntShares []SlotContents,
-	upArgs1 *UploadArgs1, upRes1 *UploadReply1) *UploadArgs2 {
+func SetUploadArgs2(msgBitShares []SlotContents,
+	upArgs1 *UploadArgs1, upRes1 *UploadReply1) (*big.Int, *UploadArgs2) {
 	out := new(UploadArgs2)
 	copy(out.HashKey[:], upRes1.HashKey[:])
 	out.Uuid = upRes1.Uuid
@@ -84,7 +85,7 @@ func SetUploadArgs2(msgIntShares []SlotContents,
 	var queries [2]InsertQuery2
 	mint := new(big.Int)
 	for i := 0; i < len(queries); i++ {
-		queries[i].MsgShare = SlotToInt(&upRes1.HashKey, msgIntShares[i][:])
+		queries[i].MsgShare = SlotToInt(&upRes1.HashKey, msgBitShares[i][:])
 		if i == 1 {
 			queries[i].MsgShare.Sub(IntModulus, queries[i].MsgShare)
 		}
@@ -98,23 +99,29 @@ func SetUploadArgs2(msgIntShares []SlotContents,
 	}
 	mint.Mod(mint, IntModulus)
 	log.Printf("mint: %v", mint)
-	return out
+	return mint, out
 }
 
-func SetUploadArgs3(msg *Plaintext,
+func SetUploadArgs3(msg *Plaintext, msgInt *big.Int,
 	upArgs1 *UploadArgs1, upRes1 *UploadReply1,
 	upArgs2 *UploadArgs2, upRes2 *UploadReply2) *UploadArgs3 {
 	out := new(UploadArgs3)
 	copy(out.HashKey[:], upRes1.HashKey[:])
 	out.Uuid = upRes1.Uuid
 
+	t1 := new(big.Int)
+	t2 := new(big.Int)
 	// Compute test values and proof
-	//makeProof()
+	getTestValues(&upRes1.HashKey, msg, msgInt, t1, t2)
+
+	t1Shares := prg.Share(IntModulus, t1)
+	t2Shares := prg.Share(IntModulus, t2)
 
 	var err error
 	var queries [2]InsertQuery3
 	for i := 0; i < len(queries); i++ {
-		//queries[i].MsgShare = shares[i]
+		queries[i].TShare1 = t1Shares[i]
+		queries[i].TShare2 = t2Shares[i]
 		//log.Printf("%v => %v", shares[i])
 		out.Query[i], err = EncryptQuery(i, &queries[i])
 		if err != nil {

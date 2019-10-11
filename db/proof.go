@@ -81,49 +81,22 @@ func updateRowTestValues(row *BitMatrixRow, yIdx int, isServerB bool,
 	}
 }
 
-/*
-func getTestValueShares(key []byte, msg *big.Int) (*big.Int, *big.Int) {
-	maxLen := xyToInt(TABLE_WIDTH-1, TABLE_HEIGHT-1)
+func getTestValues(hashKey *[32]byte, plain *Plaintext, msgInt, t1, t2 *big.Int) {
+	idx := xyToInt(plain.X, plain.Y)
+	r := proofPrfEval(proofPrfSetup(hashKey[:]), idx)
 
-	t1share := new(big.Int)
-	t2share := new(big.Int)
+	// Set
+	//  z1 = <m, r>
+	//  z2 = <m, r^2>
+	updateTestValues(t1, t2, msgInt, r, new(big.Int))
 
-		for i := 0; i < maxLen; i++ {
+	// Set
+	//  t1 = z1^2
+	//  t2 = z2*m
 
-			// Compute [z1] = <[x_i], [r_i]>
-
-			// Compute [z2] = <[x_i], [r^2_i]>
-
-		}
-
-	return t1share, t2share
-}
-*/
-
-/*
-func makeProof(chal [16]byte, msg *big.Int, idx int) []MulProof {
-	out := make([]MulProof, 2)
-
-	z1, z2 := getTestValues(chal[:], msg, idx)
-
-	log.Printf("REMOVE SANITY CHECK")
-	// Sanity test
-	//   Should be that z1^2 = m . z_2
-	t1 := new(big.Int)
-	t1.Mul(z1, z1)
+	t1.Mul(t1, t1)
 	t1.Mod(t1, IntModulus)
 
-	t2 := new(big.Int)
-	t2.Mul(msg, z2)
+	t2.Mul(t2, msgInt)
 	t2.Mod(t2, IntModulus)
-
-	if t1.Cmp(t2) != 0 {
-		panic("fail")
-	}
-
-	log.Printf("t1 %v", t1)
-	log.Printf("t2 %v", t2)
-
-	return out
 }
-*/

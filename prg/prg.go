@@ -1,4 +1,4 @@
-package db
+package prg
 
 import (
 	"math/big"
@@ -37,20 +37,19 @@ func (p *ReplayPRG) Get(mod *big.Int) *big.Int {
 }
 
 // Split the value secret into two shares modulo mod.
-func Share(secret *big.Int) []*big.Int {
-	nPieces := 2
-	out := make([]*big.Int, nPieces)
+func Share(mod *big.Int, nShares int, secret *big.Int) []*big.Int {
+	out := make([]*big.Int, nShares)
 
 	acc := new(big.Int)
-	for i := 0; i < nPieces-1; i++ {
-		out[i] = utils.RandInt(IntModulus)
+	for i := 0; i < nShares-1; i++ {
+		out[i] = utils.RandInt(mod)
 
 		acc.Add(acc, out[i])
 	}
 
 	acc.Sub(secret, acc)
-	acc.Mod(acc, IntModulus)
-	out[nPieces-1] = acc
+	acc.Mod(acc, mod)
+	out[nShares-1] = acc
 
 	return out
 }
