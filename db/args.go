@@ -116,7 +116,7 @@ func SetUploadArgs3(msg *Plaintext, msgInt *big.Int,
 	z2 := new(big.Int)
 
 	// Compute test values and proof
-	getTestValues(&upRes1.HashKey, msg, msgInt, z1, z2, t1, t2)
+	getTestValues(&upRes2.Challenge, &upRes1.HashKey, msg, msgInt, z1, z2, t1, t2)
 
 	t1Shares := prg.Share(IntModulus, 2, t1)
 	t2Shares := prg.Share(IntModulus, 2, t2)

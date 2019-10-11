@@ -238,6 +238,18 @@ func (t *Server) submitPrepares(uuid int64) bool {
 		log.Printf("z2 %v", z2)
 	}
 
+	// z1^1 =? m * z2
+	tmp2 := new(big.Int)
+	tmp.Mul(z1, z1)
+	tmp.Mod(tmp, IntModulus)
+	tmp2.Mul(msg, z2)
+	tmp2.Mod(tmp2, IntModulus)
+	if tmp.Cmp(tmp2) != 0 {
+		log.Printf("z1^2 != m*z2")
+	} else {
+		log.Printf("VERY GOOD")
+	}
+
 	// out = t1 - t2
 	tmp.Sub(t1, t2)
 	tmp.Mod(tmp, IntModulus)
@@ -412,22 +424,14 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
 	zShare1 := new(big.Int)
 	zShare2 := new(big.Int)
 	t.entries.processQuery(tup, reply, t.ServerIdx == 1, zShare1, zShare2)
-	log.Printf("z1=%v, z2=%v", zShare1, zShare2)
 
 	// Check that t1 = z1^2
 	reply.AnsShare1 = mulproof.Query(IntModulus, prep.RandomPoint, &tup.q3.TProof1,
 		zShare1, zShare1, tup.q3.TShare1)
 
-	log.Printf("Ans %v, %v, %v", reply.AnsShare1.F_R, reply.AnsShare1.G_R, reply.AnsShare1.H_R)
 	// Check that t2 = m*z2
 	reply.AnsShare2 = mulproof.Query(IntModulus, prep.RandomPoint, &tup.q3.TProof2,
 		tup.q2.MsgShare, zShare2, tup.q3.TShare2)
-
-	log.Printf("PT = %v", prep.RandomPoint)
-	log.Printf("F_0 = %v", tup.q3.TProof1.F_0)
-	log.Printf("F_0 = %v", tup.q3.TProof2.F_0)
-	log.Printf("T1 = %v", tup.q3.TShare1)
-	log.Printf("T2 = %v", tup.q3.TShare2)
 
 	reply.ZShare1 = zShare1
 	reply.ZShare2 = zShare2
