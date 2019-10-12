@@ -17,13 +17,13 @@ import (
 )
 
 // Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 5
+const MERGE_TIME_DELAY time.Duration = 30
 
 // Number of pending requests that leader can buffer
 const READY_BUFFER_SIZE = 100
 
 // Number of server-side requests to allow in flight
-const WORKER_THREADS = 128
+const WORKER_THREADS = 16
 
 func (t *Server) isLeader() bool {
 	return (t.ServerIdx == 0)
@@ -412,15 +412,17 @@ func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) erro
 	t.plainMutex.Lock()
 	t.plain = args.Plaintext
 
-	var zeros SlotContents
-	for i := range t.plain {
-		for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
-			msg := t.plain[i][j:(j + SLOT_LENGTH)]
-			if bytes.Compare(zeros[:], msg) != 0 {
-				log.Printf("Got msg: %v", msg)
+	/*
+		var zeros SlotContents
+		for i := range t.plain {
+			for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
+				msg := t.plain[i][j:(j + SLOT_LENGTH)]
+				if bytes.Compare(zeros[:], msg) != 0 {
+					log.Printf("Got msg: %v", msg)
+				}
 			}
 		}
-	}
+	*/
 
 	t.plainMutex.Unlock()
 

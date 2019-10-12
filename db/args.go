@@ -14,7 +14,7 @@ var curve = utils.CommonCurve
 
 func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) ([]SlotContents, error) {
 
-	log.Printf("Msg: %v", msg.Message)
+	//log.Printf("Msg: %v", msg.Message)
 	// Create random values for secret sharing
 	var keys [TABLE_HEIGHT]prf.Key
 	var keysP [TABLE_HEIGHT]prf.Key
@@ -88,7 +88,8 @@ func SetUploadArgs2(msgBitShares []SlotContents,
 	var queries [2]InsertQuery2
 	mint := new(big.Int)
 	for i := 0; i < len(queries); i++ {
-		queries[i].MsgShare = SlotToInt(&upRes1.HashKey, msgBitShares[i][:])
+		queries[i].MsgShare = new(big.Int)
+		SlotToInt(queries[i].MsgShare, &upRes1.HashKey, msgBitShares[i][:], true)
 		if i == 1 {
 			queries[i].MsgShare.Sub(IntModulus, queries[i].MsgShare)
 		}

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strings"
+	"time"
 )
 
 import (
@@ -94,6 +95,7 @@ func main() {
 		// Stop on ^C
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, os.Interrupt)
+		signal.Notify(c, os.Kill)
 		go func() {
 			for _ = range c {
 				// sig is a ^C, handle it

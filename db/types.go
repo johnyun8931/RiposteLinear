@@ -14,14 +14,14 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2 //1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 64
-const TABLE_HEIGHT int = 32 //100 / TABLE_WIDTH
+const TABLE_WIDTH int = 1024
+const TABLE_HEIGHT int = 64 //100 / TABLE_WIDTH
 
 // Number of upload requests to buffer
 const REQ_BUFFER_SIZE int = 128
 
 // Length of plaintext messages (in bytes)
-const SLOT_LENGTH int = 256 // 64 KB
+const SLOT_LENGTH int = 160 // 64 KB
 
 type BitMatrix [TABLE_HEIGHT]BitMatrixRow
 type BitMatrixRow [TABLE_WIDTH * SLOT_LENGTH]byte

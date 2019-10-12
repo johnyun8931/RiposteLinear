@@ -34,13 +34,13 @@ func HashSlot(hashKey *[32]byte, slot []byte) [16]byte {
 	return out
 }
 
-func SlotToInt(hashKey *[32]byte, slot []byte) *big.Int {
+func SlotToInt(out *big.Int, hashKey *[32]byte, slot []byte, modReduce bool) {
 	h := HashSlot(hashKey, slot[:])
 	//log.Printf("h=%v", h)
-	out := new(big.Int)
 	out.SetBytes(h[:])
-	out.Mod(out, IntModulus)
-	return out
+	if modReduce {
+		out.Mod(out, IntModulus)
+	}
 }
 
 /* Copied from
