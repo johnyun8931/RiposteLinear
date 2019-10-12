@@ -19,11 +19,14 @@ import (
 // Time to wait between merges (in seconds)
 const MERGE_TIME_DELAY time.Duration = 30
 
+// Time to wait between printing stats (in seconds)
+const STATS_DELAY time.Duration = 10
+
 // Number of pending requests that leader can buffer
-const READY_BUFFER_SIZE = 100
+const READY_BUFFER_SIZE = 400
 
 // Number of server-side requests to allow in flight
-const WORKER_THREADS = 16
+const WORKER_THREADS = 4
 
 func (t *Server) isLeader() bool {
 	return (t.ServerIdx == 0)
@@ -39,7 +42,7 @@ func (t *Server) Upload1(args *UploadArgs1, reply *UploadReply1) error {
 	}
 	<-t.incoming1
 
-	log.Printf("Got upload request")
+	//log.Printf("Got upload request")
 	//log.Printf("Request:", args)
 
 	uuid, err := utils.RandomInt64(math.MaxInt64)
@@ -74,7 +77,7 @@ func (t *Server) Upload2(args *UploadArgs2, reply *UploadReply2) error {
 	}
 	<-t.incoming2
 
-	log.Printf("Got Upload2 request")
+	//log.Printf("Got Upload2 request")
 
 	t.acceptedMutex.Lock()
 	data, okay := t.accepted[args.Uuid]
@@ -99,7 +102,7 @@ func (t *Server) Upload3(args *UploadArgs3, reply *UploadReply3) error {
 	}
 	<-t.incoming3
 
-	log.Printf("Got Upload3 request")
+	//log.Printf("Got Upload3 request")
 	//log.Printf("Request:", args)
 
 	t.acceptedMutex.Lock()
@@ -266,15 +269,21 @@ func (t *Server) mergeWorker() {
 	}
 }
 
+func (t *Server) printStats() {
+	for {
+		time.Sleep(STATS_DELAY * time.Second)
+		t.clientsServedMutex.Lock()
+		t.clientsTotal += t.clientsServed
+		t.clientsServedMutex.Unlock()
+
+		rate := float64(t.clientsServed) / float64(STATS_DELAY)
+		log.Printf("Served %v requests at %v reqs/sec [since start: %v]", t.clientsServed, rate, t.clientsTotal)
+		t.clientsServed = 0
+	}
+}
+
 func (t *Server) sendMergeRequest() {
 	t.acceptedMutex.Lock()
-	t.clientsServedMutex.Lock()
-	t.clientsTotal += t.clientsServed
-	t.clientsServedMutex.Unlock()
-
-	rate := float64(t.clientsServed) / float64(MERGE_TIME_DELAY)
-	log.Printf("Served %v requests at %v reqs/sec [since start: %v]", t.clientsServed, rate, t.clientsTotal)
-	t.clientsServed = 0
 
 	// Call each server and ask for their data
 	// Send out COMMIT request
@@ -493,6 +502,7 @@ func (t *Server) Initialize(*int, *int) error {
 		t.incoming3 = make(chan bool, READY_BUFFER_SIZE)
 		t.ready = make(chan int64, READY_BUFFER_SIZE)
 		go t.mergeWorker()
+		go t.printStats()
 
 		for i := 0; i < WORKER_THREADS; i++ {
 			go t.processRequest()

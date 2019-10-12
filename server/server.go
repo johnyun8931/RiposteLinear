@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strings"
-	"time"
 )
 
 import (
