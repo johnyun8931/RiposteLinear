@@ -14,11 +14,11 @@ const NUM_DIMENSIONS = 2
 const NUM_SERVERS = 2 //1 << NUM_DIMENSIONS
 
 // Size of a side of the data array
-const TABLE_WIDTH int = 1024
-const TABLE_HEIGHT int = 64 //100 / TABLE_WIDTH
+const TABLE_WIDTH int = 256
+const TABLE_HEIGHT int = 65536 / TABLE_WIDTH
 
 // Number of upload requests to buffer
-const REQ_BUFFER_SIZE int = 128
+const REQ_BUFFER_SIZE int = 64
 
 // Length of plaintext messages (in bytes)
 const SLOT_LENGTH int = 160 // 64 KB
@@ -27,8 +27,11 @@ type BitMatrix [TABLE_HEIGHT]BitMatrixRow
 type BitMatrixRow [TABLE_WIDTH * SLOT_LENGTH]byte
 
 type SlotTable struct {
-	table      BitMatrix
-	tableMutex sync.Mutex
+	table BitMatrix
+
+	// Each worker gets its own copy of the whole table
+	freeTables  chan int
+	localTables [WORKER_THREADS]BitMatrix
 }
 
 var IntModulus *big.Int
@@ -174,6 +177,7 @@ type Server struct {
 
 	clientsTotal       int
 	clientsServed      int
+	rateHistory        []float64
 	clientsServedMutex sync.Mutex
 
 	accepted      map[int64](*AcceptQueryTuple)

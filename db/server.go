@@ -17,7 +17,7 @@ import (
 )
 
 // Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 30
+const MERGE_TIME_DELAY time.Duration = 14 * 3600
 
 // Time to wait between printing stats (in seconds)
 const STATS_DELAY time.Duration = 10
@@ -26,7 +26,7 @@ const STATS_DELAY time.Duration = 10
 const READY_BUFFER_SIZE = 400
 
 // Number of server-side requests to allow in flight
-const WORKER_THREADS = 4
+const WORKER_THREADS = 16
 
 func (t *Server) isLeader() bool {
 	return (t.ServerIdx == 0)
@@ -274,10 +274,21 @@ func (t *Server) printStats() {
 		time.Sleep(STATS_DELAY * time.Second)
 		t.clientsServedMutex.Lock()
 		t.clientsTotal += t.clientsServed
-		t.clientsServedMutex.Unlock()
 
 		rate := float64(t.clientsServed) / float64(STATS_DELAY)
+		t.rateHistory = append(t.rateHistory, rate)
+		// Keep last 10
+		t.rateHistory = t.rateHistory[1:]
+		t.clientsServedMutex.Unlock()
+
 		log.Printf("Served %v requests at %v reqs/sec [since start: %v]", t.clientsServed, rate, t.clientsTotal)
+		rateStr := "Rate_History ["
+		for i := 0; i < len(t.rateHistory); i++ {
+			rateStr = fmt.Sprintf("%v %f", rateStr, t.rateHistory[i])
+		}
+		rateStr = fmt.Sprintf("%v]", rateStr)
+		log.Printf("%v", rateStr)
+
 		t.clientsServed = 0
 	}
 }
@@ -322,7 +333,7 @@ func (t *Server) sendMergeRequest() {
 
 	log.Printf("Done MERGE")
 	t.acceptedMutex.Unlock()
-	MemCleanup()
+	//MemCleanup()
 }
 
 func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
@@ -431,11 +442,11 @@ func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) erro
 				}
 			}
 		}
+
+		t.plainMutex.Unlock()
 	*/
 
-	t.plainMutex.Unlock()
-
-	MemCleanup()
+	//MemCleanup()
 	return nil
 }
 
@@ -559,10 +570,11 @@ func (t *Server) Download(args *DownloadArgs, reply *DownloadReply) error {
 
 func NewServer(serverIdx int, serverAddrs []string) *Server {
 	t := new(Server)
-	t.entries = new(SlotTable)
+	t.entries = NewSlotTable()
 	t.plain = new(BitMatrix)
 	t.ServerIdx = serverIdx
 	t.ServerAddrs = serverAddrs
+	t.rateHistory = make([]float64, 10)
 	t.pending = map[int64](*InsertQueryTuple){}
 	t.accepted = map[int64](*AcceptQueryTuple){}
 

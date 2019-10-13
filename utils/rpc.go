@@ -49,7 +49,7 @@ func ListenAndServe(address string, keyIdx int, acceptCerts []tls.Certificate) {
 	config.InsecureSkipVerify = true
 	config.Certificates = []tls.Certificate{ServerCertificates[keyIdx]}
 
-	l, err := tls.Listen("tcp", address, &config)
+	l, err := tls.Listen("tcp", address[len(address)-5:], &config)
 	if err != nil {
 		log.Fatal("Listener error:", err)
 		return

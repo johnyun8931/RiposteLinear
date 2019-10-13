@@ -32,9 +32,9 @@ func (t *SlotTable) expandRow(query *InsertQuery1, row int, isServerB bool,
 		hashKey, aes, z1, z2, tmp)
 
 	// XOR row i of query q into the database table
-	t.tableMutex.Lock()
-	XorRows(&t.table[row], &rowData)
-	t.tableMutex.Unlock()
+	tIdx := <-t.freeTables
+	XorRows(&t.localTables[tIdx][row], &rowData)
+	t.freeTables <- tIdx
 }
 
 // XOR all of the rows in src into dst
@@ -62,7 +62,6 @@ type ForeachFunc func(row int, value *BitMatrixRow)
 
 func (t *SlotTable) ForeachRow(f ForeachFunc) {
 	c := make(chan int, TABLE_HEIGHT)
-	t.tableMutex.Lock()
 	for i := 0; i < TABLE_HEIGHT; i++ {
 		go func(j int) {
 			f(j, &t.table[j])
@@ -73,7 +72,6 @@ func (t *SlotTable) ForeachRow(f ForeachFunc) {
 	for i := 0; i < TABLE_HEIGHT; i++ {
 		<-c
 	}
-	t.tableMutex.Unlock()
 }
 
 func (t *SlotTable) Clear() {
@@ -84,11 +82,24 @@ func (t *SlotTable) Clear() {
 }
 
 func (t *SlotTable) CopyToAndClear(dest *BitMatrix) {
+	//Local all tables
+	for i := 0; i < WORKER_THREADS; i++ {
+		<-t.freeTables
+	}
+
+	for i := 0; i < WORKER_THREADS; i++ {
+		t.Xor(&t.localTables[i])
+	}
+
 	var empty BitMatrixRow
 	t.ForeachRow(func(idx int, row *BitMatrixRow) {
 		dest[idx] = *row
 		*row = empty
 	})
+
+	for i := 0; i < WORKER_THREADS; i++ {
+		t.freeTables <- i
+	}
 }
 
 func (t *SlotTable) Xor(other *BitMatrix) {
@@ -108,4 +119,14 @@ func (t *SlotTable) debugTable() {
 	})
 
 	return
+}
+
+func NewSlotTable() *SlotTable {
+	t := new(SlotTable)
+
+	t.freeTables = make(chan int, WORKER_THREADS)
+	for i := 0; i < WORKER_THREADS; i++ {
+		t.freeTables <- i
+	}
+	return t
 }
