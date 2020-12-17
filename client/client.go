@@ -20,7 +20,7 @@ func tryUpload(client *rpc.Client, args db.UploadArgs) error {
     return err
   }
 
-  log.Printf("Got message!", upRes)
+  log.Println("Got message!", upRes)
   return nil
 }
 

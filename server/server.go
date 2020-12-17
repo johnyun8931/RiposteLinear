@@ -25,7 +25,7 @@ func main() {
 
   idx,err := strconv.Atoi(os.Args[1])
   if err != nil {
-    log.Fatal("Invalid index: %s", os.Args[1])
+    log.Fatalf("Invalid index: %s", os.Args[1])
     return
   }
 

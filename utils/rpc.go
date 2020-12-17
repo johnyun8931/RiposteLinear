@@ -30,7 +30,7 @@ func ListenAndServe(address string, keyIdx int, acceptCerts []tls.Certificate) {
   for {
     conn, err := l.Accept()
     if err != nil {
-      log.Printf("Listener error:", err)
+      log.Println("Listener error:", err)
       continue
     }
 
@@ -49,7 +49,7 @@ func handleOneClient(conn net.Conn) {
 
   err := tlscon.Handshake()
   if err != nil {
-    log.Printf("Handshake failed:", err)
+    log.Println("Handshake failed:", err)
     return
   }
 
@@ -72,7 +72,7 @@ func DialHTTPWithTLS(network, address string,
 
   conn, err := tls.Dial(network, address, &config)
   if err != nil {
-    log.Printf("DialHTTP error:", err)
+    log.Println("DialHTTP error:", err)
     return nil, err
   }
 
@@ -90,7 +90,7 @@ func validateCert(acceptCerts []tls.Certificate, present *x509.Certificate) bool
     if acceptCerts[i].Leaf == nil {
       certs, err := x509.ParseCertificates(acceptCerts[i].Certificate[0])
       if err != nil {
-        log.Printf("Could not parse cert:", err)
+        log.Println("Could not parse cert:", err)
         return false
       }
 
