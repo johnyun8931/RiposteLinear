@@ -5,8 +5,8 @@ import (
   "crypto/rand"
   "testing"
 
-  "henrycg/riposte/prf"
-  "henrycg/riposte/utils"
+  "bitbucket.org/henrycg/riposte/prf"
+  "bitbucket.org/henrycg/riposte/utils"
 )
 
 func randomQuery(t *testing.T) InsertQuery {
@@ -77,7 +77,7 @@ func TestEncryptSlot(t *testing.T) {
 
   overhead := BOX_PUBLIC_KEY_LEN + BOX_OVERHEAD
   if len(c1) != PLAIN_LENGTH + overhead {
-    t.Fatal("Expected len %v, actual %v", PLAIN_LENGTH + overhead, len(c1))
+    t.Fatalf("Expected len %v, actual %v", PLAIN_LENGTH + overhead, len(c1))
   }
 
   c2, err := EncryptSlot(0, c1)
@@ -86,7 +86,7 @@ func TestEncryptSlot(t *testing.T) {
   }
 
   if len(c2) != SLOT_LENGTH {
-    t.Fatal("Expected len %v, actual %v", SLOT_LENGTH, len(c2))
+    t.Fatalf("Expected len %v, actual %v", SLOT_LENGTH, len(c2))
   }
 
   m2, err := DecryptSlot(0, c2)

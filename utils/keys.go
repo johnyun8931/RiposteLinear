@@ -357,7 +357,7 @@ func init() {
       []byte(serverPublicKeys[i]),
       []byte(serverSecretKeys[i]))
     if err != nil {
-      log.Fatal("Could not load certficate #%v %v", i, err)
+      log.Fatalf("Could not load certficate #%v %v", i, err)
     }
 
     ServerBoxPublicKeys[i] = stringToArray(serverBoxPublicHex[i])

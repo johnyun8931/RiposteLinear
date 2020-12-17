@@ -386,7 +386,7 @@ func (t *Server) Prepare(prep *PrepareArgs, reply *PrepareReply) error {
     if err == nil {
       okay = true
     } else {
-      log.Printf("Error in decryption: ", err)
+      log.Println("Error in decryption:", err)
       okay = false
     }
   }
@@ -448,7 +448,7 @@ func (t *Server) Decrypt(args *DecryptArgs, reply *DecryptReply) error {
     if err == nil {
       reply.Cleartexts = append(reply.Cleartexts, buf)
     } else {
-      log.Printf("Decrypt error! ", err)
+      log.Println("Decrypt error!", err)
     }
   }
 
