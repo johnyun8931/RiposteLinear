@@ -1,8 +1,0 @@
-TODO
-- Implement ZKP (+ commit signing) with the CPIR version
-- Use signatures to give a "receipt" to the client
-
-
-PERFORMANCE
-- Batch exponentiation and verification (??)
-- Switch to curve25519
