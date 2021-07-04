@@ -6,3 +6,34 @@ This branch contains the **most modern version of the Riposte code**, which is u
 
 An explanation of the branches in this repository is [here](https://bitbucket.org/henrycg/riposte/).
 
+
+## How to build
+
+
+1. Make sure that you have `go` installed:
+```
+go version
+```
+
+2. Clone the repository:
+```
+git clone https://bitbucket.org/henrycg/riposte/
+```
+
+3. Build the `client` and `server` binaries:
+```
+cd riposte
+cd client 
+go build
+cd ..
+cd server
+go build
+cd ..
+```
+
+4. Now you should be able to run 
+```
+server/server -help
+client/client -help
+```
+to run the client and server and see the command-line options.
