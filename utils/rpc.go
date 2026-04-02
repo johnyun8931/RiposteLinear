@@ -1,10 +1,12 @@
 package utils
 
 import (
+	"bufio"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -45,11 +47,11 @@ func (s countSocket) Close() error {
 
 func SetRPCTransport(transport string) error {
 	switch transport {
-	case "tls", "http":
+	case "tls", "https":
 		rpcTransport = transport
 		return nil
 	default:
-		return fmt.Errorf("unsupported rpc transport %q (expected tls or http)", transport)
+		return fmt.Errorf("unsupported rpc transport %q (expected tls or https)", transport)
 	}
 }
 
@@ -66,28 +68,11 @@ func listenAddr(address string) string {
 	return ":" + port
 }
 
-/* For running RPC over TLS or HTTP. */
+/* For running RPC over TLS or HTTPS. */
 
 func ListenAndServe(address string, keyIdx int, acceptCerts []tls.Certificate) {
-	if rpcTransport == "http" {
-		rpc.HandleHTTP()
-		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		})
-
-		l, err := net.Listen("tcp", listenAddr(address))
-		if err != nil {
-			log.Fatal("HTTP listener error:", err)
-			return
-		}
-
-		defer l.Close()
-
-		err = http.Serve(l, nil)
-		if err != nil {
-			log.Fatal("HTTP serve error:", err)
-		}
+	if rpcTransport == "https" {
+		ListenAndServeHTTPS(address, keyIdx, acceptCerts)
 		return
 	}
 
@@ -117,6 +102,88 @@ func ListenAndServe(address string, keyIdx int, acceptCerts []tls.Certificate) {
 	}
 }
 
+func ListenAndServeHTTPS(address string, keyIdx int, acceptCerts []tls.Certificate) {
+	rpc.HandleHTTP()
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	var config tls.Config
+	if len(acceptCerts) > 0 {
+		config.ClientAuth = tls.RequireAnyClientCert
+	}
+	config.InsecureSkipVerify = true
+	config.Certificates = []tls.Certificate{ServerCertificates[keyIdx]}
+
+	l, err := tls.Listen("tcp", listenAddr(address), &config)
+	if err != nil {
+		log.Fatal("HTTPS listener error:", err)
+		return
+	}
+
+	defer l.Close()
+
+	err = http.Serve(l, nil)
+	if err != nil {
+		log.Fatal("HTTPS serve error:", err)
+	}
+
+	return
+}
+
+func dialHTTPPathWithTLS(network, address, path string,
+	client_idx int, acceptCerts []tls.Certificate) (*rpc.Client, error) {
+	var config tls.Config
+	config.InsecureSkipVerify = true
+
+	if client_idx >= 0 {
+		config.Certificates = []tls.Certificate{ServerCertificates[client_idx]}
+	}
+
+	conn, err := tls.Dial(network, address, &config)
+	if err != nil {
+		log.Printf("DialHTTPS error: %v", err)
+		return nil, err
+	}
+
+	state := conn.ConnectionState()
+	if len(acceptCerts) > 0 {
+		if len(state.PeerCertificates) < 1 || !validateCert(acceptCerts, state.PeerCertificates[0]) {
+			conn.Close()
+			return nil, errors.New("Invalid certificate")
+		}
+	}
+
+	_, err = io.WriteString(conn, "CONNECT "+path+" HTTP/1.0\n\n")
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err == nil && resp.Status == "200 Connected to Go RPC" {
+		return rpc.NewClient(conn), nil
+	}
+
+	if err == nil {
+		err = errors.New("unexpected HTTP response: " + resp.Status)
+	}
+
+	conn.Close()
+	return nil, &net.OpError{
+		Op:   "dial-http",
+		Net:  network + " " + address,
+		Addr: nil,
+		Err:  err,
+	}
+}
+
+func DialHTTPS(network, address string,
+	client_idx int, acceptCerts []tls.Certificate) (*rpc.Client, error) {
+	return dialHTTPPathWithTLS(network, address, rpc.DefaultRPCPath, client_idx, acceptCerts)
+}
+
 func handleOneClient(conn net.Conn) {
 	defer conn.Close()
 
@@ -142,10 +209,10 @@ func handleOneClient(conn net.Conn) {
 
 func DialHTTPWithTLS(network, address string,
 	client_idx int, acceptCerts []tls.Certificate) (*rpc.Client, error) {
-	if rpcTransport == "http" {
-		client, err := rpc.DialHTTP(network, address)
+	if rpcTransport == "https" {
+		client, err := DialHTTPS(network, address, client_idx, acceptCerts)
 		if err != nil {
-			log.Printf("DialHTTP error: %v", err)
+			log.Printf("DialHTTPS error: %v", err)
 			return nil, err
 		}
 

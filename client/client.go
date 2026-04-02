@@ -22,7 +22,7 @@ var hammerFlag = flag.Bool("hammer", false, "If set, client sends requests to se
 var leaderFlag = flag.String("leader", "", "Leader IP and port")
 var logFlag = flag.String("log", "", "Location of log file")
 var threadsFlag = flag.Uint("threads", 1, "Number of threads to use")
-var rpcTransportFlag = flag.String("rpc-transport", "tls", "RPC transport: tls or http")
+var rpcTransportFlag = flag.String("rpc-transport", "tls", "RPC transport: tls or https")
 
 var countLock sync.Mutex
 var count int
