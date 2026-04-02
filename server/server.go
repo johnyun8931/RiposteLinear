@@ -12,9 +12,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strings"
-)
 
-import (
 	"bitbucket.org/henrycg/riposte/db"
 	"bitbucket.org/henrycg/riposte/utils"
 )
@@ -23,6 +21,7 @@ var flagProfile = flag.Bool("profile", false, "Run CPU profiler")
 var flagIndex = flag.Int("idx", -1, "Server index")
 var flagLog = flag.String("log", "", "Log file")
 var flagThreads = flag.Int("threads", -1, "Number of threads to use")
+var flagRPCTransport = flag.String("rpc-transport", "tls", "RPC transport: tls or http")
 
 // List of server addresses
 type serverListType []string
@@ -75,6 +74,12 @@ func main() {
 
 	if *flagThreads > 0 {
 		runtime.GOMAXPROCS(int(*flagThreads))
+	}
+
+	err := utils.SetRPCTransport(*flagRPCTransport)
+	if err != nil {
+		log.Fatal(err)
+		return
 	}
 
 	defer log.Printf("Server died.")

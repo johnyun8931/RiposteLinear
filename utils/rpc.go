@@ -4,10 +4,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/rpc"
 )
+
+var rpcTransport = "tls"
 
 type countSocket struct {
 	Conn       *tls.Conn
@@ -39,9 +43,54 @@ func (s countSocket) Close() error {
 	return s.Conn.Close()
 }
 
-/* For running RPC over TLS. */
+func SetRPCTransport(transport string) error {
+	switch transport {
+	case "tls", "http":
+		rpcTransport = transport
+		return nil
+	default:
+		return fmt.Errorf("unsupported rpc transport %q (expected tls or http)", transport)
+	}
+}
+
+func RPCTransport() string {
+	return rpcTransport
+}
+
+func listenAddr(address string) string {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
+	}
+
+	return ":" + port
+}
+
+/* For running RPC over TLS or HTTP. */
 
 func ListenAndServe(address string, keyIdx int, acceptCerts []tls.Certificate) {
+	if rpcTransport == "http" {
+		rpc.HandleHTTP()
+		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		})
+
+		l, err := net.Listen("tcp", listenAddr(address))
+		if err != nil {
+			log.Fatal("HTTP listener error:", err)
+			return
+		}
+
+		defer l.Close()
+
+		err = http.Serve(l, nil)
+		if err != nil {
+			log.Fatal("HTTP serve error:", err)
+		}
+		return
+	}
+
 	var config tls.Config
 	if len(acceptCerts) > 0 {
 		config.ClientAuth = tls.RequireAnyClientCert
@@ -49,7 +98,7 @@ func ListenAndServe(address string, keyIdx int, acceptCerts []tls.Certificate) {
 	config.InsecureSkipVerify = true
 	config.Certificates = []tls.Certificate{ServerCertificates[keyIdx]}
 
-	l, err := tls.Listen("tcp", address[len(address)-5:], &config)
+	l, err := tls.Listen("tcp", listenAddr(address), &config)
 	if err != nil {
 		log.Fatal("Listener error:", err)
 		return
@@ -93,6 +142,16 @@ func handleOneClient(conn net.Conn) {
 
 func DialHTTPWithTLS(network, address string,
 	client_idx int, acceptCerts []tls.Certificate) (*rpc.Client, error) {
+	if rpcTransport == "http" {
+		client, err := rpc.DialHTTP(network, address)
+		if err != nil {
+			log.Printf("DialHTTP error: %v", err)
+			return nil, err
+		}
+
+		return client, nil
+	}
+
 	var config tls.Config
 	config.InsecureSkipVerify = true
 

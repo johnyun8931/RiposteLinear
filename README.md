@@ -37,3 +37,26 @@ server/server -help
 client/client -help
 ```
 to run the client and server and see the command-line options.
+
+## AWS ALB mode (HTTP RPC)
+
+This codebase now supports two RPC transports:
+
+1. `tls` (default): legacy RPC over custom TLS/TCP.
+2. `http`: net/rpc over HTTP, which is compatible with AWS ALB HTTP/HTTPS listeners.
+
+To run with ALB-compatible transport, pass `-rpc-transport http` to both server and client:
+
+```
+server/server -idx 0 -servers "10.0.1.10:8000,10.0.1.11:8001" -rpc-transport http
+server/server -idx 1 -servers "10.0.1.10:8000,10.0.1.11:8001" -rpc-transport http
+client/client -leader "your-alb-dns-name:80" -rpc-transport http
+```
+
+Notes:
+
+1. Server-to-server communication also uses the selected transport.
+2. For ALB target groups, use protocol HTTP and forward to the instance port your server listens on.
+3. If ALB terminates TLS, keep backend transport as `http`.
+4. Use `/healthz` for ALB health checks.
+5. Client upload RPCs are leader-only, so client-facing ALB routing should target the leader server.
