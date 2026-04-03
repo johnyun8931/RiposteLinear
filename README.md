@@ -48,9 +48,9 @@ This codebase now supports two RPC transports:
 To run with ALB-compatible transport, pass `-rpc-transport https` to both server and client:
 
 ```
-server/server -idx 0 -servers "10.0.1.10:8000,10.0.1.11:8001" -rpc-transport https
-server/server -idx 1 -servers "10.0.1.10:8000,10.0.1.11:8001" -rpc-transport https
-client/client -leader "your-alb-dns-name:443" -rpc-transport https
+./server/server -idx 1 -servers "127.0.0.1:8000,127.0.0.1:8001" -rpc-transport https
+./server/server -idx 0 -servers "127.0.0.1:8000,127.0.0.1:8001" -rpc-transport https
+./client/client -leader "127.0.0.1:8000" -rpc-transport https -hammer
 ```
 
 Notes:

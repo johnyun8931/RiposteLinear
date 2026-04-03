@@ -3,3 +3,6 @@ riposte
 client/client
 server/server
 .*.swp
+client/*.exe
+server/*.exe
+logs/*
