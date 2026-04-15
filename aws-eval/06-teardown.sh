@@ -40,10 +40,17 @@ if [[ -n "${SG_ID:-}" ]]; then
 fi
 
 echo "checking for remaining non-terminated project instances"
-aws_region ec2 describe-instances \
+remaining_instances="$(aws_region ec2 describe-instances \
   --filters Name=tag:Project,Values="$PROJECT_TAG" Name=instance-state-name,Values=pending,running,stopping,stopped \
   --query 'Reservations[].Instances[].{InstanceId:InstanceId,State:State.Name,Name:Tags[?Key==`Name`]|[0].Value}' \
-  --output table
+  --output text)"
+
+if [[ -n "$remaining_instances" ]]; then
+  echo "warning: remaining non-terminated instances still have Project=$PROJECT_TAG" >&2
+  echo "$remaining_instances" >&2
+  echo "Run 06-teardown.sh again after AWS finishes detaching resources, or inspect EC2 manually." >&2
+  exit 1
+fi
 
 echo
 echo "teardown complete"
