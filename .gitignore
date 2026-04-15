@@ -3,3 +3,6 @@ riposte
 client/client
 server/server
 .*.swp
+
+# added by kevwjin to provide spec w/o git tracking to llms
+*.txt
