@@ -3,3 +3,8 @@ riposte
 client/client
 server/server
 .*.swp
+aws-eval/.state/
+aws-eval/keys/
+aws-eval/bin/
+aws-eval/results/
+aws-eval/*.pem
