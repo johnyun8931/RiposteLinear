@@ -8,3 +8,4 @@ aws-eval/keys/
 aws-eval/bin/
 aws-eval/results/
 aws-eval/*.pem
+*.txt
