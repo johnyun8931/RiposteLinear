@@ -9,9 +9,38 @@ load_state
 
 require_cmd ssh
 
-SANITY_SECONDS="${SANITY_SECONDS:-600}"
-MEASURED_SECONDS="${MEASURED_SECONDS:-1800}"
+RUN_MINUTES="${1:-${RUN_MINUTES:-}}"
+PHASE_NAME="${PHASE_NAME:-}"
 SERVERS="$(server_list)"
+
+usage() {
+  cat <<EOF_USAGE
+usage:
+  $0 <minutes>       # run one hammer phase for <minutes>
+
+environment overrides:
+  RUN_MINUTES=<n>    # same as passing <minutes>
+  PHASE_NAME=<name>  # name for the one-phase log directory; default: measured-<minutes>m
+EOF_USAGE
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ -z "$RUN_MINUTES" ]]; then
+  usage
+  die "missing required minutes argument"
+fi
+
+if [[ -n "$RUN_MINUTES" && ! "$RUN_MINUTES" =~ ^[0-9]+$ ]]; then
+  die "minutes must be a positive integer; got: $RUN_MINUTES"
+fi
+
+if [[ "$RUN_MINUTES" == "0" ]]; then
+  die "minutes must be greater than zero"
+fi
 
 reset_all_processes() {
   for host in "$SERVER0_PUBLIC_IP" "$SERVER1_PUBLIC_IP" "$CLIENT0_PUBLIC_IP" "$CLIENT1_PUBLIC_IP"; do
@@ -68,7 +97,7 @@ run_phase() {
 reset_all_processes
 sleep 3
 run_openssl_speed
-run_phase "sanity-10m" "$SANITY_SECONDS"
-run_phase "measured-30m" "$MEASURED_SECONDS"
+phase="${PHASE_NAME:-measured-${RUN_MINUTES}m}"
+run_phase "$phase" "$((RUN_MINUTES * 60))"
 
 echo "benchmark phases complete"

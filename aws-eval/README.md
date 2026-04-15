@@ -126,22 +126,23 @@ private IPs, TLS/RPC, and server wiring are working before a sustained run.
 Run:
 
 ```sh
-./aws-eval/04-run-benchmark.sh
+./aws-eval/04-run-benchmark.sh 30
 ```
 
-Default phases:
-
-- `sanity-10m`: 10 minutes of hammer load, about 60 server samples.
-- `measured-30m`: 30 minutes of hammer load, about 180 server samples.
+This runs one 30-minute hammer phase, about 180 server samples. The script
+requires an explicit duration and will not run a default benchmark.
 
 Hammer mode starts 16 client goroutines per client process and sends requests as
 fast as possible until stopped.
 
-For a short test of the script itself, override durations:
+Pass a different number of minutes for another duration:
 
 ```sh
-SANITY_SECONDS=60 MEASURED_SECONDS=120 ./aws-eval/04-run-benchmark.sh
+./aws-eval/04-run-benchmark.sh 5
 ```
+
+Logs are written under `/tmp/riposte-eval/measured-<minutes>m/`. Override the
+phase directory name with `PHASE_NAME=...` if needed.
 
 ## 6. Collect Logs And Parse Metrics
 
