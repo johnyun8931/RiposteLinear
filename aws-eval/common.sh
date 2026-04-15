@@ -34,9 +34,9 @@ require_cmd() {
 
 aws_base() {
   if [[ -n "${AWS_PROFILE:-}" ]]; then
-    aws --profile "$AWS_PROFILE" "$@"
+    aws --no-cli-pager --profile "$AWS_PROFILE" "$@"
   else
-    aws "$@"
+    aws --no-cli-pager "$@"
   fi
 }
 

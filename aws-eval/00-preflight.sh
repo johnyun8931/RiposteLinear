@@ -17,7 +17,7 @@ aws_base sts get-caller-identity --output json
 
 echo
 echo "== Region =="
-configured_region="$(aws configure get region || true)"
+configured_region="$(aws_base configure get region || true)"
 echo "configured region: ${configured_region:-<unset>}"
 echo "effective region:  $AWS_REGION"
 
@@ -70,4 +70,3 @@ file "$tmpdir/server" "$tmpdir/client" || true
 
 echo
 echo "preflight passed"
-

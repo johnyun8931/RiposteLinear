@@ -52,7 +52,7 @@ Generated files are ignored by git:
 Verify identity:
 
 ```sh
-aws sts get-caller-identity
+aws --no-cli-pager sts get-caller-identity
 ```
 
 Expected account/user shape:
@@ -175,7 +175,7 @@ group after instances detach.
 Then verify there are no running experiment instances:
 
 ```sh
-aws ec2 describe-instances \
+aws --no-cli-pager ec2 describe-instances \
   --region us-east-1 \
   --filters Name=tag:Project,Values=riposte-eval Name=instance-state-name,Values=pending,running,stopping,stopped \
   --query 'Reservations[].Instances[].{InstanceId:InstanceId,State:State.Name,Name:Tags[?Key==`Name`]|[0].Value}' \
@@ -196,4 +196,3 @@ THREADS=16
 
 Use `SUBNET_ID=... ./aws-eval/01-launch.sh` to retry another default subnet if
 `c5n.4xlarge` capacity is unavailable in the preferred subnet.
-
