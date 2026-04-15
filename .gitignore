@@ -4,5 +4,9 @@ client/client
 server/server
 .*.swp
 
+client/*.exe
+server/*.exe
+logs/*
+
 # added by kevwjin to provide spec w/o git tracking to llms
 *.txt
