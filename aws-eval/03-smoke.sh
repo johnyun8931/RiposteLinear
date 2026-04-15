@@ -31,5 +31,9 @@ echo "checking remote server processes"
 remote_cmd "$SERVER0_PUBLIC_IP" "pgrep server >/dev/null"
 remote_cmd "$SERVER1_PUBLIC_IP" "pgrep server >/dev/null"
 
-echo "smoke passed"
+echo "stopping smoke processes"
+for host in "$SERVER0_PUBLIC_IP" "$SERVER1_PUBLIC_IP" "$CLIENT0_PUBLIC_IP" "$CLIENT1_PUBLIC_IP"; do
+  kill_remote_processes "$host"
+done
 
+echo "smoke passed"

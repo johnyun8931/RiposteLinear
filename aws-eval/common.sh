@@ -104,6 +104,5 @@ server_list() {
 
 kill_remote_processes() {
   local host="$1"
-  remote_cmd "$host" "pkill -INT server >/dev/null 2>&1 || true; pkill -INT client >/dev/null 2>&1 || true"
+  remote_cmd "$host" "pkill -TERM -x server >/dev/null 2>&1 || true; pkill -TERM -x client >/dev/null 2>&1 || true; sleep 2; pkill -KILL -x server >/dev/null 2>&1 || true; pkill -KILL -x client >/dev/null 2>&1 || true"
 }
-
