@@ -8,4 +8,6 @@ aws-eval/keys/
 aws-eval/bin/
 aws-eval/results/
 aws-eval/*.pem
+aws-eval/plotting/.venv/
+__pycache__/
 *.txt
