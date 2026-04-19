@@ -37,3 +37,16 @@ server/server -help
 client/client -help
 ```
 to run the client and server and see the command-line options.
+
+## Current implementation notes
+
+There are two important correctness caveats in the current write-validation path:
+
+1. Proof-validation failures are logged but do not currently flip the commit decision to
+   `false`. In `db/server.go`, `submitPrepares()` logs failed checks and still returns
+   `true` as `shouldCommit`.
+
+2. The bogus-write rollback path is intentionally unfinished. In `db/server.go`, `Commit()`
+   panics on `!com.Commit` and includes an `XXX` comment explaining that a production
+   implementation would need to expand the DPF key and XOR the malformed update back out
+   of the table shares.

@@ -16,9 +16,6 @@ import (
 	"bitbucket.org/henrycg/zkp/group"
 )
 
-// Time to wait between merges (in seconds)
-const MERGE_TIME_DELAY time.Duration = 14 * 3600
-
 // Time to wait between printing stats (in seconds)
 const STATS_DELAY time.Duration = 10
 
@@ -39,6 +36,9 @@ func (t *Server) isLeader() bool {
 func (t *Server) Upload1(args *UploadArgs1, reply *UploadReply1) error {
 	if !t.isLeader() {
 		return errors.New("Only leader can accept uploads")
+	}
+	if !t.acceptingWrites() {
+		return errors.New("No active epoch")
 	}
 	<-t.incoming1
 
@@ -260,15 +260,6 @@ func (t *Server) submitCommits(uuid int64, shouldCommit bool) {
 	//log.Printf("Done COMMIT %d", com.Uuid)
 }
 
-func (t *Server) mergeWorker() {
-	for {
-		log.Printf("Mergeworker starts")
-		time.Sleep(MERGE_TIME_DELAY * time.Second)
-		log.Printf("Mergeworker fire!")
-		t.sendMergeRequest()
-	}
-}
-
 func (t *Server) printStats() {
 	for {
 		time.Sleep(STATS_DELAY * time.Second)
@@ -329,6 +320,13 @@ func (t *Server) sendMergeRequest() {
 
 	if err != nil {
 		log.Fatal("Error in plaintext: ", r)
+	}
+
+	resultPath, err := t.writePublishedResult(parg.Plaintext, t.currentEpochMeta(), time.Now())
+	if err != nil {
+		log.Printf("Error publishing epoch result: %v", err)
+	} else if resultPath != "" {
+		log.Printf("Published epoch result to %s", resultPath)
 	}
 
 	log.Printf("Done MERGE")
@@ -430,23 +428,8 @@ func (t *Server) Commit(com *CommitArgs, reply *CommitReply) error {
 func (t *Server) StorePlaintext(args *PlaintextArgs, reply *PlaintextReply) error {
 	//log.Printf("Storing plaintext")
 	t.plainMutex.Lock()
+	defer t.plainMutex.Unlock()
 	t.plain = args.Plaintext
-
-	/*
-		var zeros SlotContents
-		for i := range t.plain {
-			for j := 0; j < len(t.plain[i]); j += SLOT_LENGTH {
-				msg := t.plain[i][j:(j + SLOT_LENGTH)]
-				if bytes.Compare(zeros[:], msg) != 0 {
-					log.Printf("Got msg: %v", msg)
-				}
-			}
-		}
-
-		t.plainMutex.Unlock()
-	*/
-
-	//MemCleanup()
 	return nil
 }
 
@@ -457,14 +440,94 @@ func (t *Server) DumpTable(_ *int, reply *DumpReply) error {
 	return nil
 }
 
-/*
 func (t *Server) DumpPlaintext(_ *int, reply *DumpReply) error {
-  t.plainMutex.Lock()
-  reply.Entries = t.plain
-  t.plainMutex.Unlock()
-  return nil
+	t.plainMutex.Lock()
+	defer t.plainMutex.Unlock()
+	reply.Entries = t.plain
+	return nil
 }
-*/
+
+func (t *Server) StartEpoch(args *StartEpochArgs, reply *StartEpochReply) error {
+	if !t.isLeader() {
+		return errors.New("Only leader can start epochs")
+	}
+	if args.DurationSeconds <= 0 {
+		return errors.New("Epoch duration must be positive")
+	}
+
+	t.epochMutex.Lock()
+	defer t.epochMutex.Unlock()
+
+	if t.State == EpochStateActive || t.State == EpochStateMerging {
+		return errors.New("An epoch is already in progress")
+	}
+
+	if t.epochTimer != nil {
+		t.epochTimer.Stop()
+	}
+
+	now := time.Now().UTC()
+	t.epoch.ID += 1
+	t.epoch.StartTime = now
+	t.epoch.DurationSeconds = args.DurationSeconds
+	t.epoch.EndTime = now.Add(time.Duration(args.DurationSeconds) * time.Second)
+	t.State = EpochStateActive
+	t.epoch.State = t.State
+	t.epochTimer = time.AfterFunc(time.Duration(args.DurationSeconds)*time.Second, func() {
+		if err := t.finishEpoch(); err != nil {
+			log.Printf("Error finishing epoch: %v", err)
+		}
+	})
+
+	reply.EpochID = t.epoch.ID
+	reply.State = t.State.String()
+	reply.StartUnix = t.epoch.StartTime.Unix()
+	reply.EndUnix = t.epoch.EndTime.Unix()
+	reply.DurationSecs = t.epoch.DurationSeconds
+	log.Printf("Started epoch %d with duration %ds", reply.EpochID, reply.DurationSecs)
+	return nil
+}
+
+func (t *Server) EpochStatus(_ *EpochStatusArgs, reply *EpochStatusReply) error {
+	meta := t.currentEpochMeta()
+	reply.EpochID = meta.ID
+	reply.State = meta.State.String()
+	reply.StartUnix = meta.StartTime.Unix()
+	reply.EndUnix = meta.EndTime.Unix()
+	reply.DurationSecs = meta.DurationSeconds
+	reply.Accepting = t.acceptingWrites()
+	reply.LastResult = t.getLastResultPath()
+	return nil
+}
+
+func (t *Server) finishEpoch() error {
+	if !t.isLeader() {
+		return errors.New("Only leader can finish epochs")
+	}
+
+	t.epochMutex.Lock()
+	if t.State != EpochStateActive {
+		t.epochMutex.Unlock()
+		return nil
+	}
+	t.State = EpochStateMerging
+	t.epoch.State = t.State
+	t.epochMutex.Unlock()
+
+	if t.mergeFn != nil {
+		if err := t.mergeFn(); err != nil {
+			return err
+		}
+	} else {
+		t.sendMergeRequest()
+	}
+
+	t.epochMutex.Lock()
+	defer t.epochMutex.Unlock()
+	t.State = EpochStateCompleted
+	t.epoch.State = t.State
+	return nil
+}
 
 /***********
  * Initialization
@@ -512,7 +575,6 @@ func (t *Server) Initialize(*int, *int) error {
 		t.incoming2 = make(chan bool, READY_BUFFER_SIZE)
 		t.incoming3 = make(chan bool, READY_BUFFER_SIZE)
 		t.ready = make(chan int64, READY_BUFFER_SIZE)
-		go t.mergeWorker()
 		go t.printStats()
 
 		for i := 0; i < WORKER_THREADS; i++ {
@@ -574,9 +636,15 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 	t.plain = new(BitMatrix)
 	t.ServerIdx = serverIdx
 	t.ServerAddrs = serverAddrs
+	t.State = EpochStateNoActive
+	t.epoch.State = EpochStateNoActive
 	t.rateHistory = make([]float64, 10)
 	t.pending = map[int64](*InsertQueryTuple){}
 	t.accepted = map[int64](*AcceptQueryTuple){}
+	t.mergeFn = func() error {
+		t.sendMergeRequest()
+		return nil
+	}
 
 	return t
 }

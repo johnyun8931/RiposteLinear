@@ -23,6 +23,10 @@ var flagProfile = flag.Bool("profile", false, "Run CPU profiler")
 var flagIndex = flag.Int("idx", -1, "Server index")
 var flagLog = flag.String("log", "", "Log file")
 var flagThreads = flag.Int("threads", -1, "Number of threads to use")
+var flagResultsDir = flag.String("results-dir", "", "Directory for epoch result files on the leader")
+var flagAdminTarget = flag.String("admin-target", "", "Target leader address for admin RPC commands")
+var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
+var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query leader epoch status over admin RPC and exit")
 
 // List of server addresses
 type serverListType []string
@@ -51,6 +55,14 @@ func init() {
 
 func main() {
 	flag.Parse()
+
+	if *flagStartEpoch > 0 || *flagEpochStatus {
+		if *flagAdminTarget == "" {
+			log.Fatal("Must specify -admin-target for admin RPC commands")
+		}
+		runAdminCommand()
+		return
+	}
 
 	if *flagLog != "" {
 		f, ferr := os.OpenFile(*flagLog, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0664)
@@ -106,6 +118,7 @@ func main() {
 
 	var a int
 	slotTable := db.NewServer(idx, serverList)
+	slotTable.SetResultsDir(*flagResultsDir)
 	slotTable.Initialize(&a, &a)
 	rpc.Register(slotTable)
 
@@ -121,4 +134,33 @@ func main() {
 	log.Printf("Server %d is listening at %s", idx, serverList[idx])
 
 	//http.ListenAndServe(addr, nil)
+}
+
+func runAdminCommand() {
+	certs := make([]tls.Certificate, 1)
+	certs[0] = utils.LeaderCertificate
+	client, err := utils.DialHTTPWithTLS("tcp", *flagAdminTarget, -1, certs)
+	if err != nil {
+		log.Fatal("Could not connect to admin target: ", err)
+	}
+	defer client.Close()
+
+	if *flagStartEpoch > 0 {
+		var reply db.StartEpochReply
+		err = client.Call("Server.StartEpoch", &db.StartEpochArgs{DurationSeconds: *flagStartEpoch}, &reply)
+		if err != nil {
+			log.Fatal("Could not start epoch: ", err)
+		}
+		log.Printf("started epoch=%d state=%s start=%d end=%d duration=%d", reply.EpochID, reply.State, reply.StartUnix, reply.EndUnix, reply.DurationSecs)
+		return
+	}
+
+	if *flagEpochStatus {
+		var reply db.EpochStatusReply
+		err = client.Call("Server.EpochStatus", &db.EpochStatusArgs{}, &reply)
+		if err != nil {
+			log.Fatal("Could not query epoch status: ", err)
+		}
+		log.Printf("epoch=%d state=%s accepting=%t start=%d end=%d duration=%d last_result=%s", reply.EpochID, reply.State, reply.Accepting, reply.StartUnix, reply.EndUnix, reply.DurationSecs, reply.LastResult)
+	}
 }
