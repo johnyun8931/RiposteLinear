@@ -29,6 +29,144 @@ func (t *Server) isLeader() bool {
 	return (t.ServerIdx == 0)
 }
 
+func (t *Server) runLeaderControl() {
+	state := leaderControlRuntime{
+		epoch: EpochMeta{
+			State: EpochStateNoActive,
+		},
+		accepted: map[int64](*AcceptQueryTuple){},
+	}
+
+	for cmd := range t.controlCh {
+		switch c := cmd.(type) {
+		case startEpochCommand:
+			if c.durationSeconds <= 0 {
+				c.reply <- startEpochResult{err: errors.New("Epoch duration must be positive")}
+				continue
+			}
+			if state.epoch.State == EpochStateActive || state.epoch.State == EpochStateMerging {
+				c.reply <- startEpochResult{err: errors.New("An epoch is already in progress")}
+				continue
+			}
+			if state.epochTimer != nil {
+				state.epochTimer.Stop()
+				state.epochTimer = nil
+			}
+
+			now := time.Now().UTC()
+			state.epoch.ID++
+			state.epoch.State = EpochStateActive
+			state.epoch.StartTime = now
+			state.epoch.DurationSeconds = c.durationSeconds
+			state.epoch.EndTime = now.Add(time.Duration(c.durationSeconds) * time.Second)
+			state.epochTimer = time.AfterFunc(time.Duration(c.durationSeconds)*time.Second, func() {
+				if err := t.finishEpoch(); err != nil {
+					log.Printf("Error finishing epoch: %v", err)
+				}
+			})
+
+			c.reply <- startEpochResult{
+				reply: StartEpochReply{
+					EpochID:      state.epoch.ID,
+					State:        state.epoch.State.String(),
+					StartUnix:    state.epoch.StartTime.Unix(),
+					EndUnix:      state.epoch.EndTime.Unix(),
+					DurationSecs: state.epoch.DurationSeconds,
+				},
+			}
+		case epochStatusCommand:
+			c.reply <- EpochStatusReply{
+				EpochID:      state.epoch.ID,
+				State:        state.epoch.State.String(),
+				StartUnix:    state.epoch.StartTime.Unix(),
+				EndUnix:      state.epoch.EndTime.Unix(),
+				DurationSecs: state.epoch.DurationSeconds,
+				Accepting:    state.epoch.State == EpochStateActive,
+				LastResult:   state.lastResultPath,
+			}
+		case controlSnapshotCommand:
+			c.reply <- controlSnapshot{
+				epoch:      state.epoch,
+				accepting:  state.epoch.State == EpochStateActive,
+				lastResult: state.lastResultPath,
+			}
+		case upload1Command:
+			if state.epoch.State != EpochStateActive {
+				c.reply <- upload1Result{err: errors.New("No active epoch")}
+				continue
+			}
+			uuid, err := utils.RandomInt64(math.MaxInt64)
+			if err != nil {
+				c.reply <- upload1Result{err: err}
+				continue
+			}
+			tup := new(AcceptQueryTuple)
+			tup.args1 = c.args
+			utils.RandBytes(tup.hashKey[:])
+			utils.RandBytes(tup.challenge[:])
+			state.accepted[uuid] = tup
+			var reply UploadReply1
+			reply.Uuid = uuid
+			copy(reply.HashKey[:], tup.hashKey[:])
+			c.reply <- upload1Result{reply: reply}
+		case upload2Command:
+			data, okay := state.accepted[c.args.Uuid]
+			if !okay || !bytes.Equal(data.hashKey[:], c.args.HashKey[:]) {
+				c.reply <- upload2Result{err: errors.New("Bogus UUID")}
+				continue
+			}
+			data.args2 = c.args
+			var reply UploadReply2
+			copy(reply.Challenge[:], data.challenge[:])
+			c.reply <- upload2Result{reply: reply}
+		case upload3Command:
+			data, okay := state.accepted[c.args.Uuid]
+			if !okay || !bytes.Equal(data.hashKey[:], c.args.HashKey[:]) {
+				c.reply <- upload3Result{err: errors.New("Bogus UUID")}
+				continue
+			}
+			data.args3 = c.args
+			if t.ready != nil {
+				t.ready <- c.args.Uuid
+			}
+			c.reply <- upload3Result{}
+		case beginEpochMergeCommand:
+			if state.epoch.State != EpochStateActive {
+				c.reply <- beginEpochMergeResult{meta: state.epoch, shouldRun: false}
+				continue
+			}
+			if state.epochTimer != nil {
+				state.epochTimer.Stop()
+				state.epochTimer = nil
+			}
+			state.epoch.State = EpochStateMerging
+			c.reply <- beginEpochMergeResult{meta: state.epoch, shouldRun: true}
+		case completeEpochMergeCommand:
+			if c.err == nil {
+				state.epoch.State = EpochStateCompleted
+				state.lastResultPath = c.resultPath
+				log.Printf("Completed epoch %d successfully result=%s", c.epochID, c.resultPath)
+			} else {
+				log.Printf("Epoch %d merge failed: %v", c.epochID, c.err)
+			}
+			state.epochTimer = nil
+			c.reply <- struct{}{}
+		case takeAcceptedSessionCommand:
+			session, ok := state.accepted[c.uuid]
+			if ok {
+				delete(state.accepted, c.uuid)
+			}
+			c.reply <- takeAcceptedSessionResult{session: session, ok: ok}
+		case stopEpochTimerCommand:
+			if state.epochTimer != nil {
+				state.epochTimer.Stop()
+				state.epochTimer = nil
+			}
+			c.reply <- struct{}{}
+		}
+	}
+}
+
 /*******************
  * Leader code
  */
@@ -37,37 +175,16 @@ func (t *Server) Upload1(args *UploadArgs1, reply *UploadReply1) error {
 	if !t.isLeader() {
 		return errors.New("Only leader can accept uploads")
 	}
-	if !t.acceptingWrites() {
-		return errors.New("No active epoch")
-	}
 	<-t.incoming1
+	defer func() { t.incoming1 <- true }()
 
-	//log.Printf("Got upload request")
-	//log.Printf("Request:", args)
-
-	uuid, err := utils.RandomInt64(math.MaxInt64)
-	if err != nil {
-		log.Printf("error in random")
-		return err
+	replyCh := make(chan upload1Result, 1)
+	t.controlCh <- upload1Command{args: args, reply: replyCh}
+	res := <-replyCh
+	if res.err != nil {
+		return res.err
 	}
-
-	tup := new(AcceptQueryTuple)
-	tup.args1 = args
-
-	// In a secure implementation, these bytes would be derived pseudorandomly
-	// from a seed picked collaboratively by all of the servers in a one-time
-	// setup phase.
-	utils.RandBytes(tup.hashKey[:])
-	utils.RandBytes(tup.challenge[:])
-
-	reply.Uuid = uuid
-	copy(reply.HashKey[:], tup.hashKey[:])
-
-	t.acceptedMutex.Lock()
-	t.accepted[uuid] = tup
-	t.acceptedMutex.Unlock()
-	t.incoming1 <- true
-
+	*reply = res.reply
 	return nil
 }
 
@@ -76,23 +193,15 @@ func (t *Server) Upload2(args *UploadArgs2, reply *UploadReply2) error {
 		return errors.New("Only leader can accept uploads")
 	}
 	<-t.incoming2
+	defer func() { t.incoming2 <- true }()
 
-	//log.Printf("Got Upload2 request")
-
-	t.acceptedMutex.Lock()
-	data, okay := t.accepted[args.Uuid]
-	if okay {
-		data.args2 = args
-		copy(reply.Challenge[:], data.challenge[:])
+	replyCh := make(chan upload2Result, 1)
+	t.controlCh <- upload2Command{args: args, reply: replyCh}
+	res := <-replyCh
+	if res.err != nil {
+		return res.err
 	}
-	t.acceptedMutex.Unlock()
-
-	if !okay || !bytes.Equal(data.hashKey[:], args.HashKey[:]) {
-		return errors.New("Bogus UUID")
-	}
-
-	//log.Printf("Upload2 OK")
-	t.incoming2 <- true
+	*reply = res.reply
 	return nil
 }
 
@@ -101,24 +210,15 @@ func (t *Server) Upload3(args *UploadArgs3, reply *UploadReply3) error {
 		return errors.New("Only leader can accept uploads")
 	}
 	<-t.incoming3
+	defer func() { t.incoming3 <- true }()
 
-	//log.Printf("Got Upload3 request")
-	//log.Printf("Request:", args)
-
-	t.acceptedMutex.Lock()
-	data, okay := t.accepted[args.Uuid]
-	if okay {
-		data.args3 = args
+	replyCh := make(chan upload3Result, 1)
+	t.controlCh <- upload3Command{args: args, reply: replyCh}
+	res := <-replyCh
+	if res.err != nil {
+		return res.err
 	}
-	t.acceptedMutex.Unlock()
-
-	if !okay || !bytes.Equal(data.hashKey[:], args.HashKey[:]) {
-		return errors.New("Bogus UUID")
-	}
-
-	t.ready <- args.Uuid
-	t.incoming3 <- true
-
+	*reply = res.reply
 	return nil
 }
 
@@ -155,10 +255,14 @@ func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
 
 func (t *Server) submitPrepares(uuid int64) bool {
 	var preps [NUM_SERVERS]PrepareArgs
-	t.acceptedMutex.Lock()
-	tup := t.accepted[uuid]
-	delete(t.accepted, uuid)
-	t.acceptedMutex.Unlock()
+	replyCh := make(chan takeAcceptedSessionResult, 1)
+	t.controlCh <- takeAcceptedSessionCommand{uuid: uuid, reply: replyCh}
+	sessionRes := <-replyCh
+	if !sessionRes.ok || sessionRes.session == nil {
+		log.Printf("Missing accepted session for uuid %d", uuid)
+		return false
+	}
+	tup := sessionRes.session
 
 	randPt := utils.RandInt(IntModulus)
 	for i := 0; i < NUM_SERVERS; i++ {
@@ -284,9 +388,7 @@ func (t *Server) printStats() {
 	}
 }
 
-func (t *Server) sendMergeRequest() {
-	t.acceptedMutex.Lock()
-
+func (t *Server) sendMergeRequest() (string, error) {
 	// Call each server and ask for their data
 	// Send out COMMIT request
 	c := make(chan error, NUM_SERVERS)
@@ -319,19 +421,20 @@ func (t *Server) sendMergeRequest() {
 	err := t.rpcClients[0].Call("Server.StorePlaintext", &parg, &p_reply)
 
 	if err != nil {
-		log.Fatal("Error in plaintext: ", r)
+		return "", err
 	}
 
-	resultPath, err := t.writePublishedResult(parg.Plaintext, t.currentEpochMeta(), time.Now())
+	epoch := t.currentEpochMeta()
+	resultPath, err := t.writePublishedResult(parg.Plaintext, epoch, time.Now())
 	if err != nil {
-		log.Printf("Error publishing epoch result: %v", err)
-	} else if resultPath != "" {
+		return "", err
+	}
+	if resultPath != "" {
 		log.Printf("Published epoch result to %s", resultPath)
 	}
 
 	log.Printf("Done MERGE")
-	t.acceptedMutex.Unlock()
-	//MemCleanup()
+	return resultPath, nil
 }
 
 func revealCleartext(tables [NUM_SERVERS]DumpReply) *BitMatrix {
@@ -451,52 +554,21 @@ func (t *Server) StartEpoch(args *StartEpochArgs, reply *StartEpochReply) error 
 	if !t.isLeader() {
 		return errors.New("Only leader can start epochs")
 	}
-	if args.DurationSeconds <= 0 {
-		return errors.New("Epoch duration must be positive")
+	replyCh := make(chan startEpochResult, 1)
+	t.controlCh <- startEpochCommand{durationSeconds: args.DurationSeconds, reply: replyCh}
+	res := <-replyCh
+	if res.err != nil {
+		return res.err
 	}
-
-	t.epochMutex.Lock()
-	defer t.epochMutex.Unlock()
-
-	if t.State == EpochStateActive || t.State == EpochStateMerging {
-		return errors.New("An epoch is already in progress")
-	}
-
-	if t.epochTimer != nil {
-		t.epochTimer.Stop()
-	}
-
-	now := time.Now().UTC()
-	t.epoch.ID += 1
-	t.epoch.StartTime = now
-	t.epoch.DurationSeconds = args.DurationSeconds
-	t.epoch.EndTime = now.Add(time.Duration(args.DurationSeconds) * time.Second)
-	t.State = EpochStateActive
-	t.epoch.State = t.State
-	t.epochTimer = time.AfterFunc(time.Duration(args.DurationSeconds)*time.Second, func() {
-		if err := t.finishEpoch(); err != nil {
-			log.Printf("Error finishing epoch: %v", err)
-		}
-	})
-
-	reply.EpochID = t.epoch.ID
-	reply.State = t.State.String()
-	reply.StartUnix = t.epoch.StartTime.Unix()
-	reply.EndUnix = t.epoch.EndTime.Unix()
-	reply.DurationSecs = t.epoch.DurationSeconds
+	*reply = res.reply
 	log.Printf("Started epoch %d with duration %ds", reply.EpochID, reply.DurationSecs)
 	return nil
 }
 
 func (t *Server) EpochStatus(_ *EpochStatusArgs, reply *EpochStatusReply) error {
-	meta := t.currentEpochMeta()
-	reply.EpochID = meta.ID
-	reply.State = meta.State.String()
-	reply.StartUnix = meta.StartTime.Unix()
-	reply.EndUnix = meta.EndTime.Unix()
-	reply.DurationSecs = meta.DurationSeconds
-	reply.Accepting = t.acceptingWrites()
-	reply.LastResult = t.getLastResultPath()
+	replyCh := make(chan EpochStatusReply, 1)
+	t.controlCh <- epochStatusCommand{reply: replyCh}
+	*reply = <-replyCh
 	return nil
 }
 
@@ -505,28 +577,28 @@ func (t *Server) finishEpoch() error {
 		return errors.New("Only leader can finish epochs")
 	}
 
-	t.epochMutex.Lock()
-	if t.State != EpochStateActive {
-		t.epochMutex.Unlock()
+	beginCh := make(chan beginEpochMergeResult, 1)
+	t.controlCh <- beginEpochMergeCommand{reply: beginCh}
+	begin := <-beginCh
+	if !begin.shouldRun {
 		return nil
 	}
-	t.State = EpochStateMerging
-	t.epoch.State = t.State
-	t.epochMutex.Unlock()
 
+	resultPath := ""
+	var err error
 	if t.mergeFn != nil {
-		if err := t.mergeFn(); err != nil {
-			return err
-		}
-	} else {
-		t.sendMergeRequest()
+		resultPath, err = t.mergeFn()
 	}
+	doneCh := make(chan struct{}, 1)
+	t.controlCh <- completeEpochMergeCommand{
+		epochID:    begin.meta.ID,
+		resultPath: resultPath,
+		err:        err,
+		reply:      doneCh,
+	}
+	<-doneCh
 
-	t.epochMutex.Lock()
-	defer t.epochMutex.Unlock()
-	t.State = EpochStateCompleted
-	t.epoch.State = t.State
-	return nil
+	return err
 }
 
 /***********
@@ -636,14 +708,14 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 	t.plain = new(BitMatrix)
 	t.ServerIdx = serverIdx
 	t.ServerAddrs = serverAddrs
-	t.State = EpochStateNoActive
-	t.epoch.State = EpochStateNoActive
 	t.rateHistory = make([]float64, 10)
 	t.pending = map[int64](*InsertQueryTuple){}
-	t.accepted = map[int64](*AcceptQueryTuple){}
-	t.mergeFn = func() error {
-		t.sendMergeRequest()
-		return nil
+	t.mergeFn = func() (string, error) {
+		return t.sendMergeRequest()
+	}
+	if t.isLeader() {
+		t.controlCh = make(chan leaderControlCommand, READY_BUFFER_SIZE)
+		go t.runLeaderControl()
 	}
 
 	return t
@@ -652,10 +724,10 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 func (t *Server) DoNothing(args *int, reply *int) error {
 	// Just use this to test number
 	// of requests can handle in a second
-	t.acceptedMutex.Lock()
+	t.clientsServedMutex.Lock()
 	t.clientsServed++
 	log.Printf("Served %v", t.clientsServed)
-	t.acceptedMutex.Unlock()
+	t.clientsServedMutex.Unlock()
 
 	return nil
 }

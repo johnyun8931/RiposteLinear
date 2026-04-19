@@ -27,10 +27,11 @@ func TestStartEpochSetsActiveState(t *testing.T) {
 	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
 		t.Fatalf("start epoch failed: %v", err)
 	}
-	defer s.epochTimer.Stop()
+	defer s.stopEpochTimer()
 
-	if s.State != EpochStateActive {
-		t.Fatalf("expected active state, got %v", s.State)
+	meta := s.currentEpochMeta()
+	if meta.State != EpochStateActive {
+		t.Fatalf("expected active state, got %v", meta.State)
 	}
 	if reply.EpochID != 1 {
 		t.Fatalf("expected epoch id 1, got %d", reply.EpochID)
@@ -42,19 +43,20 @@ func TestStartEpochSetsActiveState(t *testing.T) {
 
 func TestFinishEpochTransitionsToCompleted(t *testing.T) {
 	s := NewServer(0, []string{"127.0.0.1:9000", "127.0.0.1:9001"})
-	s.mergeFn = func() error { return nil }
+	s.mergeFn = func() (string, error) { return "", nil }
 
 	var reply StartEpochReply
 	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
 		t.Fatalf("start epoch failed: %v", err)
 	}
-	s.epochTimer.Stop()
+	s.stopEpochTimer()
 
 	if err := s.finishEpoch(); err != nil {
 		t.Fatalf("finish epoch failed: %v", err)
 	}
-	if s.State != EpochStateCompleted {
-		t.Fatalf("expected completed state, got %v", s.State)
+	meta := s.currentEpochMeta()
+	if meta.State != EpochStateCompleted {
+		t.Fatalf("expected completed state, got %v", meta.State)
 	}
 	if s.acceptingWrites() {
 		t.Fatal("expected writes to be rejected after epoch completion")

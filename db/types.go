@@ -231,18 +231,107 @@ type PublishedResult struct {
 	Slots            []PublishedSlot `json:"slots"`
 }
 
+type leaderControlRuntime struct {
+	epoch          EpochMeta
+	epochTimer     *time.Timer
+	accepted       map[int64](*AcceptQueryTuple)
+	lastResultPath string
+}
+
+type leaderControlCommand interface{}
+
+type startEpochCommand struct {
+	durationSeconds int64
+	reply           chan startEpochResult
+}
+
+type startEpochResult struct {
+	reply StartEpochReply
+	err   error
+}
+
+type epochStatusCommand struct {
+	reply chan EpochStatusReply
+}
+
+type controlSnapshot struct {
+	epoch      EpochMeta
+	accepting  bool
+	lastResult string
+}
+
+type controlSnapshotCommand struct {
+	reply chan controlSnapshot
+}
+
+type upload1Command struct {
+	args  *UploadArgs1
+	reply chan upload1Result
+}
+
+type upload1Result struct {
+	reply UploadReply1
+	err   error
+}
+
+type upload2Command struct {
+	args  *UploadArgs2
+	reply chan upload2Result
+}
+
+type upload2Result struct {
+	reply UploadReply2
+	err   error
+}
+
+type upload3Command struct {
+	args  *UploadArgs3
+	reply chan upload3Result
+}
+
+type upload3Result struct {
+	reply UploadReply3
+	err   error
+}
+
+type beginEpochMergeCommand struct {
+	reply chan beginEpochMergeResult
+}
+
+type beginEpochMergeResult struct {
+	meta      EpochMeta
+	shouldRun bool
+}
+
+type completeEpochMergeCommand struct {
+	epochID    int64
+	resultPath string
+	err        error
+	reply      chan struct{}
+}
+
+type takeAcceptedSessionCommand struct {
+	uuid  int64
+	reply chan takeAcceptedSessionResult
+}
+
+type takeAcceptedSessionResult struct {
+	session *AcceptQueryTuple
+	ok      bool
+}
+
+type stopEpochTimerCommand struct {
+	reply chan struct{}
+}
+
 type Server struct {
 	ServerIdx   int
-	State       DbState
 	ServerAddrs []string
 
 	clientsTotal       int
 	clientsServed      int
 	rateHistory        []float64
 	clientsServedMutex sync.Mutex
-
-	accepted      map[int64](*AcceptQueryTuple)
-	acceptedMutex sync.RWMutex
 
 	incoming1 chan bool
 	incoming2 chan bool
@@ -262,14 +351,9 @@ type Server struct {
 
 	rpcClients [NUM_SERVERS + 1]*rpc.Client
 
-	epochMutex      sync.RWMutex
-	epoch           EpochMeta
-	epochTimer      *time.Timer
-	resultsDir      string
-	lastResultPath  string
-	lastResultMutex sync.RWMutex
-
-	mergeFn func() error
+	resultsDir string
+	controlCh  chan leaderControlCommand
+	mergeFn    func() (string, error)
 }
 
 func init() {
@@ -303,27 +387,27 @@ func (t *Server) SetResultsDir(resultsDir string) {
 }
 
 func (t *Server) currentEpochMeta() EpochMeta {
-	t.epochMutex.RLock()
-	defer t.epochMutex.RUnlock()
-	return t.epoch
+	reply := make(chan controlSnapshot, 1)
+	t.controlCh <- controlSnapshotCommand{reply: reply}
+	return (<-reply).epoch
 }
 
 func (t *Server) acceptingWrites() bool {
-	t.epochMutex.RLock()
-	defer t.epochMutex.RUnlock()
-	return t.State == EpochStateActive
-}
-
-func (t *Server) setLastResultPath(path string) {
-	t.lastResultMutex.Lock()
-	defer t.lastResultMutex.Unlock()
-	t.lastResultPath = path
+	reply := make(chan controlSnapshot, 1)
+	t.controlCh <- controlSnapshotCommand{reply: reply}
+	return (<-reply).accepting
 }
 
 func (t *Server) getLastResultPath() string {
-	t.lastResultMutex.RLock()
-	defer t.lastResultMutex.RUnlock()
-	return t.lastResultPath
+	reply := make(chan controlSnapshot, 1)
+	t.controlCh <- controlSnapshotCommand{reply: reply}
+	return (<-reply).lastResult
+}
+
+func (t *Server) stopEpochTimer() {
+	reply := make(chan struct{}, 1)
+	t.controlCh <- stopEpochTimerCommand{reply: reply}
+	<-reply
 }
 
 func extractPublishedSlots(matrix *BitMatrix) []PublishedSlot {
@@ -377,6 +461,5 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
 		return "", err
 	}
-	t.setLastResultPath(path)
 	return path, nil
 }
