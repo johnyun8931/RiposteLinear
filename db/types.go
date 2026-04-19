@@ -222,6 +222,9 @@ type PublishedSlot struct {
 
 type PublishedResult struct {
 	EpochID          int64           `json:"epoch_id"`
+	StartTime        time.Time       `json:"start_time"`
+	EndTime          time.Time       `json:"end_time"`
+	DurationSeconds  int64           `json:"duration_seconds"`
 	ServerIndex      int             `json:"server_index"`
 	CompletedAt      time.Time       `json:"completed_at"`
 	TableHeight      int             `json:"table_height"`
@@ -442,6 +445,9 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 
 	result := PublishedResult{
 		EpochID:          epoch.ID,
+		StartTime:        epoch.StartTime.UTC(),
+		EndTime:          epoch.EndTime.UTC(),
+		DurationSeconds:  epoch.DurationSeconds,
 		ServerIndex:      t.ServerIdx,
 		CompletedAt:      completedAt.UTC(),
 		TableHeight:      TABLE_HEIGHT,

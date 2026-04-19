@@ -385,6 +385,15 @@ func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 	if result.EpochID != 7 {
 		t.Fatalf("expected epoch id 7, got %d", result.EpochID)
 	}
+	if !result.StartTime.Equal(meta.StartTime) {
+		t.Fatalf("expected start time %v, got %v", meta.StartTime, result.StartTime)
+	}
+	if !result.EndTime.Equal(meta.EndTime) {
+		t.Fatalf("expected end time %v, got %v", meta.EndTime, result.EndTime)
+	}
+	if result.DurationSeconds != meta.DurationSeconds {
+		t.Fatalf("expected duration %d, got %d", meta.DurationSeconds, result.DurationSeconds)
+	}
 	if result.NonZeroSlotCount != 1 || len(result.Slots) != 1 {
 		t.Fatalf("expected one non-zero slot, got count=%d slots=%d", result.NonZeroSlotCount, len(result.Slots))
 	}

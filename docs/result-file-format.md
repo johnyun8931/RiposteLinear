@@ -1,5 +1,23 @@
 # Result File Format Notes
 
+Published result files currently include:
+
+- epoch metadata:
+  - `epoch_id`
+  - `start_time`
+  - `end_time`
+  - `duration_seconds`
+  - `completed_at`
+- instance metadata:
+  - `server_index`
+- table shape and verification context:
+  - `table_height`
+  - `table_width`
+  - `slot_length`
+  - `non_zero_slot_count`
+- sparse merge output:
+  - `slots`
+
 ## Why `message_hex` uses hex
 
 Published result files store slot payloads as hex strings rather than raw bytes or text.
