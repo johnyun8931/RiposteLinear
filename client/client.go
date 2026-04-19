@@ -163,18 +163,21 @@ func main() {
 
 	defer log.Printf("Client died.")
 
-	c := make(chan int, 1)
 	// Make one request
 	if !*hammerFlag {
 		clientOnce(*bogusFlag)
 	} else {
 		// Make many requests concurrently
 		concurrent := 16
+		var wg sync.WaitGroup
+		wg.Add(concurrent)
 		for i := 0; i < concurrent; i++ {
-			go clientOnce(*bogusFlag)
+			go func() {
+				defer wg.Done()
+				clientOnce(*bogusFlag)
+			}()
 		}
 
-		// Wait forever
-		<-c
+		wg.Wait()
 	}
 }
