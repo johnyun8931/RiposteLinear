@@ -1,6 +1,7 @@
 package db
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -399,5 +400,9 @@ func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 	}
 	if result.Slots[0].Row != 2 || result.Slots[0].Column != 3 {
 		t.Fatalf("unexpected slot coordinates: %+v", result.Slots[0])
+	}
+	expectedHex := hex.EncodeToString(matrix[2][3*SLOT_LENGTH : (3+1)*SLOT_LENGTH])
+	if result.Slots[0].MessageHex != expectedHex {
+		t.Fatalf("expected message hex %s, got %s", expectedHex, result.Slots[0].MessageHex)
 	}
 }
