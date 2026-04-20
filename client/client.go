@@ -43,7 +43,7 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 
 	err = client.Call("Server.Upload1", &upArgs1, &upRes1)
 	if err != nil {
-		log.Printf("Error:", err)
+		log.Printf("Error: %v", err)
 		return err
 	}
 
@@ -53,7 +53,7 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	// Get second msg
 	err = client.Call("Server.Upload2", &upArgs2, &upRes2)
 	if err != nil {
-		log.Printf("Error:", err)
+		log.Printf("Error: %v", err)
 		return err
 	}
 
@@ -63,7 +63,7 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	// Get third msg
 	err = client.Call("Server.Upload3", &upArgs3, &upRes3)
 	if err != nil {
-		log.Printf("Error:", err)
+		log.Printf("Error: %v", err)
 		return err
 	}
 
@@ -74,7 +74,7 @@ func tryDumpTable(client *rpc.Client) db.DumpReply {
 	var tab db.DumpReply
 	err := client.Call("Server.DumpPlaintext", 0, &tab)
 	if err != nil {
-		log.Printf("Error:", err)
+		log.Printf("Error: %v", err)
 	}
 
 	return tab
@@ -86,7 +86,7 @@ func runClient(server string, msg *db.Plaintext, tab *db.DumpReply) {
 	client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
 	defer client.Close()
 	if err != nil {
-		log.Printf("Could not connect:", err)
+		log.Printf("Could not connect: %v", err)
 		return
 	}
 
@@ -112,7 +112,7 @@ func runClient(server string, msg *db.Plaintext, tab *db.DumpReply) {
 		} else {
 			err = tryUpload(client, msg)
 			if err != nil {
-				log.Printf("Upload error", err)
+				log.Printf("Upload error: %v", err)
 				return
 			}
 		}
@@ -133,7 +133,7 @@ func clientOnce(bogus bool) {
 		msg, err := db.RandomMessage()
 
 		if err != nil {
-			log.Printf("Error generating message: ", err)
+			log.Printf("Error generating message: %v", err)
 			return
 		}
 
