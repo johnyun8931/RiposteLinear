@@ -60,7 +60,7 @@ func ListenAndServe(address string, keyIdx int, acceptCerts []tls.Certificate) {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			log.Printf("Listener error:", err)
+			log.Printf("Listener error: %v", err)
 			continue
 		}
 
