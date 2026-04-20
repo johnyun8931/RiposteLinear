@@ -9,6 +9,7 @@ Published result files currently include:
   - `duration_seconds`
   - `completed_at`
 - instance metadata:
+  - `shard_id`
   - `server_index`
 - table shape and verification context:
   - `table_height`

@@ -13,6 +13,7 @@ import (
 var curve = utils.CommonCurve
 
 func InitializeUploadArgs(args *UploadArgs1, msg *Plaintext, corrupted bool) ([]SlotContents, error) {
+	args.RouteRow = msg.Y
 
 	//log.Printf("Msg: %v", msg.Message)
 	// Create random values for secret sharing

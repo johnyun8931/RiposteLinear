@@ -53,6 +53,36 @@ func TestStartEpochSetsActiveState(t *testing.T) {
 	}
 }
 
+func TestStartEpochHonorsCoordinatorMetadataAndAbort(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{
+		DurationSeconds: 30,
+		EpochID:         9,
+		StartUnix:       170,
+	}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+
+	meta := s.currentEpochMeta()
+	if meta.ID != 9 {
+		t.Fatalf("expected epoch id 9, got %d", meta.ID)
+	}
+	if !meta.StartTime.Equal(time.Unix(170, 0).UTC()) {
+		t.Fatalf("unexpected start time %v", meta.StartTime)
+	}
+
+	var abortReply AbortEpochReply
+	if err := s.AbortEpoch(&AbortEpochArgs{EpochID: 9}, &abortReply); err != nil {
+		t.Fatalf("abort epoch failed: %v", err)
+	}
+	meta = s.currentEpochMeta()
+	if meta.State != EpochStateNoActive || meta.ID != 0 {
+		t.Fatalf("expected no-active epoch after abort, got %+v", meta)
+	}
+}
+
 func TestFinishEpochTransitionsToCompleted(t *testing.T) {
 	s := newTestLeaderServer()
 	s.mergeFn = func() (string, error) { return "", nil }
@@ -354,6 +384,7 @@ func TestSecondEpochCanStartAfterCompletion(t *testing.T) {
 func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 	dir := t.TempDir()
 	s := NewServer(0, []string{"127.0.0.1:9000", "127.0.0.1:9001"})
+	s.SetShardID(3)
 	s.SetResultsDir(dir)
 
 	var matrix BitMatrix
@@ -370,7 +401,7 @@ func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 		t.Fatalf("writePublishedResult failed: %v", err)
 	}
 
-	expected := filepath.Join(dir, "epoch-000007-server-0.json")
+	expected := filepath.Join(dir, "epoch-000007-shard-3-server-0.json")
 	if path != expected {
 		t.Fatalf("expected result path %s, got %s", expected, path)
 	}
@@ -394,6 +425,9 @@ func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 	}
 	if result.DurationSeconds != meta.DurationSeconds {
 		t.Fatalf("expected duration %d, got %d", meta.DurationSeconds, result.DurationSeconds)
+	}
+	if result.ShardID != 3 {
+		t.Fatalf("expected shard id 3, got %d", result.ShardID)
 	}
 	if result.NonZeroSlotCount != 1 || len(result.Slots) != 1 {
 		t.Fatalf("expected one non-zero slot, got count=%d slots=%d", result.NonZeroSlotCount, len(result.Slots))

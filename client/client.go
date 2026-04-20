@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"log"
 	"net/rpc"
@@ -19,7 +20,8 @@ import (
 var donothingFlag = flag.Bool("donothing", false, "If set, client pings server.")
 var bogusFlag = flag.Bool("bogus", false, "If set, client sends an invalid request.")
 var hammerFlag = flag.Bool("hammer", false, "If set, client sends requests to server as quickly as possible.")
-var leaderFlag = flag.String("leader", "", "Leader IP and port")
+var coordinatorFlag = flag.String("coordinator", "", "Coordinator IP and port")
+var leaderFlag = flag.String("leader", "", "Riposte pair leader IP and port")
 var logFlag = flag.String("log", "", "Location of log file")
 var threadsFlag = flag.Uint("threads", 1, "Number of threads to use")
 
@@ -70,25 +72,15 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	return nil
 }
 
-func tryDumpTable(client *rpc.Client) db.DumpReply {
-	var tab db.DumpReply
-	err := client.Call("Server.DumpPlaintext", 0, &tab)
-	if err != nil {
-		log.Printf("Error: %v", err)
-	}
-
-	return tab
-}
-
-func runClient(server string, msg *db.Plaintext, tab *db.DumpReply) {
+func runClient(server string, msg *db.Plaintext) {
 	certs := make([]tls.Certificate, 1)
 	certs[0] = utils.LeaderCertificate
 	client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
-	defer client.Close()
 	if err != nil {
 		log.Printf("Could not connect: %v", err)
 		return
 	}
+	defer client.Close()
 
 	//log.Printf("Connected")
 	for {
@@ -123,11 +115,9 @@ func runClient(server string, msg *db.Plaintext, tab *db.DumpReply) {
 	}
 }
 
-func clientOnce(bogus bool) {
-	var table db.DumpReply
-
+func clientOnce(target string) {
 	if *donothingFlag {
-		runClient(*leaderFlag, nil, &table)
+		runClient(target, nil)
 	} else {
 		//log.Printf("=== Starting Client ===")
 		msg, err := db.RandomMessage()
@@ -139,14 +129,32 @@ func clientOnce(bogus bool) {
 
 		//log.Printf("Insert into [%v,%v]", xIdx, yIdx)
 		//log.Printf("Plaintext [%v]", msg)
-		runClient(*leaderFlag, msg, &table)
+		runClient(target, msg)
 	}
+}
+
+func resolveTargetAddress(coordinatorAddr, leaderAddr string) (string, error) {
+	if coordinatorAddr != "" && leaderAddr != "" {
+		return "", errors.New("must specify only one of -coordinator or -leader")
+	}
+	if coordinatorAddr != "" {
+		return coordinatorAddr, nil
+	}
+	if leaderAddr != "" {
+		return leaderAddr, nil
+	}
+	return "", errors.New("must specify one of -coordinator or -leader")
+}
+
+func targetAddress() (string, error) {
+	return resolveTargetAddress(*coordinatorFlag, *leaderFlag)
 }
 
 func main() {
 	flag.Parse()
-	if *leaderFlag == "" {
-		log.Fatal("Must specify leader.\n")
+	target, err := targetAddress()
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	if *logFlag != "" {
@@ -165,7 +173,7 @@ func main() {
 
 	// Make one request
 	if !*hammerFlag {
-		clientOnce(*bogusFlag)
+		clientOnce(target)
 	} else {
 		// Make many requests concurrently
 		concurrent := 16
@@ -174,7 +182,7 @@ func main() {
 		for i := 0; i < concurrent; i++ {
 			go func() {
 				defer wg.Done()
-				clientOnce(*bogusFlag)
+				clientOnce(target)
 			}()
 		}
 

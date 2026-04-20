@@ -77,7 +77,8 @@ type EncryptedInsertQuery3 struct {
 }
 
 type UploadArgs1 struct {
-	Query [NUM_SERVERS]EncryptedInsertQuery
+	RouteRow int
+	Query    [NUM_SERVERS]EncryptedInsertQuery
 }
 
 type UploadArgs2 struct {
@@ -184,6 +185,8 @@ type PlaintextReply struct {
 
 type StartEpochArgs struct {
 	DurationSeconds int64
+	EpochID         int64
+	StartUnix       int64
 }
 
 type StartEpochReply struct {
@@ -206,6 +209,12 @@ type EpochStatusReply struct {
 	LastResult   string
 }
 
+type AbortEpochArgs struct {
+	EpochID int64
+}
+
+type AbortEpochReply struct{}
+
 type EpochMeta struct {
 	ID              int64     `json:"id"`
 	State           DbState   `json:"state"`
@@ -225,6 +234,7 @@ type PublishedResult struct {
 	StartTime        time.Time       `json:"start_time"`
 	EndTime          time.Time       `json:"end_time"`
 	DurationSeconds  int64           `json:"duration_seconds"`
+	ShardID          int             `json:"shard_id"`
 	ServerIndex      int             `json:"server_index"`
 	CompletedAt      time.Time       `json:"completed_at"`
 	TableHeight      int             `json:"table_height"`
@@ -245,6 +255,8 @@ type leaderControlCommand interface{}
 
 type startEpochCommand struct {
 	durationSeconds int64
+	epochID         int64
+	startUnix       int64
 	reply           chan startEpochResult
 }
 
@@ -327,8 +339,14 @@ type stopEpochTimerCommand struct {
 	reply chan struct{}
 }
 
+type abortEpochCommand struct {
+	epochID int64
+	reply   chan error
+}
+
 type Server struct {
 	ServerIdx   int
+	ShardID     int
 	ServerAddrs []string
 
 	clientsTotal       int
@@ -387,6 +405,10 @@ func (s DbState) String() string {
 
 func (t *Server) SetResultsDir(resultsDir string) {
 	t.resultsDir = resultsDir
+}
+
+func (t *Server) SetShardID(shardID int) {
+	t.ShardID = shardID
 }
 
 func (t *Server) currentEpochMeta() EpochMeta {
@@ -448,6 +470,7 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 		StartTime:        epoch.StartTime.UTC(),
 		EndTime:          epoch.EndTime.UTC(),
 		DurationSeconds:  epoch.DurationSeconds,
+		ShardID:          t.ShardID,
 		ServerIndex:      t.ServerIdx,
 		CompletedAt:      completedAt.UTC(),
 		TableHeight:      TABLE_HEIGHT,
@@ -463,7 +486,7 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 		return "", err
 	}
 
-	path := filepath.Join(t.resultsDir, fmt.Sprintf("epoch-%06d-server-%d.json", epoch.ID, t.ServerIdx))
+	path := filepath.Join(t.resultsDir, fmt.Sprintf("epoch-%06d-shard-%d-server-%d.json", epoch.ID, t.ShardID, t.ServerIdx))
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
 		return "", err
 	}

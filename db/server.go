@@ -54,7 +54,14 @@ func (t *Server) runLeaderControl() {
 			}
 
 			now := time.Now().UTC()
-			state.epoch.ID++
+			if c.startUnix > 0 {
+				now = time.Unix(c.startUnix, 0).UTC()
+			}
+			if c.epochID > 0 {
+				state.epoch.ID = c.epochID
+			} else {
+				state.epoch.ID++
+			}
 			state.epoch.State = EpochStateActive
 			state.epoch.StartTime = now
 			state.epoch.DurationSeconds = c.durationSeconds
@@ -163,6 +170,17 @@ func (t *Server) runLeaderControl() {
 				state.epochTimer = nil
 			}
 			c.reply <- struct{}{}
+		case abortEpochCommand:
+			if state.epoch.ID != c.epochID || state.epoch.State != EpochStateActive {
+				c.reply <- errors.New("No matching active epoch to abort")
+				continue
+			}
+			if state.epochTimer != nil {
+				state.epochTimer.Stop()
+				state.epochTimer = nil
+			}
+			state.epoch = EpochMeta{State: EpochStateNoActive}
+			c.reply <- nil
 		}
 	}
 }
@@ -555,7 +573,12 @@ func (t *Server) StartEpoch(args *StartEpochArgs, reply *StartEpochReply) error 
 		return errors.New("Only leader can start epochs")
 	}
 	replyCh := make(chan startEpochResult, 1)
-	t.controlCh <- startEpochCommand{durationSeconds: args.DurationSeconds, reply: replyCh}
+	t.controlCh <- startEpochCommand{
+		durationSeconds: args.DurationSeconds,
+		epochID:         args.EpochID,
+		startUnix:       args.StartUnix,
+		reply:           replyCh,
+	}
 	res := <-replyCh
 	if res.err != nil {
 		return res.err
@@ -570,6 +593,15 @@ func (t *Server) EpochStatus(_ *EpochStatusArgs, reply *EpochStatusReply) error 
 	t.controlCh <- epochStatusCommand{reply: replyCh}
 	*reply = <-replyCh
 	return nil
+}
+
+func (t *Server) AbortEpoch(args *AbortEpochArgs, reply *AbortEpochReply) error {
+	if !t.isLeader() {
+		return errors.New("Only leader can abort epochs")
+	}
+	replyCh := make(chan error, 1)
+	t.controlCh <- abortEpochCommand{epochID: args.EpochID, reply: replyCh}
+	return <-replyCh
 }
 
 func (t *Server) finishEpoch() error {
