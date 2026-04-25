@@ -4,10 +4,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/rpc"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 
 	//"bytes"
@@ -24,6 +26,9 @@ var coordinatorFlag = flag.String("coordinator", "", "Coordinator IP and port")
 var leaderFlag = flag.String("leader", "", "Riposte pair leader IP and port")
 var logFlag = flag.String("log", "", "Location of log file")
 var threadsFlag = flag.Uint("threads", 1, "Number of threads to use")
+var xFlag = flag.Int("x", -1, "Exact column to write for deterministic uploads")
+var yFlag = flag.Int("y", -1, "Exact row to write for deterministic uploads")
+var payloadFlag = flag.String("payload", "", "Exact payload to write for deterministic uploads")
 
 var countLock sync.Mutex
 var count int
@@ -72,13 +77,12 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	return nil
 }
 
-func runClient(server string, msg *db.Plaintext) {
+func runClient(server string, msg *db.Plaintext) error {
 	certs := make([]tls.Certificate, 1)
 	certs[0] = utils.LeaderCertificate
 	client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
 	if err != nil {
-		log.Printf("Could not connect: %v", err)
-		return
+		return fmt.Errorf("could not connect: %w", err)
 	}
 	defer client.Close()
 
@@ -98,14 +102,14 @@ func runClient(server string, msg *db.Plaintext) {
 			var a, b int
 			err := client.Call("Server.DoNothing", &a, &b)
 			if err != nil {
-				panic("Oh no!")
+				return err
 			}
 
 		} else {
 			err = tryUpload(client, msg)
 			if err != nil {
 				log.Printf("Upload error: %v", err)
-				return
+				return err
 			}
 		}
 
@@ -113,24 +117,47 @@ func runClient(server string, msg *db.Plaintext) {
 			break
 		}
 	}
+	return nil
 }
 
-func clientOnce(target string) {
-	if *donothingFlag {
-		runClient(target, nil)
-	} else {
-		//log.Printf("=== Starting Client ===")
-		msg, err := db.RandomMessage()
-
-		if err != nil {
-			log.Printf("Error generating message: %v", err)
-			return
-		}
-
-		//log.Printf("Insert into [%v,%v]", xIdx, yIdx)
-		//log.Printf("Plaintext [%v]", msg)
-		runClient(target, msg)
+func resolveMessageInput(x, y int, payload string) (*db.Plaintext, error) {
+	exactRequested := x >= 0 || y >= 0 || payload != ""
+	if !exactRequested {
+		return db.RandomMessage()
 	}
+	if x < 0 || y < 0 || payload == "" {
+		return nil, errors.New("must specify all of -x, -y, and -payload")
+	}
+	if x >= db.TABLE_WIDTH {
+		return nil, fmt.Errorf("-x must be in [0,%d)", db.TABLE_WIDTH)
+	}
+	if y >= db.TABLE_HEIGHT {
+		return nil, fmt.Errorf("-y must be in [0,%d)", db.TABLE_HEIGHT)
+	}
+	if len(payload) > db.SLOT_LENGTH {
+		return nil, fmt.Errorf("-payload must be at most %d bytes", db.SLOT_LENGTH)
+	}
+
+	msg := new(db.Plaintext)
+	msg.X = x
+	msg.Y = y
+	copy(msg.Message[:], []byte(payload))
+	return msg, nil
+}
+
+func clientOnce(target string) error {
+	if *donothingFlag {
+		return runClient(target, nil)
+	}
+	//log.Printf("=== Starting Client ===")
+	msg, err := resolveMessageInput(*xFlag, *yFlag, *payloadFlag)
+	if err != nil {
+		return err
+	}
+
+	//log.Printf("Insert into [%v,%v]", xIdx, yIdx)
+	//log.Printf("Plaintext [%v]", msg)
+	return runClient(target, msg)
 }
 
 func resolveTargetAddress(coordinatorAddr, leaderAddr string) (string, error) {
@@ -173,19 +200,30 @@ func main() {
 
 	// Make one request
 	if !*hammerFlag {
-		clientOnce(target)
+		err = clientOnce(target)
+		if err != nil {
+			log.Fatal(err)
+		}
 	} else {
 		// Make many requests concurrently
 		concurrent := 16
 		var wg sync.WaitGroup
+		errCh := make(chan error, concurrent)
 		wg.Add(concurrent)
 		for i := 0; i < concurrent; i++ {
 			go func() {
 				defer wg.Done()
-				clientOnce(target)
+				errCh <- clientOnce(target)
 			}()
 		}
 
 		wg.Wait()
+		close(errCh)
+		for clientErr := range errCh {
+			if clientErr == nil || strings.Contains(clientErr.Error(), "No active epoch") {
+				continue
+			}
+			log.Fatal(clientErr)
+		}
 	}
 }
