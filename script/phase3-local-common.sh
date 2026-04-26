@@ -33,6 +33,9 @@ export RIPOSTE_BENCH_DURATION="${RIPOSTE_BENCH_DURATION:-8}"
 export RIPOSTE_BENCH_WARMUP_DURATION="${RIPOSTE_BENCH_WARMUP_DURATION:-4}"
 export RIPOSTE_BENCH_POST_RUN_WAIT="${RIPOSTE_BENCH_POST_RUN_WAIT:-12}"
 export RIPOSTE_BENCH_START_DELAY="${RIPOSTE_BENCH_START_DELAY:-1}"
+# Server-side startup readiness is now enforced; this delay is only a small
+# convenience so the local scripts avoid immediate retry loops right after ports
+# open.
 export RIPOSTE_TOPOLOGY_SETTLE_DELAY="${RIPOSTE_TOPOLOGY_SETTLE_DELAY:-2}"
 
 mkdir -p "$STATE_DIR" "$BIN_DIR" "$LOG_DIR" "$PID_DIR" "$TMP_DIR"

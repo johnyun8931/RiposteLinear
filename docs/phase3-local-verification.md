@@ -17,6 +17,8 @@ These scripts are the current reproducibility path for the Phase 3 local setup. 
 
 `phase3-local-benchmark.sh` now performs a local server-thread sweep and writes summary artifacts under the script state directory in `/tmp/riposte-phase3-local/`.
 
+Shard startup readiness is now enforced in the server: if a leader receives `StartEpoch` before its peer RPC connections are established, it returns a readiness error instead of racing into the merge path. The short settle delay in the local scripts is kept only as startup convenience.
+
 ## Topology
 
 - single-shard baseline:
