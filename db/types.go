@@ -50,6 +50,14 @@ const (
 	EpochStateCompleted
 )
 
+type PeerConnectionState int
+
+const (
+	PeerConnectionsConnecting PeerConnectionState = iota
+	PeerConnectionsReady
+	PeerConnectionsFailed
+)
+
 type SlotContents [SLOT_LENGTH]byte
 
 type Plaintext struct {
@@ -249,6 +257,8 @@ type leaderControlRuntime struct {
 	epochTimer     *time.Timer
 	accepted       map[int64](*AcceptQueryTuple)
 	lastResultPath string
+	peerState      PeerConnectionState
+	peerError      string
 }
 
 type leaderControlCommand interface{}
@@ -273,10 +283,18 @@ type controlSnapshot struct {
 	epoch      EpochMeta
 	accepting  bool
 	lastResult string
+	peerState  PeerConnectionState
+	peerError  string
 }
 
 type controlSnapshotCommand struct {
 	reply chan controlSnapshot
+}
+
+type updatePeerConnectionStateCommand struct {
+	state PeerConnectionState
+	err   string
+	reply chan struct{}
 }
 
 type upload1Command struct {
@@ -403,6 +421,19 @@ func (s DbState) String() string {
 	}
 }
 
+func (s PeerConnectionState) String() string {
+	switch s {
+	case PeerConnectionsConnecting:
+		return "connecting"
+	case PeerConnectionsReady:
+		return "ready"
+	case PeerConnectionsFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
+
 func (t *Server) SetResultsDir(resultsDir string) {
 	t.resultsDir = resultsDir
 }
@@ -417,16 +448,23 @@ func (t *Server) currentEpochMeta() EpochMeta {
 	return (<-reply).epoch
 }
 
-func (t *Server) acceptingWrites() bool {
+func (t *Server) currentControlSnapshot() controlSnapshot {
 	reply := make(chan controlSnapshot, 1)
 	t.controlCh <- controlSnapshotCommand{reply: reply}
-	return (<-reply).accepting
+	return <-reply
+}
+
+func (t *Server) currentPeerState() (PeerConnectionState, string) {
+	snapshot := t.currentControlSnapshot()
+	return snapshot.peerState, snapshot.peerError
+}
+
+func (t *Server) acceptingWrites() bool {
+	return t.currentControlSnapshot().accepting
 }
 
 func (t *Server) getLastResultPath() string {
-	reply := make(chan controlSnapshot, 1)
-	t.controlCh <- controlSnapshotCommand{reply: reply}
-	return (<-reply).lastResult
+	return t.currentControlSnapshot().lastResult
 }
 
 func (t *Server) stopEpochTimer() {

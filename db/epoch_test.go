@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,6 +20,13 @@ func newTestLeaderServer() *Server {
 	s.incoming1 <- true
 	s.incoming2 <- true
 	s.incoming3 <- true
+	s.setPeerConnectionState(PeerConnectionsReady, nil)
+	return s
+}
+
+func newTestLeaderServerWithPeerState(state PeerConnectionState, err error) *Server {
+	s := newTestLeaderServer()
+	s.setPeerConnectionState(state, err)
 	return s
 }
 
@@ -135,6 +143,26 @@ func TestStartEpochRejectsNonPositiveDuration(t *testing.T) {
 	}
 }
 
+func TestStartEpochRejectsWhilePeerConnectionsStillInitializing(t *testing.T) {
+	s := newTestLeaderServerWithPeerState(PeerConnectionsConnecting, nil)
+
+	var reply StartEpochReply
+	err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply)
+	if err == nil || err.Error() != "leader not ready for start epoch: peer RPC connections still initializing" {
+		t.Fatalf("expected readiness error, got %v", err)
+	}
+}
+
+func TestStartEpochRejectsAfterPeerConnectionFailure(t *testing.T) {
+	s := newTestLeaderServerWithPeerState(PeerConnectionsFailed, errors.New("dial tcp 127.0.0.1:9001: connect: refused"))
+
+	var reply StartEpochReply
+	err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply)
+	if err == nil || !strings.Contains(err.Error(), "leader not ready for start epoch: peer RPC connection setup failed:") {
+		t.Fatalf("expected peer connection failure, got %v", err)
+	}
+}
+
 func TestStartEpochRejectsWhileActive(t *testing.T) {
 	s := newTestLeaderServer()
 
@@ -217,6 +245,22 @@ func TestFinishEpochMergeFailureLeavesEpochIncomplete(t *testing.T) {
 	}
 	if status.LastResult != "" {
 		t.Fatalf("expected no result path after failed merge, got %q", status.LastResult)
+	}
+}
+
+func TestFinishEpochRejectsWhenPeerConnectionsNotReady(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+	s.setPeerConnectionState(PeerConnectionsConnecting, nil)
+
+	err := s.finishEpoch()
+	if err == nil || err.Error() != "leader not ready for merge: peer RPC connections still initializing" {
+		t.Fatalf("expected readiness error from finishEpoch, got %v", err)
 	}
 }
 

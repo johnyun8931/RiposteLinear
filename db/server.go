@@ -34,7 +34,8 @@ func (t *Server) runLeaderControl() {
 		epoch: EpochMeta{
 			State: EpochStateNoActive,
 		},
-		accepted: map[int64](*AcceptQueryTuple){},
+		accepted:  map[int64](*AcceptQueryTuple){},
+		peerState: PeerConnectionsConnecting,
 	}
 
 	for cmd := range t.controlCh {
@@ -96,7 +97,13 @@ func (t *Server) runLeaderControl() {
 				epoch:      state.epoch,
 				accepting:  state.epoch.State == EpochStateActive,
 				lastResult: state.lastResultPath,
+				peerState:  state.peerState,
+				peerError:  state.peerError,
 			}
+		case updatePeerConnectionStateCommand:
+			state.peerState = c.state
+			state.peerError = c.err
+			c.reply <- struct{}{}
 		case upload1Command:
 			if state.epoch.State != EpochStateActive {
 				c.reply <- upload1Result{err: errors.New("No active epoch")}
@@ -240,6 +247,57 @@ func (t *Server) Upload3(args *UploadArgs3, reply *UploadReply3) error {
 	return nil
 }
 
+func (t *Server) setPeerConnectionState(state PeerConnectionState, err error) {
+	if !t.isLeader() || t.controlCh == nil {
+		return
+	}
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
+	replyCh := make(chan struct{}, 1)
+	t.controlCh <- updatePeerConnectionStateCommand{
+		state: state,
+		err:   errText,
+		reply: replyCh,
+	}
+	<-replyCh
+}
+
+func (t *Server) requirePeerReady(op string) error {
+	if !t.isLeader() {
+		return nil
+	}
+	state, errText := t.currentPeerState()
+	switch state {
+	case PeerConnectionsReady:
+		return nil
+	case PeerConnectionsFailed:
+		if errText != "" {
+			return fmt.Errorf("leader not ready for %s: peer RPC connection setup failed: %s", op, errText)
+		}
+		return fmt.Errorf("leader not ready for %s: peer RPC connection setup failed", op)
+	case PeerConnectionsConnecting:
+		fallthrough
+	default:
+		return fmt.Errorf("leader not ready for %s: peer RPC connections still initializing", op)
+	}
+}
+
+func (t *Server) requirePeerRPCClients(op string) ([NUM_SERVERS]*rpc.Client, error) {
+	var clients [NUM_SERVERS]*rpc.Client
+	if err := t.requirePeerReady(op); err != nil {
+		return clients, err
+	}
+	for i := 0; i < NUM_SERVERS; i++ {
+		if t.rpcClients[i] == nil {
+			return clients, fmt.Errorf("leader not ready for %s: peer RPC client %d not established", op, i)
+		}
+		clients[i] = t.rpcClients[i]
+	}
+	return clients, nil
+}
+
 // Do everything
 func (t *Server) processRequest() {
 	for {
@@ -250,35 +308,31 @@ func (t *Server) processRequest() {
 		t.clientsServed += 1
 		t.clientsServedMutex.Unlock()
 
-		shouldCommit := t.submitPrepares(uuid)
-		t.submitCommits(uuid, shouldCommit)
+		shouldCommit, err := t.submitPrepares(uuid)
+		if err != nil {
+			log.Printf("Error preparing uuid %d: %v", uuid, err)
+			t.amPublishingMutex.RUnlock()
+			continue
+		}
+		if err := t.submitCommits(uuid, shouldCommit); err != nil {
+			log.Printf("Error committing uuid %d: %v", uuid, err)
+		}
 
 		t.amPublishingMutex.RUnlock()
 	}
 }
 
-func readIncomingRequests(preps *[NUM_SERVERS]PrepareArgs,
-	c chan [NUM_SERVERS]EncryptedInsertQuery) bool {
-	queryList := <-c
-	if queryList[0].Ciphertext == nil {
-		return true
+func (t *Server) submitPrepares(uuid int64) (bool, error) {
+	clients, err := t.requirePeerRPCClients("prepare")
+	if err != nil {
+		return false, err
 	}
-
-	for i := 0; i < NUM_SERVERS; i++ {
-		(*preps)[i].Query1 = queryList[i]
-	}
-
-	return false
-}
-
-func (t *Server) submitPrepares(uuid int64) bool {
 	var preps [NUM_SERVERS]PrepareArgs
 	replyCh := make(chan takeAcceptedSessionResult, 1)
 	t.controlCh <- takeAcceptedSessionCommand{uuid: uuid, reply: replyCh}
 	sessionRes := <-replyCh
 	if !sessionRes.ok || sessionRes.session == nil {
-		log.Printf("Missing accepted session for uuid %d", uuid)
-		return false
+		return false, fmt.Errorf("missing accepted session for uuid %d", uuid)
 	}
 	tup := sessionRes.session
 
@@ -300,7 +354,7 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	var replies [NUM_SERVERS]PrepareReply
 	for i := 0; i < NUM_SERVERS; i++ {
 		go func(prep *PrepareArgs, reply *PrepareReply, j int) {
-			err := t.rpcClients[j].Call("Server.Prepare", prep, reply)
+			err := clients[j].Call("Server.Prepare", prep, reply)
 			if err != nil {
 				c <- err
 			} else {
@@ -314,7 +368,7 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	for i := 0; i < NUM_SERVERS; i++ {
 		r = <-c
 		if r != nil {
-			log.Fatal("Error in prepare: ", r)
+			return false, fmt.Errorf("prepare fanout failed: %w", r)
 		}
 	}
 
@@ -345,10 +399,14 @@ func (t *Server) submitPrepares(uuid int64) bool {
 	}
 
 	okay := true
-	return okay
+	return okay, nil
 }
 
-func (t *Server) submitCommits(uuid int64, shouldCommit bool) {
+func (t *Server) submitCommits(uuid int64, shouldCommit bool) error {
+	clients, err := t.requirePeerRPCClients("commit")
+	if err != nil {
+		return err
+	}
 	var com CommitArgs
 	com.Uuid = uuid
 	com.Commit = shouldCommit
@@ -360,7 +418,7 @@ func (t *Server) submitCommits(uuid int64, shouldCommit bool) {
 	var replies [NUM_SERVERS]CommitReply
 	for i := 0; i < NUM_SERVERS; i++ {
 		go func(com *CommitArgs, reply *CommitReply, j int) {
-			err := t.rpcClients[j].Call("Server.Commit", com, reply)
+			err := clients[j].Call("Server.Commit", com, reply)
 			if err != nil {
 				c <- err
 			} else {
@@ -374,12 +432,13 @@ func (t *Server) submitCommits(uuid int64, shouldCommit bool) {
 	for i := 0; i < NUM_SERVERS; i++ {
 		r = <-c
 		if r != nil {
-			log.Fatal("Error in commit: ", r)
+			return fmt.Errorf("commit fanout failed: %w", r)
 		}
 		//log.Printf("Got commit %v/%v", i, NUM_SERVERS)
 	}
 
 	//log.Printf("Done COMMIT %d", com.Uuid)
+	return nil
 }
 
 func (t *Server) printStats() {
@@ -407,13 +466,17 @@ func (t *Server) printStats() {
 }
 
 func (t *Server) sendMergeRequest() (string, error) {
+	clients, err := t.requirePeerRPCClients("merge")
+	if err != nil {
+		return "", err
+	}
 	// Call each server and ask for their data
 	// Send out COMMIT request
 	c := make(chan error, NUM_SERVERS)
 	var replies [NUM_SERVERS]DumpReply
 	for i := 0; i < NUM_SERVERS; i++ {
 		go func(reply *DumpReply, j int) {
-			err := t.rpcClients[j].Call("Server.DumpTable", 0, reply)
+			err := clients[j].Call("Server.DumpTable", 0, reply)
 			if err != nil {
 				c <- err
 			} else {
@@ -427,7 +490,7 @@ func (t *Server) sendMergeRequest() (string, error) {
 	for i := 0; i < NUM_SERVERS; i++ {
 		r = <-c
 		if r != nil {
-			log.Fatal("Error in merge: ", r)
+			return "", fmt.Errorf("merge fanout failed: %w", r)
 		}
 		log.Printf("Done merge")
 	}
@@ -436,7 +499,7 @@ func (t *Server) sendMergeRequest() (string, error) {
 	parg.Plaintext = revealCleartext(replies)
 
 	var p_reply PlaintextReply
-	err := t.rpcClients[0].Call("Server.StorePlaintext", &parg, &p_reply)
+	err = clients[0].Call("Server.StorePlaintext", &parg, &p_reply)
 
 	if err != nil {
 		return "", err
@@ -572,6 +635,9 @@ func (t *Server) StartEpoch(args *StartEpochArgs, reply *StartEpochReply) error 
 	if !t.isLeader() {
 		return errors.New("Only leader can start epochs")
 	}
+	if err := t.requirePeerReady("start epoch"); err != nil {
+		return err
+	}
 	replyCh := make(chan startEpochResult, 1)
 	t.controlCh <- startEpochCommand{
 		durationSeconds: args.DurationSeconds,
@@ -659,15 +725,20 @@ func (t *Server) openConnections() error {
 
 	// Wait for all connections
 	failed := false
+	var firstErr error
 	for i := 0; i < len(t.ServerAddrs); i++ {
 		err := <-c
 		if err != nil {
+			failed = true
+			if firstErr == nil {
+				firstErr = err
+			}
 			log.Printf("Error connecting to server: %v", err)
 		}
 	}
 
 	if failed {
-		return errors.New("Connection failed")
+		return fmt.Errorf("connection failed: %w", firstErr)
 	}
 
 	return nil
@@ -696,8 +767,11 @@ func (t *Server) Initialize(*int, *int) error {
 			time.Sleep(500 * time.Millisecond)
 			err := t.openConnections()
 			if err != nil {
-				log.Fatal("Could not initialize table", err)
+				t.setPeerConnectionState(PeerConnectionsFailed, err)
+				log.Printf("Could not initialize peer connections: %v", err)
+				return
 			}
+			t.setPeerConnectionState(PeerConnectionsReady, nil)
 		}(t)
 	}
 	return nil

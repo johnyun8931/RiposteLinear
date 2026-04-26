@@ -1,114 +1,91 @@
 package db
 
 import (
-//  "fmt"
-  "testing"
+	"math/big"
+	"testing"
 )
 
 func TestSimple(t *testing.T) {
-  tab := new(SlotTable)
-  tab.ForeachRow(func(_ int, value *BitMatrixRow) {
-    for i := 0; i<len(value); i++ {
-      value[i] = 2
-    }
-  })
+	tab := NewSlotTable()
+	tab.ForeachRow(func(_ int, value *BitMatrixRow) {
+		for i := 0; i < len(value); i++ {
+			value[i] = 2
+		}
+	})
 
-  if tab.table[0][0] != 2 {
-    t.Fail()
-  }
+	if tab.table[0][0] != 2 {
+		t.Fatal("expected table to be populated")
+	}
 
-  tab.Clear()
+	tab.Clear()
 
-  if tab.table[0][0] != 0 {
-    t.Fail()
-  }
+	if tab.table[0][0] != 0 {
+		t.Fatal("expected table to be cleared")
+	}
 }
 
 func TestEndToEndNoProof(t *testing.T) {
-  testEndToEndOnce(t)
-}
+	msg, err := RandomMessage()
+	if err != nil {
+		t.Fatalf("RandomMessage failed: %v", err)
+	}
 
-func testEndToEndOnce(t *testing.T) {
-  xIdx, yIdx, msg, err := RandomMessage()
-  if err != nil {
-    t.FailNow()
-  }
+	var args UploadArgs1
+	if _, err := InitializeUploadArgs(&args, msg, false); err != nil {
+		t.Fatalf("InitializeUploadArgs failed: %v", err)
+	}
 
-  var args UploadArgs
-  err = InitializeUploadArgs(&args, xIdx, yIdx, msg, false)
-  if err != nil {
-    t.FailNow()
-  }
-  //fmt.Printf("(x,y) = (%v, %v)\n", xIdx, yIdx)
-  //fmt.Printf("msg = (%v)\n", msg)
+	slotTables := make([]*SlotTable, NUM_SERVERS)
+	for i := 0; i < NUM_SERVERS; i++ {
+		slotTables[i] = NewSlotTable()
 
-  // Args has encrypted insert queries
-  slotTables := make([]SlotTable, NUM_SERVERS)
-  for i := 0; i<NUM_SERVERS; i++ {
-    // Decrypt query
-    var query *InsertQuery
-    query, err = DecryptQuery(i, args.Query[i])
-    if err != nil {
-      t.FailNow()
-    }
+		var query InsertQuery1
+		if err := DecryptQuery(i, args.Query[i], &query); err != nil {
+			t.Fatalf("DecryptQuery(%d) failed: %v", i, err)
+		}
 
-    // Add to table
-    queries := make([]*InsertQuery, 1)
-    queries[0] = query
-    slotTables[i].processQueries(queries)
-  }
+		tup := &InsertQueryTuple{q1: query}
+		reply := &PrepareReply{}
+		slotTables[i].processQuery(tup, reply, i == 1, zeroBigInt(), zeroBigInt())
+	}
 
-  // Combine tables 
-  replies := new([NUM_SERVERS]DumpReply)
-  for i := 0; i<NUM_SERVERS; i++ {
-    replies[i].Entries = new(BitMatrix)
-    slotTables[i].CopyToAndClear(replies[i].Entries)
-  }
+	var replies [NUM_SERVERS]DumpReply
+	for i := 0; i < NUM_SERVERS; i++ {
+		replies[i].Entries = new(BitMatrix)
+		slotTables[i].CopyToAndClear(replies[i].Entries)
+	}
 
-  b := revealCleartext(*replies)
-  for i:=0; i<len(b); i++ {
-    for j:=0; j<len(b[i]); j++ {
-      //fmt.Printf("%v ", b[i][j])
-    }
-    //fmt.Printf("\n")
-  }
-
-  var out [SLOT_LENGTH]byte
-  copy(out[:], b[yIdx][(SLOT_LENGTH*xIdx):])
-  if out != msg {
-    t.Fatal("Message mismatch", out, msg)
-  }
+	b := revealCleartext(replies)
+	var out SlotContents
+	start := SLOT_LENGTH * msg.X
+	copy(out[:], b[msg.Y][start:start+SLOT_LENGTH])
+	if out != msg.Message {
+		t.Fatalf("message mismatch: got %x want %x", out, msg.Message)
+	}
 }
 
 func BenchmarkTable(b *testing.B) {
-  xIdx, yIdx, msg, err := RandomMessage()
-  if err != nil {
-    b.FailNow()
-  }
+	msg := testPlaintext(3, 5, "benchmark")
 
-  var args UploadArgs
-  err = InitializeUploadArgs(&args, xIdx, yIdx, msg, false)
-  if err != nil {
-    b.FailNow()
-  }
+	var args UploadArgs1
+	if _, err := InitializeUploadArgs(&args, msg, false); err != nil {
+		b.Fatalf("InitializeUploadArgs failed: %v", err)
+	}
 
-  // Decrypt query
-  var query *InsertQuery
-  query, err = DecryptQuery(0, args.Query[0])
-  if err != nil {
-    b.FailNow()
-  }
+	var query InsertQuery1
+	if err := DecryptQuery(0, args.Query[0], &query); err != nil {
+		b.Fatalf("DecryptQuery failed: %v", err)
+	}
 
-  // Add to table
-  queries := make([]*InsertQuery, b.N)
-  for i := 0; i < b.N; i++ {
-    queries[i] = query
-  }
+	slotTable := NewSlotTable()
+	reply := &PrepareReply{}
+	b.ResetTimer()
 
-  // Args has encrypted insert queries
-  slotTable := new(SlotTable)
-  b.ResetTimer()
-
-  slotTable.processQueries(queries)
+	for i := 0; i < b.N; i++ {
+		slotTable.processQuery(&InsertQueryTuple{q1: query}, reply, false, zeroBigInt(), zeroBigInt())
+	}
 }
 
+func zeroBigInt() *big.Int {
+	return new(big.Int)
+}

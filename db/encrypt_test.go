@@ -1,112 +1,119 @@
 package db
 
 import (
-	"bitbucket.org/henrycg/riposte/prf"
-	"bitbucket.org/henrycg/riposte/utils"
 	"crypto/rand"
+	"math/big"
 	"testing"
 
-	"golang.org/x/crypto/poly1305"
+	"bitbucket.org/henrycg/riposte/mulproof"
+	"bitbucket.org/henrycg/riposte/prf"
+	"bitbucket.org/henrycg/riposte/utils"
 )
 
-func randomQuery(t *testing.T) InsertQuery {
-	var q InsertQuery
-	utils.RandVectorBool(q.Key.KeyMask[:])
-	var err error
-	for i := 0; i < len(q.Key.Keys); i++ {
-		q.Key.Keys[i], err = prf.NewKey()
-		if err != nil {
-			t.FailNow()
-		}
-	}
+func randomInsertQuery1(t *testing.T, keyIndex int) InsertQuery1 {
+	t.Helper()
 
+	var q InsertQuery1
+	q.KeyIndex = keyIndex
+	utils.RandVectorBool(q.KeyMask[:])
+	if err := randomVectorKeys(q.Keys[:]); err != nil {
+		t.Fatalf("randomVectorKeys failed: %v", err)
+	}
+	var row BitMatrixRow
+	if _, err := rand.Read(row[:]); err != nil {
+		t.Fatalf("rand row failed: %v", err)
+	}
+	q.MessageMask = row
 	return q
 }
 
-func randomAudit(t *testing.T) AuditQuery {
-	var q AuditQuery
-	l := 128
-	q.MsgTest = make([][poly1305.TagSize]byte, l)
-	q.KeyTest = make([][poly1305.TagSize]byte, l)
-	for i := range q.MsgTest {
-		rand.Read(q.MsgTest[i][:])
-		rand.Read(q.KeyTest[i][:])
-	}
-	return q
+func randomInsertQuery2() InsertQuery2 {
+	return InsertQuery2{MsgShare: big.NewInt(12345)}
 }
 
-func TestEncryptGood(t *testing.T) {
+func randomInsertQuery3() InsertQuery3 {
+	return InsertQuery3{
+		TShare1: big.NewInt(11),
+		TShare2: big.NewInt(22),
+		TProof1: mulproof.ProofShare{},
+		TProof2: mulproof.ProofShare{},
+	}
+}
+
+func TestEncryptQueryRoundTripInsertQuery1(t *testing.T) {
 	for i := 0; i < NUM_SERVERS; i++ {
-		q := randomQuery(t)
-		enc, err := EncryptQuery(i, q)
+		q := randomInsertQuery1(t, i)
+		enc, err := EncryptQuery(i, &q)
 		if err != nil {
-			t.Fatal("Could not encrypt")
+			t.Fatalf("EncryptQuery failed: %v", err)
 		}
 
-		dec, err := DecryptQuery(i, enc)
-		if err != nil {
-			t.Fatal("Decryption: ", err)
+		var dec InsertQuery1
+		if err := DecryptQuery(i, enc, &dec); err != nil {
+			t.Fatalf("DecryptQuery failed: %v", err)
 		}
-
-		for j := 0; j < len(dec.Key.Keys); j++ {
-			if dec.Key.Keys[j] != q.Key.Keys[j] {
-				t.Fail()
+		if dec.KeyIndex != q.KeyIndex {
+			t.Fatalf("expected KeyIndex=%d, got %d", q.KeyIndex, dec.KeyIndex)
+		}
+		for j := range dec.Keys {
+			if dec.Keys[j] != q.Keys[j] {
+				t.Fatalf("key mismatch at %d", j)
 			}
 		}
 	}
 }
 
-func TestEncryptAuditGood(t *testing.T) {
-	q := randomAudit(t)
-	enc, err := EncryptAudit(q)
+func TestEncryptQueryRoundTripInsertQuery2And3(t *testing.T) {
+	q2 := randomInsertQuery2()
+	enc2, err := EncryptQuery(0, &q2)
 	if err != nil {
-		t.Fatal("Could not encrypt")
+		t.Fatalf("EncryptQuery insert query 2 failed: %v", err)
+	}
+	var dec2 InsertQuery2
+	if err := DecryptQuery(0, enc2, &dec2); err != nil {
+		t.Fatalf("DecryptQuery insert query 2 failed: %v", err)
+	}
+	if dec2.MsgShare == nil || dec2.MsgShare.Cmp(q2.MsgShare) != 0 {
+		t.Fatalf("unexpected MsgShare %v", dec2.MsgShare)
 	}
 
-	dec, err := DecryptAudit(enc)
+	q3 := randomInsertQuery3()
+	enc3, err := EncryptQuery(1, &q3)
 	if err != nil {
-		t.Fatal("Decryption: ", err)
+		t.Fatalf("EncryptQuery insert query 3 failed: %v", err)
 	}
-
-	for j := 0; j < len(q.KeyTest); j++ {
-		if dec.KeyTest[j] != q.KeyTest[j] {
-			t.Fail()
-		}
-
-		if dec.MsgTest[j] != q.MsgTest[j] {
-			t.Fail()
-		}
+	var dec3 InsertQuery3
+	if err := DecryptQuery(1, enc3, &dec3); err != nil {
+		t.Fatalf("DecryptQuery insert query 3 failed: %v", err)
+	}
+	if dec3.TShare1 == nil || dec3.TShare1.Cmp(q3.TShare1) != 0 {
+		t.Fatalf("unexpected TShare1 %v", dec3.TShare1)
+	}
+	if dec3.TShare2 == nil || dec3.TShare2.Cmp(q3.TShare2) != 0 {
+		t.Fatalf("unexpected TShare2 %v", dec3.TShare2)
 	}
 }
 
-func TestEncryptAuditBad(t *testing.T) {
-	q := randomAudit(t)
-	enc, err := EncryptAudit(q)
+func TestEncryptQueryWrongServerFails(t *testing.T) {
+	key, err := prf.NewKey()
 	if err != nil {
-		t.Fatal("Could not encrypt")
+		t.Fatalf("prf.NewKey failed: %v", err)
+	}
+	q := InsertQuery1{
+		KeyIndex: 0,
+		Keys:     [TABLE_HEIGHT]prf.Key{key},
 	}
 
-	enc.Ciphertext[3] = 0xff
-	enc.Ciphertext[7] = 0xff
-
-	_, err = DecryptAudit(enc)
-	if err == nil {
-		t.Fatal("Decryption should not be okay")
-	}
-}
-
-func TestEncryptBad(t *testing.T) {
 	for i := 0; i < NUM_SERVERS; i++ {
-
-		q := randomQuery(t)
-		enc, err := EncryptQuery(i, q)
+		enc, err := EncryptQuery(i, &q)
 		if err != nil {
-			t.Fatal("Could not encrypt")
+			t.Fatalf("EncryptQuery failed: %v", err)
 		}
 
-		_, err = DecryptQuery((i+1)%NUM_SERVERS, enc)
+		var dec InsertQuery1
+		err = DecryptQuery((i+1)%NUM_SERVERS, enc, &dec)
 		if err == nil {
-			t.Fail()
+			t.Fatalf("expected decrypt failure for wrong server %d", (i+1)%NUM_SERVERS)
 		}
 	}
 }
