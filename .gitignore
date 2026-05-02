@@ -7,6 +7,11 @@ server/server
 client/*.exe
 server/*.exe
 logs/*
+aws-eval/.state/
+aws-eval/keys/
+aws-eval/bin/
+aws-eval/results/
+aws-eval/*.pem
 
 # added by kevwjin to provide spec w/o git tracking to llms
 *.txt

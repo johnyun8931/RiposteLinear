@@ -1,0 +1,629 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+AWS_REGION="${AWS_REGION:-us-east-1}"
+PROJECT_TAG="${PROJECT_TAG:-riposte-aws-eval}"
+COORDINATOR_INSTANCE_TYPE="${COORDINATOR_INSTANCE_TYPE:-c7i.large}"
+SERVER_INSTANCE_TYPE="${SERVER_INSTANCE_TYPE:-c7i.large}"
+CLIENT_INSTANCE_TYPE="${CLIENT_INSTANCE_TYPE:-c7i.xlarge}"
+AMI_SSM_PARAM="${AMI_SSM_PARAM:-/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}"
+SSH_USER="${SSH_USER:-ubuntu}"
+
+SERVER_THREADS="${SERVER_THREADS:-2}"
+CLIENT_THREADS="${CLIENT_THREADS:-1}"
+WARMUP_EPOCH_SECONDS="${WARMUP_EPOCH_SECONDS:-60}"
+MEASURED_EPOCH_SECONDS="${MEASURED_EPOCH_SECONDS:-600}"
+START_EPOCH_RETRY_TIMEOUT="${START_EPOCH_RETRY_TIMEOUT:-90}"
+START_EPOCH_RETRY_INTERVAL="${START_EPOCH_RETRY_INTERVAL:-2}"
+POST_EPOCH_FLUSH_SECONDS="${POST_EPOCH_FLUSH_SECONDS:-12}"
+CLIENT_EXIT_GRACE_SECONDS="${CLIENT_EXIT_GRACE_SECONDS:-30}"
+
+COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
+SHARD0_LEADER_PORT="${SHARD0_LEADER_PORT:-8610}"
+SHARD0_FOLLOWER_PORT="${SHARD0_FOLLOWER_PORT:-8611}"
+SHARD1_LEADER_PORT="${SHARD1_LEADER_PORT:-8620}"
+SHARD1_FOLLOWER_PORT="${SHARD1_FOLLOWER_PORT:-8621}"
+
+REMOTE_ROOT="${REMOTE_ROOT:-/tmp/riposte-eval}"
+REMOTE_BIN_DIR="$REMOTE_ROOT/bin"
+REMOTE_PHASES_DIR="$REMOTE_ROOT/phases"
+REMOTE_SMOKE_DIR="$REMOTE_ROOT/smoke"
+
+STATE_DIR="$SCRIPT_DIR/.state"
+STATE_FILE="$STATE_DIR/env.sh"
+BENCHMARK_STATE_FILE="$STATE_DIR/benchmark-env.sh"
+KEY_DIR="$SCRIPT_DIR/keys"
+BIN_DIR="$SCRIPT_DIR/bin"
+RESULTS_DIR="$SCRIPT_DIR/results"
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+info() {
+  echo "==> $*" >&2
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+aws_base() {
+  if [[ -n "${AWS_PROFILE:-}" ]]; then
+    aws --no-cli-pager --profile "$AWS_PROFILE" "$@"
+  else
+    aws --no-cli-pager "$@"
+  fi
+}
+
+aws_region() {
+  aws_base --region "$AWS_REGION" "$@"
+}
+
+quote() {
+  printf "%q" "$1"
+}
+
+load_state() {
+  [[ -f "$STATE_FILE" ]] || die "state file not found: $STATE_FILE. Run 01-launch.sh first."
+  # shellcheck disable=SC1090
+  source "$STATE_FILE"
+}
+
+ssh_opts() {
+  echo -i "$KEY_FILE" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
+}
+
+remote_cmd() {
+  local host="$1"
+  local cmd="$2"
+  # shellcheck disable=SC2046
+  ssh $(ssh_opts) "${SSH_USER}@${host}" "$cmd"
+}
+
+copy_to_remote() {
+  local src="$1"
+  local host="$2"
+  local dst="$3"
+  # shellcheck disable=SC2046
+  scp $(ssh_opts) "$src" "${SSH_USER}@${host}:${dst}"
+}
+
+copy_from_remote() {
+  local host="$1"
+  local src="$2"
+  local dst="$3"
+  # shellcheck disable=SC2046
+  scp -r $(ssh_opts) "${SSH_USER}@${host}:${src}" "$dst"
+}
+
+wait_for_ssh() {
+  local host="$1"
+  local label="$2"
+  local tries="${3:-60}"
+
+  info "waiting for SSH on ${label} (${host})"
+  for _ in $(seq 1 "$tries"); do
+    if remote_cmd "$host" "true" >/dev/null 2>&1; then
+      info "SSH ready on ${label}"
+      return 0
+    fi
+    sleep 5
+  done
+
+  die "SSH did not become ready on ${label} (${host})"
+}
+
+contains_line() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    if [[ "$item" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+list_instance_offering_azs() {
+  local instance_type="$1"
+  aws_region ec2 describe-instance-type-offerings \
+    --location-type availability-zone \
+    --filters Name=instance-type,Values="$instance_type" \
+    --query 'InstanceTypeOfferings[].Location' \
+    --output text | tr '\t' '\n' | sed '/^$/d'
+}
+
+resolve_network_selection() {
+  local requested_subnet="${SUBNET_ID:-}"
+  local requested_vpc="${VPC_ID:-}"
+  local requested_az="${AVAILABILITY_ZONE:-}"
+  local vpc_id subnet_id subnet_az subnet_public
+
+  if [[ -n "$requested_subnet" ]]; then
+    vpc_id="$(aws_region ec2 describe-subnets \
+      --subnet-ids "$requested_subnet" \
+      --query 'Subnets[0].VpcId' \
+      --output text)"
+    subnet_az="$(aws_region ec2 describe-subnets \
+      --subnet-ids "$requested_subnet" \
+      --query 'Subnets[0].AvailabilityZone' \
+      --output text)"
+    subnet_public="$(aws_region ec2 describe-subnets \
+      --subnet-ids "$requested_subnet" \
+      --query 'Subnets[0].MapPublicIpOnLaunch' \
+      --output text)"
+    [[ "$vpc_id" != "None" ]] || die "subnet not found: $requested_subnet"
+    [[ "$subnet_public" == "True" ]] || die "subnet $requested_subnet does not auto-assign public IPs"
+    if [[ -n "$requested_vpc" && "$requested_vpc" != "$vpc_id" ]]; then
+      die "SUBNET_ID $requested_subnet belongs to VPC $vpc_id, not requested VPC_ID $requested_vpc"
+    fi
+    if [[ -n "$requested_az" && "$requested_az" != "$subnet_az" ]]; then
+      die "SUBNET_ID $requested_subnet is in AZ $subnet_az, not requested AVAILABILITY_ZONE $requested_az"
+    fi
+    printf '%s\t%s\t%s\n' "$vpc_id" "$requested_subnet" "$subnet_az"
+    return 0
+  fi
+
+  if [[ -z "$requested_vpc" ]]; then
+    requested_vpc="$(aws_region ec2 describe-vpcs \
+      --filters Name=is-default,Values=true \
+      --query 'Vpcs[0].VpcId' \
+      --output text)"
+  fi
+  [[ -n "$requested_vpc" && "$requested_vpc" != "None" ]] || die "could not determine a VPC; set VPC_ID or SUBNET_ID"
+
+  candidate_subnets=()
+  while IFS=$'\t' read -r candidate_id candidate_az public_flag; do
+    [[ -n "${candidate_id:-}" ]] || continue
+    candidate_subnets+=("${candidate_id},${candidate_az},${public_flag}")
+  done < <(aws_region ec2 describe-subnets \
+    --filters \
+      Name=vpc-id,Values="$requested_vpc" \
+      Name=default-for-az,Values=true \
+      Name=state,Values=available \
+    --query 'Subnets[].[SubnetId,AvailabilityZone,MapPublicIpOnLaunch]' \
+    --output text)
+  [[ "${#candidate_subnets[@]}" -gt 0 ]] || die "no default subnets found in VPC $requested_vpc"
+
+  server_azs=()
+  while IFS= read -r az; do
+    [[ -n "$az" ]] && server_azs+=("$az")
+  done < <(list_instance_offering_azs "$SERVER_INSTANCE_TYPE")
+  client_azs=()
+  while IFS= read -r az; do
+    [[ -n "$az" ]] && client_azs+=("$az")
+  done < <(list_instance_offering_azs "$CLIENT_INSTANCE_TYPE")
+  coordinator_azs=()
+  while IFS= read -r az; do
+    [[ -n "$az" ]] && coordinator_azs+=("$az")
+  done < <(list_instance_offering_azs "$COORDINATOR_INSTANCE_TYPE")
+
+  local row candidate_id candidate_az public_flag
+  for row in "${candidate_subnets[@]}"; do
+    IFS=, read -r candidate_id candidate_az public_flag <<<"$row"
+    [[ "$public_flag" == "True" ]] || continue
+    if [[ -n "$requested_az" && "$requested_az" != "$candidate_az" ]]; then
+      continue
+    fi
+    if ! contains_line "$candidate_az" "${server_azs[@]}"; then
+      continue
+    fi
+    if ! contains_line "$candidate_az" "${client_azs[@]}"; then
+      continue
+    fi
+    if ! contains_line "$candidate_az" "${coordinator_azs[@]}"; then
+      continue
+    fi
+    printf '%s\t%s\t%s\n' "$requested_vpc" "$candidate_id" "$candidate_az"
+    return 0
+  done
+
+  die "could not find a default subnet with public IP mapping in a single AZ that offers $COORDINATOR_INSTANCE_TYPE, $SERVER_INSTANCE_TYPE, and $CLIENT_INSTANCE_TYPE"
+}
+
+server_pair_csv() {
+  local leader_ip="$1"
+  local leader_port="$2"
+  local follower_ip="$3"
+  local follower_port="$4"
+  printf '%s:%s,%s:%s' "$leader_ip" "$leader_port" "$follower_ip" "$follower_port"
+}
+
+coordinator_addr() {
+  printf '%s:%s' "$COORDINATOR_PRIVATE_IP" "$COORDINATOR_PORT"
+}
+
+shard0_leader_addr() {
+  printf '%s:%s' "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT"
+}
+
+shard0_follower_addr() {
+  printf '%s:%s' "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT"
+}
+
+shard1_leader_addr() {
+  printf '%s:%s' "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_LEADER_PORT"
+}
+
+shard1_follower_addr() {
+  printf '%s:%s' "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_FOLLOWER_PORT"
+}
+
+kill_remote_processes() {
+  local host="$1"
+  remote_cmd "$host" "pkill -TERM -x server >/dev/null 2>&1 || true; pkill -TERM -x coordinator >/dev/null 2>&1 || true; pkill -TERM -x client >/dev/null 2>&1 || true; sleep 2; pkill -KILL -x server >/dev/null 2>&1 || true; pkill -KILL -x coordinator >/dev/null 2>&1 || true; pkill -KILL -x client >/dev/null 2>&1 || true"
+}
+
+kill_all_remote_processes() {
+  local host
+  for host in \
+    "$COORDINATOR_PUBLIC_IP" \
+    "$SHARD0_LEADER_PUBLIC_IP" \
+    "$SHARD0_FOLLOWER_PUBLIC_IP" \
+    "$SHARD1_LEADER_PUBLIC_IP" \
+    "$SHARD1_FOLLOWER_PUBLIC_IP" \
+    "$CLIENT_PUBLIC_IP"; do
+    kill_remote_processes "$host"
+  done
+}
+
+prepare_remote_workspace() {
+  local host="$1"
+  remote_cmd "$host" "mkdir -p '$REMOTE_ROOT' '$REMOTE_PHASES_DIR' '$REMOTE_SMOKE_DIR'"
+}
+
+reset_remote_workspace() {
+  local host="$1"
+  remote_cmd "$host" "rm -rf '$REMOTE_ROOT'; mkdir -p '$REMOTE_ROOT' '$REMOTE_PHASES_DIR' '$REMOTE_SMOKE_DIR'"
+}
+
+reset_all_remote_workspaces() {
+  local host
+  for host in \
+    "$COORDINATOR_PUBLIC_IP" \
+    "$SHARD0_LEADER_PUBLIC_IP" \
+    "$SHARD0_FOLLOWER_PUBLIC_IP" \
+    "$SHARD1_LEADER_PUBLIC_IP" \
+    "$SHARD1_FOLLOWER_PUBLIC_IP" \
+    "$CLIENT_PUBLIC_IP"; do
+    reset_remote_workspace "$host"
+  done
+}
+
+remote_wait_for_port() {
+  local ssh_host="$1"
+  local target_host="$2"
+  local target_port="$3"
+  local attempts="${4:-60}"
+  local quoted_host quoted_port quoted_attempts
+  quoted_host="$(quote "$target_host")"
+  quoted_port="$(quote "$target_port")"
+  quoted_attempts="$(quote "$attempts")"
+  remote_cmd "$ssh_host" "python3 - $quoted_host $quoted_port $quoted_attempts <<'PY'
+import socket
+import sys
+import time
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+attempts = int(sys.argv[3])
+
+for _ in range(attempts):
+    sock = socket.socket()
+    sock.settimeout(0.5)
+    try:
+        sock.connect((host, port))
+    except OSError:
+        time.sleep(1)
+    else:
+        sock.close()
+        raise SystemExit(0)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+raise SystemExit(1)
+PY"
+}
+
+phase_dir() {
+  printf '%s/%s' "$REMOTE_PHASES_DIR" "$1"
+}
+
+phase_log_dir() {
+  printf '%s/logs' "$(phase_dir "$1")"
+}
+
+phase_results_dir() {
+  printf '%s/results' "$(phase_dir "$1")"
+}
+
+smoke_dir() {
+  printf '%s/run' "$REMOTE_SMOKE_DIR"
+}
+
+smoke_log_dir() {
+  printf '%s/logs' "$(smoke_dir)"
+}
+
+smoke_results_dir() {
+  printf '%s/results' "$(smoke_dir)"
+}
+
+start_remote_server() {
+  local host="$1"
+  local idx="$2"
+  local shard_id="$3"
+  local servers_csv="$4"
+  local results_dir="$5"
+  local log_path="$6"
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv' > '${log_path}.nohup' 2>&1 &"
+}
+
+start_remote_coordinator() {
+  local host="$1"
+  local listen_addr="$2"
+  local log_path="$3"
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")'; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)' > '${log_path}.nohup' 2>&1 &"
+}
+
+start_remote_hammer_client() {
+  local host="$1"
+  local target_flag="$2"
+  local target_addr="$3"
+  local log_path="$4"
+  local pid_path="${5:-}"
+  local mkdir_cmd
+  mkdir_cmd="mkdir -p '$(dirname "$log_path")'"
+  if [[ -n "$pid_path" ]]; then
+    mkdir_cmd="$mkdir_cmd '$(dirname "$pid_path")'"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -log '$log_path' > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
+  else
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -log '$log_path' > '${log_path}.nohup' 2>&1 &"
+  fi
+}
+
+wait_remote_pid_exit() {
+  local host="$1"
+  local pid_path="$2"
+  local timeout="$3"
+  local quoted_pid_path quoted_timeout
+  quoted_pid_path="$(quote "$pid_path")"
+  quoted_timeout="$(quote "$timeout")"
+  remote_cmd "$host" "python3 - $quoted_pid_path $quoted_timeout <<'PY'
+import os
+import sys
+import time
+
+pid_path = sys.argv[1]
+timeout = int(sys.argv[2])
+deadline = time.time() + timeout
+
+while not os.path.exists(pid_path):
+    if time.time() >= deadline:
+        raise SystemExit(2)
+    time.sleep(0.2)
+
+with open(pid_path) as fh:
+    pid = int(fh.read().strip())
+
+while True:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise SystemExit(0)
+    except PermissionError:
+        pass
+    if time.time() >= deadline:
+        raise SystemExit(1)
+    time.sleep(1)
+PY"
+}
+
+capture_remote_process_snapshot() {
+  local host="$1"
+  local output_path="$2"
+  remote_cmd "$host" "mkdir -p '$(dirname "$output_path")'; { date -u; pgrep -a -x server || true; pgrep -a -x coordinator || true; pgrep -a -x client || true; } > '$output_path'"
+}
+
+write_remote_phase_status() {
+  local host="$1"
+  local phase="$2"
+  local duration="$3"
+  local wait_timeout="$4"
+  local valid="$5"
+  local client_exit_status="$6"
+  local client_exit_reason="$7"
+  local invalid_reason="$8"
+  local status_path
+  local quoted_status_path quoted_phase quoted_duration quoted_wait_timeout
+  local quoted_valid quoted_client_exit_status quoted_client_exit_reason quoted_invalid_reason
+  status_path="$(phase_dir "$phase")/phase-status.json"
+  quoted_status_path="$(quote "$status_path")"
+  quoted_phase="$(quote "$phase")"
+  quoted_duration="$(quote "$duration")"
+  quoted_wait_timeout="$(quote "$wait_timeout")"
+  quoted_valid="$(quote "$valid")"
+  quoted_client_exit_status="$(quote "$client_exit_status")"
+  quoted_client_exit_reason="$(quote "$client_exit_reason")"
+  quoted_invalid_reason="$(quote "$invalid_reason")"
+  remote_cmd "$host" "mkdir -p '$(dirname "$status_path")'; python3 - $quoted_status_path $quoted_phase $quoted_duration $quoted_wait_timeout $quoted_valid $quoted_client_exit_status $quoted_client_exit_reason $quoted_invalid_reason <<'PY'
+import json
+import sys
+
+status_path = sys.argv[1]
+payload = {
+    'phase': sys.argv[2],
+    'duration_seconds': int(sys.argv[3]),
+    'client_wait_timeout_seconds': int(sys.argv[4]),
+    'valid': sys.argv[5] == 'true',
+    'client_exit_status': sys.argv[6],
+    'client_exit_reason': sys.argv[7],
+    'invalid_reason': sys.argv[8],
+}
+
+with open(status_path, 'w') as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY"
+}
+
+run_remote_client_once() {
+  local host="$1"
+  shift
+  remote_cmd "$host" "mkdir -p '$REMOTE_SMOKE_DIR'; ~/client $*"
+}
+
+admin_binary_for_kind() {
+  if [[ "$1" == "coordinator" ]]; then
+    echo "~/coordinator"
+  else
+    echo "~/server"
+  fi
+}
+
+remote_epoch_status() {
+  local kind="$1"
+  local host="$2"
+  local target_addr="$3"
+  local bin
+  bin="$(admin_binary_for_kind "$kind")"
+  remote_cmd "$host" "$bin -admin-target '$target_addr' -epoch-status 2>&1 | tail -n1"
+}
+
+extract_field() {
+  local line="$1"
+  local key="$2"
+  printf '%s\n' "$line" | sed -n "s/.*${key}=\([^ ]*\).*/\1/p"
+}
+
+retry_start_epoch() {
+  local kind="$1"
+  local host="$2"
+  local target_addr="$3"
+  local duration="$4"
+  local timeout="${5:-$START_EPOCH_RETRY_TIMEOUT}"
+  local interval="${6:-$START_EPOCH_RETRY_INTERVAL}"
+  local bin out status last_line
+  local deadline=$((SECONDS + timeout))
+
+  bin="$(admin_binary_for_kind "$kind")"
+  while true; do
+    set +e
+    out="$(remote_cmd "$host" "$bin -admin-target '$target_addr' -start-epoch-seconds '$duration' 2>&1")"
+    status=$?
+    set -e
+    last_line="$(printf '%s\n' "$out" | tail -n1)"
+    if [[ $status -eq 0 ]]; then
+      printf '%s\n' "$last_line"
+      return 0
+    fi
+
+    if printf '%s\n' "$out" | grep -qi "not ready"; then
+      if (( SECONDS >= deadline )); then
+        printf '%s\n' "$out" >&2
+        die "timed out waiting for $kind at $target_addr to become ready for StartEpoch"
+      fi
+      sleep "$interval"
+      continue
+    fi
+
+    printf '%s\n' "$out" >&2
+    return "$status"
+  done
+}
+
+wait_for_status_state() {
+  local kind="$1"
+  local host="$2"
+  local target_addr="$3"
+  local want_state="$4"
+  local timeout="${5:-30}"
+  local line state
+  for _ in $(seq 1 "$timeout"); do
+    line="$(remote_epoch_status "$kind" "$host" "$target_addr")"
+    state="$(extract_field "$line" "state")"
+    if [[ "$state" == "$want_state" ]]; then
+      printf '%s\n' "$line"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_epoch_complete() {
+  local kind="$1"
+  local host="$2"
+  local target_addr="$3"
+  local timeout="${4:-120}"
+  wait_for_status_state "$kind" "$host" "$target_addr" completed "$timeout" >/dev/null || die "$kind at $target_addr did not reach completed state"
+}
+
+result_file_name() {
+  local epoch_id="$1"
+  local shard_id="$2"
+  printf 'epoch-%06d-shard-%d-server-0.json' "$epoch_id" "$shard_id"
+}
+
+assert_result_contains_slot() {
+  local file="$1"
+  local shard_id="$2"
+  local row_min="$3"
+  local row_max="$4"
+  local want_row="$5"
+  local want_col="$6"
+  local want_payload="$7"
+
+  python3 - "$file" "$shard_id" "$row_min" "$row_max" "$want_row" "$want_col" "$want_payload" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+shard_id = int(sys.argv[2])
+row_min = int(sys.argv[3])
+row_max = int(sys.argv[4])
+want_row = int(sys.argv[5])
+want_col = int(sys.argv[6])
+want_payload = sys.argv[7].encode()
+
+with open(path) as fh:
+    data = json.load(fh)
+
+if data["shard_id"] != shard_id:
+    raise SystemExit(f"shard_id mismatch in {path}: got {data['shard_id']} want {shard_id}")
+
+for slot in data["slots"]:
+    row = slot["row"]
+    if row < row_min or row >= row_max:
+        raise SystemExit(f"slot row {row} outside [{row_min},{row_max}) in {path}")
+
+want_hex = want_payload.hex() + ("00" * (160 - len(want_payload)))
+for slot in data["slots"]:
+    if slot["row"] == want_row and slot["column"] == want_col:
+        if slot["message_hex"] != want_hex:
+            raise SystemExit(f"payload mismatch for ({want_row},{want_col}) in {path}")
+        raise SystemExit(0)
+
+raise SystemExit(f"missing slot ({want_row},{want_col}) in {path}")
+PY
+}
+
+copy_remote_tree_if_present() {
+  local label="$1"
+  local host="$2"
+  local remote_path="$3"
+  local local_dir="$4"
+  mkdir -p "$local_dir"
+  if ! copy_from_remote "$host" "$remote_path" "$local_dir"; then
+    echo "warning: failed to copy ${remote_path} from ${label}" >&2
+  fi
+}
