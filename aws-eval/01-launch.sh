@@ -19,6 +19,10 @@ mkdir -p "$STATE_DIR" "$KEY_DIR"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 KEY_NAME="${KEY_NAME:-${PROJECT_TAG}-${RUN_ID}}"
 KEY_FILE="${KEY_FILE:-$KEY_DIR/${KEY_NAME}.pem}"
+# On WSL, store key in /tmp where Unix permissions work properly
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  KEY_FILE="/tmp/${KEY_NAME}.pem"
+fi
 SG_NAME="${SG_NAME:-${PROJECT_TAG}-${RUN_ID}}"
 SSH_CIDR="${SSH_CIDR:-$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')/32}"
 

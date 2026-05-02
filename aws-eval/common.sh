@@ -7,9 +7,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
 PROJECT_TAG="${PROJECT_TAG:-riposte-eval}"
-INSTANCE_TYPE="${INSTANCE_TYPE:-c5n.4xlarge}"
-VPC_ID="${VPC_ID:-vpc-0eec0c122a1df2a67}"
-SUBNET_ID="${SUBNET_ID:-subnet-0d6798aac2c2708ec}"
+INSTANCE_TYPE="${INSTANCE_TYPE:-m7i-flex.large}"
+VPC_ID="${VPC_ID:-vpc-07a5fb5bf28cc4a70}"
+SUBNET_ID="${SUBNET_ID:-subnet-00c20963560c7a09a}"
 AMI_SSM_PARAM="${AMI_SSM_PARAM:-/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}"
 
 SERVER0_PORT="${SERVER0_PORT:-9090}"
