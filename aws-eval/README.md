@@ -47,7 +47,8 @@ The initial cloud configuration reuses the local winner:
 
 - `server -threads 2`
 - `client -threads 1`
-- client hammer concurrency remains the built-in `16`
+- client hammer concurrency defaults to `16`, and can be overridden with
+  `CLIENT_CONCURRENCY`
 
 Measured phases:
 
@@ -76,6 +77,8 @@ Process killing is cleanup between phases, not a successful completion signal.
 If the client exits with `unexpected EOF`, times out, or accepted traffic stops
 too early in the measured epoch, the summary reports `winner: unavailable` and
 keeps the raw totals as diagnostic data.
+If the server returns `server overloaded: ready queue full`, the phase is marked
+as `overload`; that is diagnostic data, not a valid throughput comparison.
 
 The benchmark stops at the first invalid phase. For example, if
 `baseline-warmup` fails validation, the measured phases are skipped because the
@@ -177,6 +180,20 @@ the epoch duration plus `CLIENT_EXIT_GRACE_SECONDS`. The grace period is
 post-epoch slack for client shutdown and is not part of the measured throughput
 window.
 
+For AWS load calibration, run the short concurrency sweep after smoke:
+
+```bash
+CLIENT_CONCURRENCY_SWEEP="1 2 4 8 16" \
+WARMUP_EPOCH_SECONDS=10 \
+MEASURED_EPOCH_SECONDS=45 \
+CLIENT_EXIT_GRACE_SECONDS=30 \
+./aws-eval/04-run-concurrency-sweep.sh
+```
+
+The sweep runs the normal benchmark once per concurrency value, collects logs
+after each attempt, and writes an aggregate summary under
+`aws-eval/results/<sweep-id>/`.
+
 ### 6. Collect
 
 ```bash
@@ -222,6 +239,7 @@ SERVER_INSTANCE_TYPE=c7i.large
 CLIENT_INSTANCE_TYPE=c7i.xlarge
 SERVER_THREADS=2
 CLIENT_THREADS=1
+CLIENT_CONCURRENCY=16
 WARMUP_EPOCH_SECONDS=60
 MEASURED_EPOCH_SECONDS=600
 START_EPOCH_RETRY_TIMEOUT=90

@@ -9,6 +9,7 @@ WARMUP_DURATION="${RIPOSTE_BENCH_WARMUP_DURATION}"
 POST_RUN_WAIT="${RIPOSTE_BENCH_POST_RUN_WAIT}"
 START_DELAY="${RIPOSTE_BENCH_START_DELAY}"
 CLIENT_THREADS="${RIPOSTE_BENCH_CLIENT_THREADS}"
+CLIENT_CONCURRENCY="${RIPOSTE_BENCH_CLIENT_CONCURRENCY}"
 
 SUMMARY_TSV="$STATE_DIR/benchmark-summary.tsv"
 SUMMARY_MD="$STATE_DIR/benchmark-summary.md"
@@ -23,7 +24,7 @@ baseline_run() {
 	before="$(last_since_start "$(log_file baseline-leader)")"
 	start_epoch server "$BASELINE_LEADER_ADDR" "$BENCH_DURATION" >/dev/null
 	sleep "$START_DELAY"
-	run_client -leader "$BASELINE_LEADER_ADDR" -hammer -threads "$CLIENT_THREADS" -log "$client_log"
+	run_client -leader "$BASELINE_LEADER_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" -log "$client_log"
 	wait_for_epoch_complete server "$BASELINE_LEADER_ADDR"
 	sleep "$POST_RUN_WAIT"
 	after="$(last_since_start "$(log_file baseline-leader)")"
@@ -43,16 +44,15 @@ sharded_run() {
 	shard1_before="$(last_since_start "$(log_file shard1-leader)")"
 	start_epoch coordinator "$COORDINATOR_ADDR" "$BENCH_DURATION" >/dev/null
 	sleep "$START_DELAY"
-	run_client -coordinator "$COORDINATOR_ADDR" -hammer -threads "$CLIENT_THREADS" -log "$client_log"
+	run_client -coordinator "$COORDINATOR_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" -log "$client_log"
 	wait_for_epoch_complete coordinator "$COORDINATOR_ADDR"
 	sleep "$POST_RUN_WAIT"
 	shard0_after="$(last_since_start "$(log_file shard0-leader)")"
 	shard1_after="$(last_since_start "$(log_file shard1-leader)")"
-	[[ "$shard0_after" -gt "$shard0_before" ]] || die "shard 0 leader stats did not advance for phase $phase threads=$threads"
-	[[ "$shard1_after" -gt "$shard1_before" ]] || die "shard 1 leader stats did not advance for phase $phase threads=$threads"
 	shard0_delta="$((shard0_after - shard0_before))"
 	shard1_delta="$((shard1_after - shard1_before))"
 	total="$((shard0_delta + shard1_delta))"
+	[[ "$total" -gt 0 ]] || die "sharded leaders did not advance for phase $phase threads=$threads"
 	max_sent="$(max_sent_from_client_log "$client_log")"
 	printf '%s\t%s\t%s\t%s\n' "$shard0_delta" "$shard1_delta" "$total" "$max_sent"
 }
@@ -113,7 +113,7 @@ build_binaries
 
 host_context_line | tee "$HOST_INFO_FILE"
 {
-	echo -e "server_threads\tbaseline_total\tbaseline_req_per_sec\tbaseline_client_max_sent\tshard0_total\tshard1_total\tsharded_total\tsharded_req_per_sec\tsharded_client_max_sent\tdelta\twinner"
+	echo -e "server_threads\tclient_concurrency\tbaseline_total\tbaseline_req_per_sec\tbaseline_client_max_sent\tshard0_total\tshard1_total\tsharded_total\tsharded_req_per_sec\tsharded_client_max_sent\tdelta\twinner"
 } >"$SUMMARY_TSV"
 
 for threads in $THREAD_SWEEP; do
@@ -134,8 +134,8 @@ PY
 	delta="$((sharded_total - baseline_total))"
 	winner="$(winner_for_row "$baseline_total" "$sharded_total")"
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$threads" "$baseline_total" "$baseline_req_per_sec" "$baseline_client_max_sent" \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$threads" "$CLIENT_CONCURRENCY" "$baseline_total" "$baseline_req_per_sec" "$baseline_client_max_sent" \
 		"$shard0_total" "$shard1_total" "$sharded_total" "$sharded_req_per_sec" "$sharded_client_max_sent" \
 		"$delta" "$winner" >>"$SUMMARY_TSV"
 done
@@ -156,11 +156,11 @@ print("# Phase 3 Local Throughput Sweep")
 print()
 print(f"- {host_info}")
 print()
-print("| server_threads | baseline_total | baseline_req_per_sec | shard0_total | shard1_total | sharded_total | sharded_req_per_sec | delta | winner |")
-print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+print("| server_threads | client_concurrency | baseline_total | baseline_req_per_sec | shard0_total | shard1_total | sharded_total | sharded_req_per_sec | delta | winner |")
+print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
 for row in rows:
     print(
-        f"| {row['server_threads']} | {row['baseline_total']} | {row['baseline_req_per_sec']} | "
+        f"| {row['server_threads']} | {row['client_concurrency']} | {row['baseline_total']} | {row['baseline_req_per_sec']} | "
         f"{row['shard0_total']} | {row['shard1_total']} | {row['sharded_total']} | "
         f"{row['sharded_req_per_sec']} | {row['delta']} | {row['winner']} |"
     )

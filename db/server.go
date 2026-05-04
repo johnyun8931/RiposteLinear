@@ -163,6 +163,14 @@ func (t *Server) runLeaderControl() {
 				select {
 				case t.ready <- c.args.Uuid:
 				default:
+					log.Printf(
+						"Ready queue overload epoch=%d state=%s ready_len=%d ready_cap=%d accepted=%d",
+						state.epoch.ID,
+						state.epoch.State.String(),
+						len(t.ready),
+						cap(t.ready),
+						len(state.accepted),
+					)
 					delete(state.accepted, c.args.Uuid)
 					startMergeIfDrained()
 					c.reply <- upload3Result{err: errors.New("server overloaded: ready queue full")}

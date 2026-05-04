@@ -72,6 +72,7 @@ SHARD1_LEADER_PORT="$SHARD1_LEADER_PORT" \
 SHARD1_FOLLOWER_PORT="$SHARD1_FOLLOWER_PORT" \
 SERVER_THREADS="$SERVER_THREADS" \
 CLIENT_THREADS="$CLIENT_THREADS" \
+CLIENT_CONCURRENCY="$CLIENT_CONCURRENCY" \
 WARMUP_EPOCH_SECONDS="$WARMUP_EPOCH_SECONDS" \
 MEASURED_EPOCH_SECONDS="$MEASURED_EPOCH_SECONDS" \
 START_EPOCH_RETRY_TIMEOUT="$START_EPOCH_RETRY_TIMEOUT" \
@@ -131,6 +132,7 @@ payload = {
     "config": {
         "server_threads": int(os.environ["SERVER_THREADS"]),
         "client_threads": int(os.environ["CLIENT_THREADS"]),
+        "client_concurrency": int(os.environ["CLIENT_CONCURRENCY"]),
         "warmup_epoch_seconds": int(os.environ["WARMUP_EPOCH_SECONDS"]),
         "measured_epoch_seconds": int(os.environ["MEASURED_EPOCH_SECONDS"]),
         "start_epoch_retry_timeout": int(os.environ["START_EPOCH_RETRY_TIMEOUT"]),
@@ -184,19 +186,52 @@ SHARDED1_MEASURED_LOG="$OUT_DIR/remotes/shard1-leader/riposte-eval/phases/sharde
 if [[ -f "$BASELINE_MEASURED_LOG" && -f "$SHARDED0_MEASURED_LOG" && -f "$SHARDED1_MEASURED_LOG" ]]; then
   "$SCRIPT_DIR/parse-throughput.sh" "$OUT_DIR"
 else
-  cat >"$OUT_DIR/comparison-summary.md" <<EOF_SUMMARY
-# AWS Throughput Comparison
+  python3 - "$OUT_DIR" "$OUT_DIR/comparison-summary.md" <<'PY'
+import json
+import sys
+from pathlib import Path
 
-The benchmark did not run all measured phases, so no throughput comparison was parsed.
+out_dir = Path(sys.argv[1])
+summary_path = Path(sys.argv[2])
+phases = [
+    "baseline-warmup",
+    "baseline-measured",
+    "sharded-warmup",
+    "sharded-measured",
+]
 
-This usually means an earlier warm-up or measured phase failed validation. Inspect the
-copied remote phase logs and phase-status files under:
+lines = [
+    "# AWS Throughput Comparison",
+    "",
+    "The benchmark did not run all measured phases, so no throughput comparison was parsed.",
+    "",
+    "| phase | valid | client_exit_reason | invalid_reason |",
+    "| --- | --- | --- | --- |",
+]
 
-\`\`\`text
-$OUT_DIR/remotes/
-\`\`\`
+for phase in phases:
+    status_path = out_dir / "remotes" / "client" / "riposte-eval" / "phases" / phase / "phase-status.json"
+    if not status_path.exists():
+        lines.append(f"| {phase} | missing |  |  |")
+        continue
+    status = json.loads(status_path.read_text())
+    lines.append(
+        f"| {phase} | {str(bool(status.get('valid', False))).lower()} | "
+        f"{status.get('client_exit_reason', '')} | {status.get('invalid_reason', '')} |"
+    )
 
-EOF_SUMMARY
+lines.extend([
+    "",
+    "Inspect copied remote logs and phase-status files under:",
+    "",
+    "```text",
+    f"{out_dir}/remotes/",
+    "```",
+    "",
+])
+
+summary_path.write_text("\n".join(lines))
+PY
   echo "warning: measured logs are incomplete; wrote partial-run summary to $OUT_DIR/comparison-summary.md" >&2
 fi
 

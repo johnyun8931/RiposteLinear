@@ -29,6 +29,7 @@ if not metadata_path.exists():
 metadata = json.loads(metadata_path.read_text())
 measured_seconds = int(metadata["config"]["measured_epoch_seconds"])
 client_exit_grace_seconds = int(metadata["config"].get("client_exit_grace_seconds", 30))
+client_concurrency = int(metadata["config"].get("client_concurrency", 16))
 
 pattern = re.compile(
     r"(?P<time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}).*"
@@ -60,6 +61,7 @@ def parse_client_log(log_path: Path):
             "exists": False,
             "has_no_active_epoch": False,
             "has_unexpected_eof": False,
+            "has_overload": False,
             "last_sent": None,
             "last_sent_time": "",
         }
@@ -69,6 +71,7 @@ def parse_client_log(log_path: Path):
         "exists": True,
         "has_no_active_epoch": False,
         "has_unexpected_eof": False,
+        "has_overload": False,
         "last_sent": None,
         "last_sent_time": "",
     }
@@ -78,6 +81,8 @@ def parse_client_log(log_path: Path):
                 result["has_no_active_epoch"] = True
             if "unexpected EOF" in line:
                 result["has_unexpected_eof"] = True
+            if "server overloaded: ready queue full" in line:
+                result["has_overload"] = True
             match = sent_pattern.search(line)
             if match:
                 result["last_sent"] = int(match.group("count"))
@@ -195,6 +200,8 @@ def evaluate_phase(phase, rows, roles):
         reasons.append("client log missing")
     if client_log["has_unexpected_eof"]:
         reasons.append("client log contains unexpected EOF")
+    if client_log["has_overload"]:
+        reasons.append("client log contains server overload")
     if not client_log["has_no_active_epoch"]:
         reasons.append("client log does not contain No active epoch")
 
@@ -255,6 +262,7 @@ summary_md.write_text(
             "",
             f"- measured epoch seconds: `{measured_seconds}`",
             f"- client exit grace seconds: `{client_exit_grace_seconds}`",
+            f"- client concurrency: `{client_concurrency}`",
             f"- baseline valid: `{str(baseline_eval['valid']).lower()}`",
             f"- baseline invalid reasons: {format_reasons(baseline_eval['reasons'])}",
             f"- sharded valid: `{str(sharded_eval['valid']).lower()}`",

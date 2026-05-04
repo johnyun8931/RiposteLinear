@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USER_SERVER_THREADS="${SERVER_THREADS-}"
 USER_CLIENT_THREADS="${CLIENT_THREADS-}"
+USER_CLIENT_CONCURRENCY="${CLIENT_CONCURRENCY-}"
 USER_WARMUP_EPOCH_SECONDS="${WARMUP_EPOCH_SECONDS-}"
 USER_MEASURED_EPOCH_SECONDS="${MEASURED_EPOCH_SECONDS-}"
 USER_POST_EPOCH_FLUSH_SECONDS="${POST_EPOCH_FLUSH_SECONDS-}"
@@ -15,6 +16,7 @@ load_state
 
 [[ -n "$USER_SERVER_THREADS" ]] && SERVER_THREADS="$USER_SERVER_THREADS"
 [[ -n "$USER_CLIENT_THREADS" ]] && CLIENT_THREADS="$USER_CLIENT_THREADS"
+[[ -n "$USER_CLIENT_CONCURRENCY" ]] && CLIENT_CONCURRENCY="$USER_CLIENT_CONCURRENCY"
 [[ -n "$USER_WARMUP_EPOCH_SECONDS" ]] && WARMUP_EPOCH_SECONDS="$USER_WARMUP_EPOCH_SECONDS"
 [[ -n "$USER_MEASURED_EPOCH_SECONDS" ]] && MEASURED_EPOCH_SECONDS="$USER_MEASURED_EPOCH_SECONDS"
 [[ -n "$USER_POST_EPOCH_FLUSH_SECONDS" ]] && POST_EPOCH_FLUSH_SECONDS="$USER_POST_EPOCH_FLUSH_SECONDS"
@@ -31,6 +33,7 @@ write_benchmark_state() {
   cat >"$BENCHMARK_STATE_FILE" <<EOF_STATE
 SERVER_THREADS=$(quote "$SERVER_THREADS")
 CLIENT_THREADS=$(quote "$CLIENT_THREADS")
+CLIENT_CONCURRENCY=$(quote "$CLIENT_CONCURRENCY")
 WARMUP_EPOCH_SECONDS=$(quote "$WARMUP_EPOCH_SECONDS")
 MEASURED_EPOCH_SECONDS=$(quote "$MEASURED_EPOCH_SECONDS")
 POST_EPOCH_FLUSH_SECONDS=$(quote "$POST_EPOCH_FLUSH_SECONDS")
@@ -40,7 +43,7 @@ EOF_STATE
 
 classify_remote_client_exit() {
   local log_path="$1"
-  remote_cmd "$CLIENT_PUBLIC_IP" "if grep -q 'unexpected EOF' '$log_path' 2>/dev/null; then echo unexpected_eof; elif grep -q 'No active epoch' '$log_path' 2>/dev/null; then echo no_active_epoch; elif grep -q 'Client died.' '$log_path' 2>/dev/null; then echo exited_without_no_active_epoch; else echo log_inconclusive; fi"
+  remote_cmd "$CLIENT_PUBLIC_IP" "if grep -q 'unexpected EOF' '$log_path' 2>/dev/null; then echo unexpected_eof; elif grep -q 'server overloaded: ready queue full' '$log_path' 2>/dev/null; then echo overload; elif grep -q 'No active epoch' '$log_path' 2>/dev/null; then echo no_active_epoch; elif grep -q 'Client died.' '$log_path' 2>/dev/null; then echo exited_without_no_active_epoch; else echo log_inconclusive; fi"
 }
 
 wait_for_phase_client() {
@@ -65,6 +68,9 @@ wait_for_phase_client() {
     client_reason="$(classify_remote_client_exit "$client_log_path")"
     if [[ "$client_reason" == "no_active_epoch" ]]; then
       valid="true"
+    elif [[ "$client_reason" == "overload" ]]; then
+      invalid_reason="client exited after server overload"
+      capture_remote_process_snapshot "$CLIENT_PUBLIC_IP" "$phase_logs/client-process-snapshot.txt"
     else
       invalid_reason="client exited without clean No active epoch signal"
       capture_remote_process_snapshot "$CLIENT_PUBLIC_IP" "$phase_logs/client-process-snapshot.txt"
@@ -165,4 +171,5 @@ AWS benchmark run complete.
   sharded warm-up:   ${WARMUP_EPOCH_SECONDS}s
   sharded measured:  ${MEASURED_EPOCH_SECONDS}s
   client exit grace: ${CLIENT_EXIT_GRACE_SECONDS}s
+  client concurrency: ${CLIENT_CONCURRENCY}
 EOF

@@ -23,6 +23,7 @@ import (
 var donothingFlag = flag.Bool("donothing", false, "If set, client pings server.")
 var bogusFlag = flag.Bool("bogus", false, "If set, client sends an invalid request.")
 var hammerFlag = flag.Bool("hammer", false, "If set, client sends requests to server as quickly as possible.")
+var concurrencyFlag = flag.Uint("concurrency", 16, "Number of concurrent hammer workers")
 var coordinatorFlag = flag.String("coordinator", "", "Coordinator IP and port")
 var leaderFlag = flag.String("leader", "", "Riposte pair leader IP and port")
 var logFlag = flag.String("log", "", "Location of log file")
@@ -214,6 +215,13 @@ func runHammerClients(concurrent int, runOnce func(func() bool, func()) error) e
 	return nil
 }
 
+func resolveHammerConcurrency(value uint) (int, error) {
+	if value == 0 {
+		return 0, errors.New("-concurrency must be positive")
+	}
+	return int(value), nil
+}
+
 func resolveTargetAddress(coordinatorAddr, leaderAddr string) (string, error) {
 	if coordinatorAddr != "" && leaderAddr != "" {
 		return "", errors.New("must specify only one of -coordinator or -leader")
@@ -260,7 +268,10 @@ func main() {
 		}
 	} else {
 		// Make many requests concurrently
-		concurrent := 16
+		concurrent, err := resolveHammerConcurrency(*concurrencyFlag)
+		if err != nil {
+			log.Fatal(err)
+		}
 		err = runHammerClients(
 			concurrent,
 			func(shouldStop func() bool, signalStop func()) error {

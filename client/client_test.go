@@ -235,3 +235,46 @@ func TestRunHammerClientsReturnsUnexpectedError(t *testing.T) {
 		t.Fatalf("expected unexpected error %v, got %v", wantErr, err)
 	}
 }
+
+func TestRunHammerClientsReturnsOverloadError(t *testing.T) {
+	wantErr := errors.New("server overloaded: ready queue full")
+	err := runHammerClients(1, func(func() bool, func()) error {
+		return wantErr
+	})
+	if err != wantErr {
+		t.Fatalf("expected overload error %v, got %v", wantErr, err)
+	}
+}
+
+func TestRunHammerClientsUsesConfiguredConcurrency(t *testing.T) {
+	var calls int32
+	err := runHammerClients(3, func(func() bool, func()) error {
+		atomic.AddInt32(&calls, 1)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runHammerClients returned unexpected error: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 hammer workers, got %d", calls)
+	}
+}
+
+func TestResolveHammerConcurrency(t *testing.T) {
+	if *concurrencyFlag != 16 {
+		t.Fatalf("expected default concurrency flag 16, got %d", *concurrencyFlag)
+	}
+
+	got, err := resolveHammerConcurrency(16)
+	if err != nil {
+		t.Fatalf("resolveHammerConcurrency returned unexpected error: %v", err)
+	}
+	if got != 16 {
+		t.Fatalf("expected concurrency 16, got %d", got)
+	}
+
+	_, err = resolveHammerConcurrency(0)
+	if err == nil || err.Error() != "-concurrency must be positive" {
+		t.Fatalf("expected positive concurrency error, got %v", err)
+	}
+}

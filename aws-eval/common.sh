@@ -15,6 +15,7 @@ SSH_USER="${SSH_USER:-ubuntu}"
 
 SERVER_THREADS="${SERVER_THREADS:-2}"
 CLIENT_THREADS="${CLIENT_THREADS:-1}"
+CLIENT_CONCURRENCY="${CLIENT_CONCURRENCY:-16}"
 WARMUP_EPOCH_SECONDS="${WARMUP_EPOCH_SECONDS:-60}"
 MEASURED_EPOCH_SECONDS="${MEASURED_EPOCH_SECONDS:-600}"
 START_EPOCH_RETRY_TIMEOUT="${START_EPOCH_RETRY_TIMEOUT:-90}"
@@ -385,9 +386,9 @@ start_remote_hammer_client() {
   mkdir_cmd="mkdir -p '$(dirname "$log_path")'"
   if [[ -n "$pid_path" ]]; then
     mkdir_cmd="$mkdir_cmd '$(dirname "$pid_path")'"
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -log '$log_path' > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -concurrency '$CLIENT_CONCURRENCY' -log '$log_path' > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
   else
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -log '$log_path' > '${log_path}.nohup' 2>&1 &"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -concurrency '$CLIENT_CONCURRENCY' -log '$log_path' > '${log_path}.nohup' 2>&1 &"
   fi
 }
 
