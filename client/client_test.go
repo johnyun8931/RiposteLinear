@@ -217,6 +217,162 @@ func TestResolveMessageProviderRandomError(t *testing.T) {
 	}
 }
 
+func TestUploadWithOverloadRetryDisabledReturnsOverload(t *testing.T) {
+	wantErr := errors.New("server overloaded: ready queue full")
+	msg := &db.Plaintext{X: 1, Y: 2}
+	calls := 0
+	err := uploadWithOverloadRetry(
+		msg,
+		overloadRetryConfig{},
+		func(got *db.Plaintext) error {
+			calls++
+			if got != msg {
+				t.Fatal("expected upload to receive original message")
+			}
+			return wantErr
+		},
+		func(time.Duration) {
+			t.Fatal("sleep should not run when retry is disabled")
+		},
+	)
+	if err != wantErr {
+		t.Fatalf("expected overload error %v, got %v", wantErr, err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one upload attempt, got %d", calls)
+	}
+}
+
+func TestUploadWithOverloadRetryRetriesSamePlaintext(t *testing.T) {
+	msg := &db.Plaintext{X: 3, Y: 4}
+	config := overloadRetryConfig{
+		enabled:        true,
+		initialBackoff: 10 * time.Millisecond,
+		maxBackoff:     25 * time.Millisecond,
+	}
+	calls := 0
+	var sleeps []time.Duration
+	err := uploadWithOverloadRetry(
+		msg,
+		config,
+		func(got *db.Plaintext) error {
+			calls++
+			if got != msg {
+				t.Fatal("expected retry to reuse the same plaintext")
+			}
+			if calls <= 3 {
+				return errors.New("server overloaded: ready queue full")
+			}
+			return nil
+		},
+		func(delay time.Duration) {
+			sleeps = append(sleeps, delay)
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected retry to eventually succeed, got %v", err)
+	}
+	if calls != 4 {
+		t.Fatalf("expected four upload attempts, got %d", calls)
+	}
+	wantSleeps := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 25 * time.Millisecond}
+	if len(sleeps) != len(wantSleeps) {
+		t.Fatalf("expected sleeps %v, got %v", wantSleeps, sleeps)
+	}
+	for i := range wantSleeps {
+		if sleeps[i] != wantSleeps[i] {
+			t.Fatalf("expected sleeps %v, got %v", wantSleeps, sleeps)
+		}
+	}
+}
+
+func TestUploadWithOverloadRetryBackoffResetsAfterSuccess(t *testing.T) {
+	config := overloadRetryConfig{
+		enabled:        true,
+		initialBackoff: 10 * time.Millisecond,
+		maxBackoff:     40 * time.Millisecond,
+	}
+	var sleeps []time.Duration
+	for i := 0; i < 2; i++ {
+		calls := 0
+		err := uploadWithOverloadRetry(
+			&db.Plaintext{X: i, Y: i},
+			config,
+			func(*db.Plaintext) error {
+				calls++
+				if calls == 1 {
+					return errors.New("server overloaded: ready queue full")
+				}
+				return nil
+			},
+			func(delay time.Duration) {
+				sleeps = append(sleeps, delay)
+			},
+		)
+		if err != nil {
+			t.Fatalf("expected retry %d to succeed, got %v", i, err)
+		}
+	}
+	wantSleeps := []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	if len(sleeps) != len(wantSleeps) {
+		t.Fatalf("expected sleeps %v, got %v", wantSleeps, sleeps)
+	}
+	for i := range wantSleeps {
+		if sleeps[i] != wantSleeps[i] {
+			t.Fatalf("expected sleeps %v, got %v", wantSleeps, sleeps)
+		}
+	}
+}
+
+func TestUploadWithOverloadRetryStopsOnNoActiveEpoch(t *testing.T) {
+	config := overloadRetryConfig{
+		enabled:        true,
+		initialBackoff: 10 * time.Millisecond,
+		maxBackoff:     20 * time.Millisecond,
+	}
+	calls := 0
+	err := uploadWithOverloadRetry(
+		&db.Plaintext{},
+		config,
+		func(*db.Plaintext) error {
+			calls++
+			if calls == 1 {
+				return errors.New("server overloaded: ready queue full")
+			}
+			return errors.New("No active epoch")
+		},
+		func(time.Duration) {},
+	)
+	if err == nil || err.Error() != "No active epoch" {
+		t.Fatalf("expected No active epoch after retry, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected two upload attempts, got %d", calls)
+	}
+}
+
+func TestUploadWithOverloadRetryReturnsUnexpectedError(t *testing.T) {
+	config := overloadRetryConfig{
+		enabled:        true,
+		initialBackoff: 10 * time.Millisecond,
+		maxBackoff:     20 * time.Millisecond,
+	}
+	wantErr := errors.New("unexpected EOF")
+	err := uploadWithOverloadRetry(
+		&db.Plaintext{},
+		config,
+		func(*db.Plaintext) error {
+			return wantErr
+		},
+		func(time.Duration) {
+			t.Fatal("sleep should not run for unexpected errors")
+		},
+	)
+	if err != wantErr {
+		t.Fatalf("expected unexpected error %v, got %v", wantErr, err)
+	}
+}
+
 func TestRunClientLoopSignalsStopOnNoActiveEpoch(t *testing.T) {
 	var signaled bool
 	var calls int
@@ -356,5 +512,57 @@ func TestResolveHammerConcurrency(t *testing.T) {
 	_, err = resolveHammerConcurrency(0)
 	if err == nil || err.Error() != "-concurrency must be positive" {
 		t.Fatalf("expected positive concurrency error, got %v", err)
+	}
+}
+
+func TestResolveOverloadRetryConfig(t *testing.T) {
+	config, err := resolveOverloadRetryConfig(false, 0, 0)
+	if err != nil {
+		t.Fatalf("disabled retry should ignore backoff values, got %v", err)
+	}
+	if config.enabled {
+		t.Fatal("expected disabled retry config")
+	}
+
+	config, err = resolveOverloadRetryConfig(true, 10, 250)
+	if err != nil {
+		t.Fatalf("resolveOverloadRetryConfig returned unexpected error: %v", err)
+	}
+	if !config.enabled || config.initialBackoff != 10*time.Millisecond || config.maxBackoff != 250*time.Millisecond {
+		t.Fatalf("unexpected retry config: %+v", config)
+	}
+
+	tests := []struct {
+		name      string
+		initialMS uint
+		maxMS     uint
+		wantErr   string
+	}{
+		{
+			name:      "zero initial",
+			initialMS: 0,
+			maxMS:     250,
+			wantErr:   "-overload-backoff-initial-ms must be positive",
+		},
+		{
+			name:      "zero max",
+			initialMS: 10,
+			maxMS:     0,
+			wantErr:   "-overload-backoff-max-ms must be positive",
+		},
+		{
+			name:      "max below initial",
+			initialMS: 20,
+			maxMS:     10,
+			wantErr:   "-overload-backoff-max-ms must be greater than or equal to -overload-backoff-initial-ms",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveOverloadRetryConfig(true, tc.initialMS, tc.maxMS)
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("expected error %q, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }

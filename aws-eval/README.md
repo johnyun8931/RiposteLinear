@@ -49,6 +49,9 @@ The initial cloud configuration reuses the local winner:
 - `client -threads 1`
 - client hammer concurrency defaults to `16`, and can be overridden with
   `CLIENT_CONCURRENCY`
+- overload retry is opt-in with `CLIENT_RETRY_OVERLOAD=1`; when enabled, the
+  client treats ready-queue overload as backpressure and retries the same
+  plaintext with exponential backoff
 - random hammer uploads generate a fresh random message per request; deterministic
   `-x` / `-y` / `-payload` uploads intentionally reuse the exact message
 
@@ -79,8 +82,11 @@ Process killing is cleanup between phases, not a successful completion signal.
 If the client exits with `unexpected EOF`, times out, or accepted traffic stops
 too early in the measured epoch, the summary reports `winner: unavailable` and
 keeps the raw totals as diagnostic data.
-If the server returns `server overloaded: ready queue full`, the phase is marked
-as `overload`; that is diagnostic data, not a valid throughput comparison.
+If overload retry is off and the server returns `server overloaded: ready queue
+full`, the phase is marked as `overload`; that is diagnostic data, not a valid
+throughput comparison. If overload retry is on, overload lines are counted as
+retry diagnostics and the phase can still be valid if the client exits via
+`No active epoch`.
 
 The benchmark stops at the first invalid phase. For example, if
 `baseline-warmup` fails validation, the measured phases are skipped because the
@@ -186,6 +192,7 @@ For AWS load calibration, run the short concurrency sweep after smoke:
 
 ```bash
 CLIENT_CONCURRENCY_SWEEP="1 2 4 8 16" \
+CLIENT_RETRY_OVERLOAD=1 \
 WARMUP_EPOCH_SECONDS=10 \
 MEASURED_EPOCH_SECONDS=45 \
 CLIENT_EXIT_GRACE_SECONDS=30 \
@@ -242,6 +249,9 @@ CLIENT_INSTANCE_TYPE=c7i.xlarge
 SERVER_THREADS=2
 CLIENT_THREADS=1
 CLIENT_CONCURRENCY=16
+CLIENT_RETRY_OVERLOAD=0
+CLIENT_OVERLOAD_BACKOFF_INITIAL_MS=10
+CLIENT_OVERLOAD_BACKOFF_MAX_MS=250
 WARMUP_EPOCH_SECONDS=60
 MEASURED_EPOCH_SECONDS=600
 START_EPOCH_RETRY_TIMEOUT=90

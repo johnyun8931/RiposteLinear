@@ -5,6 +5,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USER_SERVER_THREADS="${SERVER_THREADS-}"
 USER_CLIENT_THREADS="${CLIENT_THREADS-}"
+USER_CLIENT_RETRY_OVERLOAD="${CLIENT_RETRY_OVERLOAD-}"
+USER_CLIENT_OVERLOAD_BACKOFF_INITIAL_MS="${CLIENT_OVERLOAD_BACKOFF_INITIAL_MS-}"
+USER_CLIENT_OVERLOAD_BACKOFF_MAX_MS="${CLIENT_OVERLOAD_BACKOFF_MAX_MS-}"
 USER_WARMUP_EPOCH_SECONDS="${WARMUP_EPOCH_SECONDS-}"
 USER_MEASURED_EPOCH_SECONDS="${MEASURED_EPOCH_SECONDS-}"
 USER_CLIENT_EXIT_GRACE_SECONDS="${CLIENT_EXIT_GRACE_SECONDS-}"
@@ -18,6 +21,9 @@ SWEEP_ID="${SWEEP_ID:-$(date -u +%Y%m%dT%H%M%SZ)-concurrency-sweep}"
 CLIENT_CONCURRENCY_SWEEP="${CLIENT_CONCURRENCY_SWEEP:-1 2 4 8 16}"
 SWEEP_SERVER_THREADS="${USER_SERVER_THREADS:-2}"
 SWEEP_CLIENT_THREADS="${USER_CLIENT_THREADS:-1}"
+SWEEP_CLIENT_RETRY_OVERLOAD="${USER_CLIENT_RETRY_OVERLOAD:-$CLIENT_RETRY_OVERLOAD}"
+SWEEP_CLIENT_OVERLOAD_BACKOFF_INITIAL_MS="${USER_CLIENT_OVERLOAD_BACKOFF_INITIAL_MS:-$CLIENT_OVERLOAD_BACKOFF_INITIAL_MS}"
+SWEEP_CLIENT_OVERLOAD_BACKOFF_MAX_MS="${USER_CLIENT_OVERLOAD_BACKOFF_MAX_MS:-$CLIENT_OVERLOAD_BACKOFF_MAX_MS}"
 SWEEP_WARMUP_SECONDS="${USER_WARMUP_EPOCH_SECONDS:-10}"
 SWEEP_MEASURED_SECONDS="${USER_MEASURED_EPOCH_SECONDS:-45}"
 SWEEP_CLIENT_EXIT_GRACE_SECONDS="${USER_CLIENT_EXIT_GRACE_SECONDS:-30}"
@@ -27,8 +33,8 @@ SUMMARY_MD="$SWEEP_OUT_DIR/concurrency-summary.md"
 
 mkdir -p "$SWEEP_OUT_DIR"
 
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-  "client_concurrency" "benchmark_exit_status" "collect_exit_status" "result_id" \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "client_concurrency" "client_retry_overload" "benchmark_exit_status" "collect_exit_status" "result_id" \
   "baseline_warmup_valid" "baseline_measured_valid" "sharded_warmup_valid" "sharded_measured_valid" \
   "invalid_reasons" "winner" "baseline_total" "sharded_total" "delta" >"$SUMMARY_TSV"
 
@@ -39,7 +45,7 @@ append_summary_row() {
   local collect_status="$4"
   local result_id="$5"
 
-  python3 - "$result_dir" "$concurrency" "$benchmark_status" "$collect_status" "$result_id" >>"$SUMMARY_TSV" <<'PY'
+  python3 - "$result_dir" "$concurrency" "$SWEEP_CLIENT_RETRY_OVERLOAD" "$benchmark_status" "$collect_status" "$result_id" >>"$SUMMARY_TSV" <<'PY'
 import json
 import re
 import sys
@@ -47,9 +53,10 @@ from pathlib import Path
 
 result_dir = Path(sys.argv[1])
 concurrency = sys.argv[2]
-benchmark_status = sys.argv[3]
-collect_status = sys.argv[4]
-result_id = sys.argv[5]
+client_retry_overload = sys.argv[3]
+benchmark_status = sys.argv[4]
+collect_status = sys.argv[5]
+result_id = sys.argv[6]
 
 phases = [
     "baseline-warmup",
@@ -95,6 +102,7 @@ if summary.exists():
 
 row = [
     concurrency,
+    client_retry_overload,
     benchmark_status,
     collect_status,
     result_id,
@@ -122,6 +130,9 @@ for concurrency in $CLIENT_CONCURRENCY_SWEEP; do
   SERVER_THREADS="$SWEEP_SERVER_THREADS" \
   CLIENT_THREADS="$SWEEP_CLIENT_THREADS" \
   CLIENT_CONCURRENCY="$concurrency" \
+  CLIENT_RETRY_OVERLOAD="$SWEEP_CLIENT_RETRY_OVERLOAD" \
+  CLIENT_OVERLOAD_BACKOFF_INITIAL_MS="$SWEEP_CLIENT_OVERLOAD_BACKOFF_INITIAL_MS" \
+  CLIENT_OVERLOAD_BACKOFF_MAX_MS="$SWEEP_CLIENT_OVERLOAD_BACKOFF_MAX_MS" \
   WARMUP_EPOCH_SECONDS="$SWEEP_WARMUP_SECONDS" \
   MEASURED_EPOCH_SECONDS="$SWEEP_MEASURED_SECONDS" \
   CLIENT_EXIT_GRACE_SECONDS="$SWEEP_CLIENT_EXIT_GRACE_SECONDS" \
@@ -143,11 +154,11 @@ rows = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))
 
 print("# AWS Client Concurrency Sweep")
 print()
-print("| client_concurrency | benchmark_exit_status | baseline_warmup | baseline_measured | sharded_warmup | sharded_measured | winner | baseline_total | sharded_total | delta | invalid_reasons |")
-print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+print("| client_concurrency | client_retry_overload | benchmark_exit_status | baseline_warmup | baseline_measured | sharded_warmup | sharded_measured | winner | baseline_total | sharded_total | delta | invalid_reasons |")
+print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
 for row in rows:
     print(
-        f"| {row['client_concurrency']} | {row['benchmark_exit_status']} | "
+        f"| {row['client_concurrency']} | {row['client_retry_overload']} | {row['benchmark_exit_status']} | "
         f"{row['baseline_warmup_valid']} | {row['baseline_measured_valid']} | "
         f"{row['sharded_warmup_valid']} | {row['sharded_measured_valid']} | "
         f"{row['winner']} | {row['baseline_total']} | {row['sharded_total']} | "

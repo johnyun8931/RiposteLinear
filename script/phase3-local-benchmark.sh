@@ -10,6 +10,13 @@ POST_RUN_WAIT="${RIPOSTE_BENCH_POST_RUN_WAIT}"
 START_DELAY="${RIPOSTE_BENCH_START_DELAY}"
 CLIENT_THREADS="${RIPOSTE_BENCH_CLIENT_THREADS}"
 CLIENT_CONCURRENCY="${RIPOSTE_BENCH_CLIENT_CONCURRENCY}"
+CLIENT_RETRY_OVERLOAD="${RIPOSTE_BENCH_CLIENT_RETRY_OVERLOAD}"
+CLIENT_OVERLOAD_BACKOFF_INITIAL_MS="${RIPOSTE_BENCH_CLIENT_OVERLOAD_BACKOFF_INITIAL_MS}"
+CLIENT_OVERLOAD_BACKOFF_MAX_MS="${RIPOSTE_BENCH_CLIENT_OVERLOAD_BACKOFF_MAX_MS}"
+CLIENT_RETRY_ARGS=()
+if [[ "$CLIENT_RETRY_OVERLOAD" == "1" || "$CLIENT_RETRY_OVERLOAD" == "true" ]]; then
+	CLIENT_RETRY_ARGS=(-retry-overload -overload-backoff-initial-ms "$CLIENT_OVERLOAD_BACKOFF_INITIAL_MS" -overload-backoff-max-ms "$CLIENT_OVERLOAD_BACKOFF_MAX_MS")
+fi
 
 SUMMARY_TSV="$STATE_DIR/benchmark-summary.tsv"
 SUMMARY_MD="$STATE_DIR/benchmark-summary.md"
@@ -24,7 +31,7 @@ baseline_run() {
 	before="$(last_since_start "$(log_file baseline-leader)")"
 	start_epoch server "$BASELINE_LEADER_ADDR" "$BENCH_DURATION" >/dev/null
 	sleep "$START_DELAY"
-	run_client -leader "$BASELINE_LEADER_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" -log "$client_log"
+	run_client -leader "$BASELINE_LEADER_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" "${CLIENT_RETRY_ARGS[@]}" -log "$client_log"
 	wait_for_epoch_complete server "$BASELINE_LEADER_ADDR"
 	sleep "$POST_RUN_WAIT"
 	after="$(last_since_start "$(log_file baseline-leader)")"
@@ -44,7 +51,7 @@ sharded_run() {
 	shard1_before="$(last_since_start "$(log_file shard1-leader)")"
 	start_epoch coordinator "$COORDINATOR_ADDR" "$BENCH_DURATION" >/dev/null
 	sleep "$START_DELAY"
-	run_client -coordinator "$COORDINATOR_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" -log "$client_log"
+	run_client -coordinator "$COORDINATOR_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" "${CLIENT_RETRY_ARGS[@]}" -log "$client_log"
 	wait_for_epoch_complete coordinator "$COORDINATOR_ADDR"
 	sleep "$POST_RUN_WAIT"
 	shard0_after="$(last_since_start "$(log_file shard0-leader)")"
@@ -113,7 +120,7 @@ build_binaries
 
 host_context_line | tee "$HOST_INFO_FILE"
 {
-	echo -e "server_threads\tclient_concurrency\tbaseline_total\tbaseline_req_per_sec\tbaseline_client_max_sent\tshard0_total\tshard1_total\tsharded_total\tsharded_req_per_sec\tsharded_client_max_sent\tdelta\twinner"
+	echo -e "server_threads\tclient_concurrency\tclient_retry_overload\tbaseline_total\tbaseline_req_per_sec\tbaseline_client_max_sent\tshard0_total\tshard1_total\tsharded_total\tsharded_req_per_sec\tsharded_client_max_sent\tdelta\twinner"
 } >"$SUMMARY_TSV"
 
 for threads in $THREAD_SWEEP; do
@@ -134,8 +141,8 @@ PY
 	delta="$((sharded_total - baseline_total))"
 	winner="$(winner_for_row "$baseline_total" "$sharded_total")"
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$threads" "$CLIENT_CONCURRENCY" "$baseline_total" "$baseline_req_per_sec" "$baseline_client_max_sent" \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$threads" "$CLIENT_CONCURRENCY" "$CLIENT_RETRY_OVERLOAD" "$baseline_total" "$baseline_req_per_sec" "$baseline_client_max_sent" \
 		"$shard0_total" "$shard1_total" "$sharded_total" "$sharded_req_per_sec" "$sharded_client_max_sent" \
 		"$delta" "$winner" >>"$SUMMARY_TSV"
 done
@@ -156,11 +163,11 @@ print("# Phase 3 Local Throughput Sweep")
 print()
 print(f"- {host_info}")
 print()
-print("| server_threads | client_concurrency | baseline_total | baseline_req_per_sec | shard0_total | shard1_total | sharded_total | sharded_req_per_sec | delta | winner |")
-print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+print("| server_threads | client_concurrency | client_retry_overload | baseline_total | baseline_req_per_sec | shard0_total | shard1_total | sharded_total | sharded_req_per_sec | delta | winner |")
+print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
 for row in rows:
     print(
-        f"| {row['server_threads']} | {row['client_concurrency']} | {row['baseline_total']} | {row['baseline_req_per_sec']} | "
+        f"| {row['server_threads']} | {row['client_concurrency']} | {row['client_retry_overload']} | {row['baseline_total']} | {row['baseline_req_per_sec']} | "
         f"{row['shard0_total']} | {row['shard1_total']} | {row['sharded_total']} | "
         f"{row['sharded_req_per_sec']} | {row['delta']} | {row['winner']} |"
     )

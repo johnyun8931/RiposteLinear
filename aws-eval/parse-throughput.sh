@@ -30,6 +30,9 @@ metadata = json.loads(metadata_path.read_text())
 measured_seconds = int(metadata["config"]["measured_epoch_seconds"])
 client_exit_grace_seconds = int(metadata["config"].get("client_exit_grace_seconds", 30))
 client_concurrency = int(metadata["config"].get("client_concurrency", 16))
+client_retry_overload = str(metadata["config"].get("client_retry_overload", "0")).lower() in {"1", "true", "yes"}
+client_overload_backoff_initial_ms = int(metadata["config"].get("client_overload_backoff_initial_ms", 10))
+client_overload_backoff_max_ms = int(metadata["config"].get("client_overload_backoff_max_ms", 250))
 
 pattern = re.compile(
     r"(?P<time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}).*"
@@ -62,6 +65,7 @@ def parse_client_log(log_path: Path):
             "has_no_active_epoch": False,
             "has_unexpected_eof": False,
             "has_overload": False,
+            "overload_retry_count": 0,
             "last_sent": None,
             "last_sent_time": "",
         }
@@ -72,6 +76,7 @@ def parse_client_log(log_path: Path):
         "has_no_active_epoch": False,
         "has_unexpected_eof": False,
         "has_overload": False,
+        "overload_retry_count": 0,
         "last_sent": None,
         "last_sent_time": "",
     }
@@ -83,6 +88,8 @@ def parse_client_log(log_path: Path):
                 result["has_unexpected_eof"] = True
             if "server overloaded: ready queue full" in line:
                 result["has_overload"] = True
+            if "Overload retry after" in line:
+                result["overload_retry_count"] += 1
             match = sent_pattern.search(line)
             if match:
                 result["last_sent"] = int(match.group("count"))
@@ -200,7 +207,7 @@ def evaluate_phase(phase, rows, roles):
         reasons.append("client log missing")
     if client_log["has_unexpected_eof"]:
         reasons.append("client log contains unexpected EOF")
-    if client_log["has_overload"]:
+    if client_log["has_overload"] and not client_retry_overload:
         reasons.append("client log contains server overload")
     if not client_log["has_no_active_epoch"]:
         reasons.append("client log does not contain No active epoch")
@@ -263,6 +270,8 @@ summary_md.write_text(
             f"- measured epoch seconds: `{measured_seconds}`",
             f"- client exit grace seconds: `{client_exit_grace_seconds}`",
             f"- client concurrency: `{client_concurrency}`",
+            f"- client retry overload: `{str(client_retry_overload).lower()}`",
+            f"- client overload backoff: `{client_overload_backoff_initial_ms}ms` initial / `{client_overload_backoff_max_ms}ms` max",
             f"- baseline valid: `{str(baseline_eval['valid']).lower()}`",
             f"- baseline invalid reasons: {format_reasons(baseline_eval['reasons'])}",
             f"- sharded valid: `{str(sharded_eval['valid']).lower()}`",
@@ -278,6 +287,8 @@ summary_md.write_text(
             "",
             f"- baseline active-until estimate: `{baseline_eval['active_until_seconds']}s`",
             f"- sharded active-until estimate: `{sharded_eval['active_until_seconds']}s`",
+            f"- baseline overload retries: `{baseline_eval['client_log']['overload_retry_count']}`",
+            f"- sharded overload retries: `{sharded_eval['client_log']['overload_retry_count']}`",
             f"- baseline warnings: {format_reasons(baseline_eval['warnings'])}",
             f"- sharded warnings: {format_reasons(sharded_eval['warnings'])}",
             "",

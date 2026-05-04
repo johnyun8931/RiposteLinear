@@ -16,6 +16,9 @@ SSH_USER="${SSH_USER:-ubuntu}"
 SERVER_THREADS="${SERVER_THREADS:-2}"
 CLIENT_THREADS="${CLIENT_THREADS:-1}"
 CLIENT_CONCURRENCY="${CLIENT_CONCURRENCY:-16}"
+CLIENT_RETRY_OVERLOAD="${CLIENT_RETRY_OVERLOAD:-0}"
+CLIENT_OVERLOAD_BACKOFF_INITIAL_MS="${CLIENT_OVERLOAD_BACKOFF_INITIAL_MS:-10}"
+CLIENT_OVERLOAD_BACKOFF_MAX_MS="${CLIENT_OVERLOAD_BACKOFF_MAX_MS:-250}"
 WARMUP_EPOCH_SECONDS="${WARMUP_EPOCH_SECONDS:-60}"
 MEASURED_EPOCH_SECONDS="${MEASURED_EPOCH_SECONDS:-600}"
 START_EPOCH_RETRY_TIMEOUT="${START_EPOCH_RETRY_TIMEOUT:-90}"
@@ -382,13 +385,17 @@ start_remote_hammer_client() {
   local target_addr="$3"
   local log_path="$4"
   local pid_path="${5:-}"
-  local mkdir_cmd
+  local mkdir_cmd retry_args
   mkdir_cmd="mkdir -p '$(dirname "$log_path")'"
+  retry_args=""
+  if [[ "$CLIENT_RETRY_OVERLOAD" == "1" || "$CLIENT_RETRY_OVERLOAD" == "true" ]]; then
+    retry_args="-retry-overload -overload-backoff-initial-ms '$CLIENT_OVERLOAD_BACKOFF_INITIAL_MS' -overload-backoff-max-ms '$CLIENT_OVERLOAD_BACKOFF_MAX_MS'"
+  fi
   if [[ -n "$pid_path" ]]; then
     mkdir_cmd="$mkdir_cmd '$(dirname "$pid_path")'"
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -concurrency '$CLIENT_CONCURRENCY' -log '$log_path' > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -concurrency '$CLIENT_CONCURRENCY' $retry_args -log '$log_path' > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
   else
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -concurrency '$CLIENT_CONCURRENCY' -log '$log_path' > '${log_path}.nohup' 2>&1 &"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/client '$target_flag' '$target_addr' -hammer -threads '$CLIENT_THREADS' -concurrency '$CLIENT_CONCURRENCY' $retry_args -log '$log_path' > '${log_path}.nohup' 2>&1 &"
   fi
 }
 
@@ -447,6 +454,7 @@ write_remote_phase_status() {
   local status_path
   local quoted_status_path quoted_phase quoted_duration quoted_wait_timeout
   local quoted_valid quoted_client_exit_status quoted_client_exit_reason quoted_invalid_reason
+  local quoted_retry_overload quoted_retry_initial quoted_retry_max
   status_path="$(phase_dir "$phase")/phase-status.json"
   quoted_status_path="$(quote "$status_path")"
   quoted_phase="$(quote "$phase")"
@@ -456,7 +464,10 @@ write_remote_phase_status() {
   quoted_client_exit_status="$(quote "$client_exit_status")"
   quoted_client_exit_reason="$(quote "$client_exit_reason")"
   quoted_invalid_reason="$(quote "$invalid_reason")"
-  remote_cmd "$host" "mkdir -p '$(dirname "$status_path")'; python3 - $quoted_status_path $quoted_phase $quoted_duration $quoted_wait_timeout $quoted_valid $quoted_client_exit_status $quoted_client_exit_reason $quoted_invalid_reason <<'PY'
+  quoted_retry_overload="$(quote "$CLIENT_RETRY_OVERLOAD")"
+  quoted_retry_initial="$(quote "$CLIENT_OVERLOAD_BACKOFF_INITIAL_MS")"
+  quoted_retry_max="$(quote "$CLIENT_OVERLOAD_BACKOFF_MAX_MS")"
+  remote_cmd "$host" "mkdir -p '$(dirname "$status_path")'; python3 - $quoted_status_path $quoted_phase $quoted_duration $quoted_wait_timeout $quoted_valid $quoted_client_exit_status $quoted_client_exit_reason $quoted_invalid_reason $quoted_retry_overload $quoted_retry_initial $quoted_retry_max <<'PY'
 import json
 import sys
 
@@ -469,6 +480,9 @@ payload = {
     'client_exit_status': sys.argv[6],
     'client_exit_reason': sys.argv[7],
     'invalid_reason': sys.argv[8],
+    'client_retry_overload': sys.argv[9],
+    'client_overload_backoff_initial_ms': int(sys.argv[10]),
+    'client_overload_backoff_max_ms': int(sys.argv[11]),
 }
 
 with open(status_path, 'w') as fh:

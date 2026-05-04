@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	//"bytes"
 	//"encoding/gob"
@@ -24,6 +25,9 @@ var donothingFlag = flag.Bool("donothing", false, "If set, client pings server."
 var bogusFlag = flag.Bool("bogus", false, "If set, client sends an invalid request.")
 var hammerFlag = flag.Bool("hammer", false, "If set, client sends requests to server as quickly as possible.")
 var concurrencyFlag = flag.Uint("concurrency", 16, "Number of concurrent hammer workers")
+var retryOverloadFlag = flag.Bool("retry-overload", false, "If set, hammer clients retry ready-queue overloads with backoff.")
+var overloadBackoffInitialFlag = flag.Uint("overload-backoff-initial-ms", 10, "Initial ready-queue overload retry backoff in milliseconds.")
+var overloadBackoffMaxFlag = flag.Uint("overload-backoff-max-ms", 250, "Maximum ready-queue overload retry backoff in milliseconds.")
 var coordinatorFlag = flag.String("coordinator", "", "Coordinator IP and port")
 var leaderFlag = flag.String("leader", "", "Riposte pair leader IP and port")
 var logFlag = flag.String("log", "", "Location of log file")
@@ -38,6 +42,12 @@ var count int
 var randomMessage = db.RandomMessage
 
 type messageProvider func() (*db.Plaintext, error)
+
+type overloadRetryConfig struct {
+	enabled        bool
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+}
 
 func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	var upRes1 db.UploadReply1
@@ -87,6 +97,31 @@ func isNoActiveEpochError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "No active epoch")
 }
 
+func isOverloadError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "server overloaded: ready queue full")
+}
+
+func uploadWithOverloadRetry(msg *db.Plaintext, config overloadRetryConfig, upload func(*db.Plaintext) error, sleep func(time.Duration)) error {
+	backoff := config.initialBackoff
+	for {
+		err := upload(msg)
+		if err == nil {
+			return nil
+		}
+		if !config.enabled || !isOverloadError(err) {
+			return err
+		}
+		log.Printf("Overload retry after %s: %v", backoff, err)
+		sleep(backoff)
+		if backoff < config.maxBackoff {
+			backoff *= 2
+			if backoff > config.maxBackoff {
+				backoff = config.maxBackoff
+			}
+		}
+	}
+}
+
 func runClientLoop(hammer bool, shouldStop func() bool, signalStop func(), doUpload func() error) error {
 	for {
 		if hammer && shouldStop != nil && shouldStop() {
@@ -105,7 +140,7 @@ func runClientLoop(hammer bool, shouldStop func() bool, signalStop func(), doUpl
 	return nil
 }
 
-func runClientWithStop(server string, nextMessage messageProvider, shouldStop func() bool, signalStop func()) error {
+func runClientWithStop(server string, nextMessage messageProvider, retryConfig overloadRetryConfig, shouldStop func() bool, signalStop func()) error {
 	certs := make([]tls.Certificate, 1)
 	certs[0] = utils.LeaderCertificate
 	client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
@@ -138,7 +173,9 @@ func runClientWithStop(server string, nextMessage messageProvider, shouldStop fu
 			if err != nil {
 				return err
 			}
-			err = tryUpload(client, msg)
+			err = uploadWithOverloadRetry(msg, retryConfig, func(msg *db.Plaintext) error {
+				return tryUpload(client, msg)
+			}, time.Sleep)
 			if err != nil {
 				log.Printf("Upload error: %v", err)
 				return err
@@ -177,8 +214,12 @@ func resolveMessageProvider(x, y int, payload string) (messageProvider, error) {
 }
 
 func runClientWorker(target string, shouldStop func() bool, signalStop func()) error {
+	retryConfig, err := resolveOverloadRetryConfig(*hammerFlag && *retryOverloadFlag, *overloadBackoffInitialFlag, *overloadBackoffMaxFlag)
+	if err != nil {
+		return err
+	}
 	if *donothingFlag {
-		return runClientWithStop(target, nil, shouldStop, signalStop)
+		return runClientWithStop(target, nil, retryConfig, shouldStop, signalStop)
 	}
 	//log.Printf("=== Starting Client ===")
 	nextMessage, err := resolveMessageProvider(*xFlag, *yFlag, *payloadFlag)
@@ -188,7 +229,7 @@ func runClientWorker(target string, shouldStop func() bool, signalStop func()) e
 
 	//log.Printf("Insert into [%v,%v]", xIdx, yIdx)
 	//log.Printf("Plaintext [%v]", msg)
-	return runClientWithStop(target, nextMessage, shouldStop, signalStop)
+	return runClientWithStop(target, nextMessage, retryConfig, shouldStop, signalStop)
 }
 
 func runHammerClients(concurrent int, runOnce func(func() bool, func()) error) error {
@@ -230,6 +271,28 @@ func resolveHammerConcurrency(value uint) (int, error) {
 		return 0, errors.New("-concurrency must be positive")
 	}
 	return int(value), nil
+}
+
+func resolveOverloadRetryConfig(enabled bool, initialMS uint, maxMS uint) (overloadRetryConfig, error) {
+	if !enabled {
+		return overloadRetryConfig{}, nil
+	}
+	if initialMS == 0 {
+		return overloadRetryConfig{}, errors.New("-overload-backoff-initial-ms must be positive")
+	}
+	if maxMS == 0 {
+		return overloadRetryConfig{}, errors.New("-overload-backoff-max-ms must be positive")
+	}
+	initial := time.Duration(initialMS) * time.Millisecond
+	maximum := time.Duration(maxMS) * time.Millisecond
+	if maximum < initial {
+		return overloadRetryConfig{}, errors.New("-overload-backoff-max-ms must be greater than or equal to -overload-backoff-initial-ms")
+	}
+	return overloadRetryConfig{
+		enabled:        true,
+		initialBackoff: initial,
+		maxBackoff:     maximum,
+	}, nil
 }
 
 func resolveTargetAddress(coordinatorAddr, leaderAddr string) (string, error) {
