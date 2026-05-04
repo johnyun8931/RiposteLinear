@@ -45,12 +45,18 @@ epoch_id="$(extract_field "$start_line" "epoch")"
 wait_for_status_state coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" active 20 >/dev/null || die "coordinator did not reach active state"
 wait_for_status_state server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" active 20 >/dev/null || die "shard0 leader did not reach active state"
 wait_for_status_state server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" active 20 >/dev/null || die "shard1 leader did not reach active state"
+capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-active-coordinator.json"
+capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard0-leader.json"
+capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard1-leader.json"
 
 info "sending deterministic smoke writes through the coordinator"
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 1 -y 0 -payload shard0-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row0.log'"
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 2 -y 128 -payload shard1-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row128.log'"
 
 wait_for_epoch_complete coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" 120
+capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
+capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
+capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
 
 local_shard0="$SMOKE_LOCAL_DIR/$(result_file_name "$epoch_id" 0)"
 local_shard1="$SMOKE_LOCAL_DIR/$(result_file_name "$epoch_id" 1)"

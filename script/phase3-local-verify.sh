@@ -28,6 +28,9 @@ epoch_id="$(extract_field "$start_line" "epoch")"
 coord_status="$(wait_for_status_state coordinator "$COORDINATOR_ADDR" active 10)" || die "coordinator did not become active"
 shard0_status="$(wait_for_status_state server "$SHARD0_LEADER_ADDR" active 10)" || die "shard 0 leader did not become active"
 shard1_status="$(wait_for_status_state server "$SHARD1_LEADER_ADDR" active 10)" || die "shard 1 leader did not become active"
+status_json coordinator "$COORDINATOR_ADDR" >"$TMP_DIR/status-active-coordinator.json"
+status_json server "$SHARD0_LEADER_ADDR" >"$TMP_DIR/status-active-shard0-leader.json"
+status_json server "$SHARD1_LEADER_ADDR" >"$TMP_DIR/status-active-shard1-leader.json"
 
 for field in epoch state accepting start end duration; do
 	assert_equals "$(extract_field "$coord_status" "$field")" "$(extract_field "$shard0_status" "$field")" "coordinator vs shard0 $field"
@@ -42,6 +45,9 @@ echo "PASS: deterministic writes to rows 0 and 128 succeeded"
 
 coord_complete="$(wait_for_status_state coordinator "$COORDINATOR_ADDR" completed 20)" || die "coordinator did not reach completed state"
 assert_equals "$(extract_field "$coord_complete" "epoch")" "$epoch_id" "completed epoch id"
+status_json coordinator "$COORDINATOR_ADDR" >"$TMP_DIR/status-completed-coordinator.json"
+status_json server "$SHARD0_LEADER_ADDR" >"$TMP_DIR/status-completed-shard0-leader.json"
+status_json server "$SHARD1_LEADER_ADDR" >"$TMP_DIR/status-completed-shard1-leader.json"
 echo "PASS: verification epoch completed"
 
 result_s0="$(latest_result_file "$RESULTS_S0_DIR" "$epoch_id" 0)"
@@ -68,4 +74,5 @@ Verification complete.
   verified epoch: $epoch_id
   shard 0 result: $result_s0
   shard 1 result: $result_s1
+  status artifacts: $TMP_DIR/status-*.json
 EOF

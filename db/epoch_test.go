@@ -235,6 +235,88 @@ func TestEpochStatusReportsLifecycle(t *testing.T) {
 	}
 }
 
+func TestStatusReportsLeaderPeerReadinessAndEpochState(t *testing.T) {
+	s := newTestLeaderServerWithPeerState(PeerConnectionsConnecting, nil)
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("initial status failed: %v", err)
+	}
+	if !status.Healthy || !status.IsLeader || status.ServerIndex != 0 || status.ShardID != 0 {
+		t.Fatalf("unexpected initial status identity: %+v", status)
+	}
+	if status.State != EpochStateNoActive.String() || status.PeerState != PeerConnectionsConnecting.String() {
+		t.Fatalf("unexpected initial status: %+v", status)
+	}
+
+	s.setPeerConnectionState(PeerConnectionsReady, nil)
+	var startReply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &startReply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("active status failed: %v", err)
+	}
+	if !status.Healthy || status.EpochID != startReply.EpochID || status.State != EpochStateActive.String() || !status.Accepting {
+		t.Fatalf("unexpected active status: %+v", status)
+	}
+	if status.PeerState != PeerConnectionsReady.String() {
+		t.Fatalf("unexpected peer state: %+v", status)
+	}
+
+	s.setPeerConnectionState(PeerConnectionsFailed, errors.New("dial failed"))
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("failed-peer status failed: %v", err)
+	}
+	if status.Healthy || status.PeerState != PeerConnectionsFailed.String() || status.PeerError != "dial failed" {
+		t.Fatalf("unexpected failed-peer status: %+v", status)
+	}
+}
+
+func TestStatusReportsCompletedLastResultPath(t *testing.T) {
+	s := newTestLeaderServer()
+	s.mergeFn = func() (string, error) { return "/tmp/status-result.json", nil }
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	if err := s.finishEpoch(); err != nil {
+		t.Fatalf("finish epoch failed: %v", err)
+	}
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.State != EpochStateCompleted.String() || status.Accepting {
+		t.Fatalf("unexpected completed status: %+v", status)
+	}
+	if status.LastResult != "/tmp/status-result.json" {
+		t.Fatalf("unexpected last result path: %q", status.LastResult)
+	}
+}
+
+func TestStatusReportsFollowerRoleWithoutLeaderControlState(t *testing.T) {
+	s := NewServer(1, []string{"127.0.0.1:9000", "127.0.0.1:9001"})
+	s.SetShardID(7)
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("follower status failed: %v", err)
+	}
+	if !status.Healthy || status.IsLeader || status.ServerIndex != 1 || status.ShardID != 7 {
+		t.Fatalf("unexpected follower identity: %+v", status)
+	}
+	if status.State != EpochStateNoActive.String() || status.PeerState != "not_applicable" {
+		t.Fatalf("unexpected follower status: %+v", status)
+	}
+}
+
 func TestFinishEpochMergeFailureLeavesEpochIncomplete(t *testing.T) {
 	s := newTestLeaderServer()
 	s.mergeFn = func() (string, error) { return "", errors.New("merge failed") }

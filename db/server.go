@@ -714,6 +714,33 @@ func (t *Server) EpochStatus(_ *EpochStatusArgs, reply *EpochStatusReply) error 
 	return nil
 }
 
+func (t *Server) Status(_ *StatusArgs, reply *StatusReply) error {
+	reply.Healthy = true
+	reply.IsLeader = t.isLeader()
+	reply.ServerIndex = t.ServerIdx
+	reply.ShardID = t.ShardID
+	if !t.isLeader() {
+		reply.State = EpochStateNoActive.String()
+		reply.PeerState = "not_applicable"
+		return nil
+	}
+
+	snapshot := t.currentControlSnapshot()
+	reply.EpochID = snapshot.epoch.ID
+	reply.State = snapshot.epoch.State.String()
+	reply.StartUnix = snapshot.epoch.StartTime.Unix()
+	reply.EndUnix = snapshot.epoch.EndTime.Unix()
+	reply.DurationSecs = snapshot.epoch.DurationSeconds
+	reply.Accepting = snapshot.accepting
+	reply.LastResult = snapshot.lastResult
+	reply.PeerState = snapshot.peerState.String()
+	reply.PeerError = snapshot.peerError
+	if snapshot.peerState == PeerConnectionsFailed {
+		reply.Healthy = false
+	}
+	return nil
+}
+
 func (t *Server) AbortEpoch(args *AbortEpochArgs, reply *AbortEpochReply) error {
 	if !t.isLeader() {
 		return errors.New("Only leader can abort epochs")

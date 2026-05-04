@@ -509,6 +509,16 @@ remote_epoch_status() {
   remote_cmd "$host" "$bin -admin-target '$target_addr' -epoch-status 2>&1 | tail -n1"
 }
 
+capture_remote_status_json() {
+  local kind="$1"
+  local host="$2"
+  local target_addr="$3"
+  local output_path="$4"
+  local bin
+  bin="$(admin_binary_for_kind "$kind")"
+  remote_cmd "$host" "mkdir -p '$(dirname "$output_path")'; $bin -admin-target '$target_addr' -status > '$output_path'"
+}
+
 extract_field() {
   local line="$1"
   local key="$2"

@@ -218,6 +218,55 @@ type EpochStatusReply struct {
 	LastResult   string
 }
 
+type StatusArgs struct{}
+
+type StatusReply struct {
+	Healthy      bool   `json:"healthy"`
+	IsLeader     bool   `json:"is_leader"`
+	ServerIndex  int    `json:"server_index"`
+	ShardID      int    `json:"shard_id"`
+	EpochID      int64  `json:"epoch_id"`
+	State        string `json:"state"`
+	StartUnix    int64  `json:"start_unix"`
+	EndUnix      int64  `json:"end_unix"`
+	DurationSecs int64  `json:"duration_secs"`
+	Accepting    bool   `json:"accepting"`
+	LastResult   string `json:"last_result"`
+	PeerState    string `json:"peer_state"`
+	PeerError    string `json:"peer_error"`
+}
+
+type CoordinatorStatusArgs struct {
+	ShardTimeoutMillis int64 `json:"shard_timeout_millis"`
+}
+
+type CoordinatorShardStatus struct {
+	ID                  int         `json:"id"`
+	StartRow            int         `json:"start_row"`
+	EndRow              int         `json:"end_row"`
+	ActiveLeaderAddr    string      `json:"active_leader_addr"`
+	ActiveFollowerAddr  string      `json:"active_follower_addr"`
+	HasStandby          bool        `json:"has_standby"`
+	StandbyLeaderAddr   string      `json:"standby_leader_addr"`
+	StandbyFollowerAddr string      `json:"standby_follower_addr"`
+	Reachable           bool        `json:"reachable"`
+	Status              StatusReply `json:"status"`
+	StatusError         string      `json:"status_error"`
+}
+
+type CoordinatorStatusReply struct {
+	Healthy      bool                     `json:"healthy"`
+	Role         string                   `json:"role"`
+	LeaderAddr   string                   `json:"leader_addr"`
+	EpochID      int64                    `json:"epoch_id"`
+	State        string                   `json:"state"`
+	StartUnix    int64                    `json:"start_unix"`
+	EndUnix      int64                    `json:"end_unix"`
+	DurationSecs int64                    `json:"duration_secs"`
+	Accepting    bool                     `json:"accepting"`
+	Shards       []CoordinatorShardStatus `json:"shards"`
+}
+
 type AbortEpochArgs struct {
 	EpochID int64
 }

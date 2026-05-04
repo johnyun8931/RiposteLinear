@@ -268,6 +268,16 @@ epoch_status() {
 	printf '%s\n' "$out" | tail -n1
 }
 
+status_json() {
+	local kind="$1"
+	local addr="$2"
+	if [[ "$kind" == "coordinator" ]]; then
+		"$COORDINATOR_BIN" -admin-target "$addr" -status
+	else
+		"$SERVER_BIN" -admin-target "$addr" -status
+	fi
+}
+
 start_epoch() {
 	local kind="$1"
 	local addr="$2"

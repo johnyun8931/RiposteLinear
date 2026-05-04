@@ -46,6 +46,7 @@ type shardClient interface {
 	Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error
 	StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochReply) error
 	EpochStatus(args *db.EpochStatusArgs, reply *db.EpochStatusReply) error
+	Status(args *db.StatusArgs, reply *db.StatusReply) error
 	AbortEpoch(args *db.AbortEpochArgs, reply *db.AbortEpochReply) error
 }
 
@@ -73,6 +74,10 @@ func (r *rpcShardClient) EpochStatus(args *db.EpochStatusArgs, reply *db.EpochSt
 	return r.client.Call("Server.EpochStatus", args, reply)
 }
 
+func (r *rpcShardClient) Status(args *db.StatusArgs, reply *db.StatusReply) error {
+	return r.client.Call("Server.Status", args, reply)
+}
+
 func (r *rpcShardClient) AbortEpoch(args *db.AbortEpochArgs, reply *db.AbortEpochReply) error {
 	return r.client.Call("Server.AbortEpoch", args, reply)
 }
@@ -82,6 +87,8 @@ type routedSession struct {
 	localUUID int64
 	hashKey   [32]byte
 }
+
+const defaultShardStatusTimeout = 2 * time.Second
 
 type Coordinator struct {
 	mu         sync.Mutex
@@ -466,5 +473,87 @@ func (c *Coordinator) EpochStatus(_ *db.EpochStatusArgs, reply *db.EpochStatusRe
 	reply.EndUnix = c.epoch.EndTime.Unix()
 	reply.DurationSecs = c.epoch.DurationSeconds
 	reply.Accepting = c.epoch.State == db.EpochStateActive
+	return nil
+}
+
+func shardStatusWithTimeout(client shardClient, timeout time.Duration) (db.StatusReply, error) {
+	type statusResult struct {
+		reply db.StatusReply
+		err   error
+	}
+	resultCh := make(chan statusResult, 1)
+	go func() {
+		var reply db.StatusReply
+		err := client.Status(&db.StatusArgs{}, &reply)
+		resultCh <- statusResult{reply: reply, err: err}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result := <-resultCh:
+		return result.reply, result.err
+	case <-timer.C:
+		return db.StatusReply{}, fmt.Errorf("status timeout after %s", timeout)
+	}
+}
+
+func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.CoordinatorStatusReply) error {
+	timeout := defaultShardStatusTimeout
+	if args != nil && args.ShardTimeoutMillis > 0 {
+		timeout = time.Duration(args.ShardTimeoutMillis) * time.Millisecond
+	}
+
+	c.mu.Lock()
+	epoch := c.epoch
+	shards := append([]ShardConfig(nil), c.shards...)
+	clients := make(map[int]shardClient, len(c.clients))
+	for shardID, client := range c.clients {
+		clients[shardID] = client
+	}
+	c.mu.Unlock()
+
+	reply.Healthy = true
+	reply.Role = "standalone"
+	reply.LeaderAddr = ""
+	reply.EpochID = epoch.ID
+	reply.State = epoch.State.String()
+	reply.StartUnix = epoch.StartTime.Unix()
+	reply.EndUnix = epoch.EndTime.Unix()
+	reply.DurationSecs = epoch.DurationSeconds
+	reply.Accepting = epoch.State == db.EpochStateActive
+	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
+
+	for i, shard := range shards {
+		entry := db.CoordinatorShardStatus{
+			ID:                 shard.ID,
+			StartRow:           shard.StartRow,
+			EndRow:             shard.EndRow,
+			ActiveLeaderAddr:   shard.Active.LeaderAddr,
+			ActiveFollowerAddr: shard.Active.FollowerAddr,
+		}
+		if shard.Standby != nil {
+			entry.HasStandby = true
+			entry.StandbyLeaderAddr = shard.Standby.LeaderAddr
+			entry.StandbyFollowerAddr = shard.Standby.FollowerAddr
+		}
+
+		client := clients[shard.ID]
+		if client == nil {
+			entry.StatusError = fmt.Sprintf("missing shard client for shard %d", shard.ID)
+			reply.Shards[i] = entry
+			continue
+		}
+		status, err := shardStatusWithTimeout(client, timeout)
+		if err != nil {
+			entry.StatusError = err.Error()
+			reply.Shards[i] = entry
+			continue
+		}
+		entry.Reachable = true
+		entry.Status = status
+		reply.Shards[i] = entry
+	}
+
 	return nil
 }

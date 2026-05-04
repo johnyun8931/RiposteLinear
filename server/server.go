@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,6 +29,7 @@ var flagShardID = flag.Int("shard-id", 0, "Shard identifier for result publicati
 var flagAdminTarget = flag.String("admin-target", "", "Target leader address for admin RPC commands")
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
 var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query leader epoch status over admin RPC and exit")
+var flagStatus = flag.Bool("status", false, "If set, query server status over admin RPC and exit")
 
 // List of server addresses
 type serverListType []string
@@ -57,7 +59,7 @@ func init() {
 func main() {
 	flag.Parse()
 
-	if *flagStartEpoch > 0 || *flagEpochStatus {
+	if *flagStartEpoch > 0 || *flagEpochStatus || *flagStatus {
 		if *flagAdminTarget == "" {
 			log.Fatal("Must specify -admin-target for admin RPC commands")
 		}
@@ -164,5 +166,20 @@ func runAdminCommand() {
 			log.Fatal("Could not query epoch status: ", err)
 		}
 		log.Printf("epoch=%d state=%s accepting=%t start=%d end=%d duration=%d last_result=%s", reply.EpochID, reply.State, reply.Accepting, reply.StartUnix, reply.EndUnix, reply.DurationSecs, reply.LastResult)
+		return
+	}
+
+	if *flagStatus {
+		var reply db.StatusReply
+		err = client.Call("Server.Status", &db.StatusArgs{}, &reply)
+		if err != nil {
+			log.Fatal("Could not query status: ", err)
+		}
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(reply); err != nil {
+			log.Fatal("Could not encode status: ", err)
+		}
+		return
 	}
 }

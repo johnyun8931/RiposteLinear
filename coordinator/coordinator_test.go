@@ -17,10 +17,13 @@ type fakeShardClient struct {
 	lastUpload2 db.UploadArgs2
 	lastUpload3 db.UploadArgs3
 
-	startReply db.StartEpochReply
-	startErr   error
-	abortCalls int
-	abortErr   error
+	startReply  db.StartEpochReply
+	startErr    error
+	abortCalls  int
+	abortErr    error
+	statusReply db.StatusReply
+	statusErr   error
+	statusDelay time.Duration
 }
 
 func (f *fakeShardClient) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
@@ -52,6 +55,17 @@ func (f *fakeShardClient) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpo
 }
 
 func (f *fakeShardClient) EpochStatus(args *db.EpochStatusArgs, reply *db.EpochStatusReply) error {
+	return nil
+}
+
+func (f *fakeShardClient) Status(args *db.StatusArgs, reply *db.StatusReply) error {
+	if f.statusDelay > 0 {
+		time.Sleep(f.statusDelay)
+	}
+	if f.statusErr != nil {
+		return f.statusErr
+	}
+	*reply = f.statusReply
 	return nil
 }
 
@@ -254,5 +268,98 @@ func TestCoordinatorStartEpochProducesSharedMetadata(t *testing.T) {
 	}
 	if status.EpochID != reply.EpochID || status.State != db.EpochStateActive.String() || !status.Accepting {
 		t.Fatalf("unexpected coordinator status: %+v", status)
+	}
+}
+
+func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
+	startTime := time.Unix(1200, 0).UTC()
+	leftStatus := db.StatusReply{
+		Healthy:      true,
+		IsLeader:     true,
+		ServerIndex:  0,
+		ShardID:      0,
+		EpochID:      3,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+		Accepting:    true,
+		PeerState:    db.PeerConnectionsReady.String(),
+	}
+	rightStatus := leftStatus
+	rightStatus.ShardID = 1
+
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
+		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: &fakeShardClient{statusReply: leftStatus},
+		1: &fakeShardClient{statusReply: rightStatus},
+	})
+	coord.epoch = db.EpochMeta{
+		ID:              3,
+		State:           db.EpochStateActive,
+		StartTime:       startTime,
+		EndTime:         startTime.Add(time.Minute),
+		DurationSeconds: 60,
+	}
+
+	var reply db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &reply); err != nil {
+		t.Fatalf("Coordinator.Status failed: %v", err)
+	}
+	if reply.Role != "standalone" || reply.EpochID != 3 || reply.State != db.EpochStateActive.String() || !reply.Accepting {
+		t.Fatalf("unexpected coordinator status: %+v", reply)
+	}
+	if len(reply.Shards) != 2 {
+		t.Fatalf("expected two shard statuses, got %d", len(reply.Shards))
+	}
+	if !reply.Shards[0].Reachable || reply.Shards[0].Status.ShardID != 0 {
+		t.Fatalf("unexpected shard 0 status: %+v", reply.Shards[0])
+	}
+	if !reply.Shards[1].Reachable || reply.Shards[1].Status.ShardID != 1 {
+		t.Fatalf("unexpected shard 1 status: %+v", reply.Shards[1])
+	}
+}
+
+func TestCoordinatorStatusRecordsUnreachableShardErrors(t *testing.T) {
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
+		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}},
+		1: &fakeShardClient{statusErr: errors.New("dial failed")},
+	})
+
+	var reply db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &reply); err != nil {
+		t.Fatalf("Coordinator.Status failed: %v", err)
+	}
+	if !reply.Shards[0].Reachable {
+		t.Fatalf("expected shard 0 reachable: %+v", reply.Shards[0])
+	}
+	if reply.Shards[1].Reachable || reply.Shards[1].StatusError != "dial failed" {
+		t.Fatalf("expected shard 1 status error, got %+v", reply.Shards[1])
+	}
+}
+
+func TestCoordinatorStatusTimeoutDoesNotFailWholeCall(t *testing.T) {
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
+		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}},
+		1: &fakeShardClient{statusDelay: 50 * time.Millisecond},
+	})
+
+	var reply db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{ShardTimeoutMillis: 5}, &reply); err != nil {
+		t.Fatalf("Coordinator.Status failed: %v", err)
+	}
+	if !reply.Shards[0].Reachable {
+		t.Fatalf("expected shard 0 reachable: %+v", reply.Shards[0])
+	}
+	if reply.Shards[1].Reachable || reply.Shards[1].StatusError == "" {
+		t.Fatalf("expected shard 1 timeout error, got %+v", reply.Shards[1])
 	}
 }
