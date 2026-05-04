@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"bitbucket.org/henrycg/riposte/db"
 )
 
 func TestResolveTargetAddress(t *testing.T) {
@@ -56,7 +58,7 @@ func TestResolveTargetAddress(t *testing.T) {
 	}
 }
 
-func TestResolveMessageInput(t *testing.T) {
+func TestResolveMessageProvider(t *testing.T) {
 	tests := []struct {
 		name        string
 		x           int
@@ -100,7 +102,7 @@ func TestResolveMessageInput(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			msg, err := resolveMessageInput(tc.x, tc.y, tc.payload)
+			provider, err := resolveMessageProvider(tc.x, tc.y, tc.payload)
 			if tc.wantErr != "" {
 				if err == nil || err.Error() != tc.wantErr {
 					t.Fatalf("expected error %q, got %v", tc.wantErr, err)
@@ -108,7 +110,11 @@ func TestResolveMessageInput(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("resolveMessageInput returned unexpected error: %v", err)
+				t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
+			}
+			msg, err := provider()
+			if err != nil {
+				t.Fatalf("message provider returned unexpected error: %v", err)
 			}
 			if msg.X != tc.wantX || msg.Y != tc.wantY {
 				t.Fatalf("expected coordinates (%d,%d), got (%d,%d)", tc.wantX, tc.wantY, msg.X, msg.Y)
@@ -121,19 +127,93 @@ func TestResolveMessageInput(t *testing.T) {
 	}
 }
 
-func TestResolveMessageInputRandomFallback(t *testing.T) {
-	msg, err := resolveMessageInput(-1, -1, "")
+func TestResolveMessageProviderRandomFallback(t *testing.T) {
+	provider, err := resolveMessageProvider(-1, -1, "")
 	if err != nil {
-		t.Fatalf("resolveMessageInput returned unexpected error: %v", err)
+		t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
+	}
+	msg, err := provider()
+	if err != nil {
+		t.Fatalf("message provider returned unexpected error: %v", err)
 	}
 	if msg == nil {
-		t.Fatal("resolveMessageInput returned nil message")
+		t.Fatal("message provider returned nil message")
 	}
 	if msg.X < 0 || msg.X >= 256 {
 		t.Fatalf("random message X out of range: %d", msg.X)
 	}
 	if msg.Y < 0 || msg.Y >= 256 {
 		t.Fatalf("random message Y out of range: %d", msg.Y)
+	}
+}
+
+func TestResolveMessageProviderExactReusesMessage(t *testing.T) {
+	provider, err := resolveMessageProvider(3, 5, "same")
+	if err != nil {
+		t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
+	}
+	first, err := provider()
+	if err != nil {
+		t.Fatalf("message provider returned unexpected error: %v", err)
+	}
+	second, err := provider()
+	if err != nil {
+		t.Fatalf("message provider returned unexpected error: %v", err)
+	}
+	if first != second {
+		t.Fatal("expected exact-message provider to reuse the deterministic message")
+	}
+}
+
+func TestResolveMessageProviderRandomGeneratesEachTime(t *testing.T) {
+	oldRandomMessage := randomMessage
+	defer func() {
+		randomMessage = oldRandomMessage
+	}()
+
+	var calls int
+	randomMessage = func() (*db.Plaintext, error) {
+		calls++
+		return &db.Plaintext{X: calls, Y: calls}, nil
+	}
+
+	provider, err := resolveMessageProvider(-1, -1, "")
+	if err != nil {
+		t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
+	}
+	first, err := provider()
+	if err != nil {
+		t.Fatalf("first message returned unexpected error: %v", err)
+	}
+	second, err := provider()
+	if err != nil {
+		t.Fatalf("second message returned unexpected error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected random generator to be called twice, got %d", calls)
+	}
+	if first == second || first.X == second.X || first.Y == second.Y {
+		t.Fatalf("expected fresh random messages, got first=%v second=%v", first, second)
+	}
+}
+
+func TestResolveMessageProviderRandomError(t *testing.T) {
+	oldRandomMessage := randomMessage
+	defer func() {
+		randomMessage = oldRandomMessage
+	}()
+
+	wantErr := errors.New("random failed")
+	randomMessage = func() (*db.Plaintext, error) {
+		return nil, wantErr
+	}
+
+	provider, err := resolveMessageProvider(-1, -1, "")
+	if err != nil {
+		t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
+	}
+	if _, err := provider(); err != wantErr {
+		t.Fatalf("expected random error %v, got %v", wantErr, err)
 	}
 }
 

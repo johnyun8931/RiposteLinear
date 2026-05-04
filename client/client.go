@@ -35,6 +35,10 @@ var payloadFlag = flag.String("payload", "", "Exact payload to write for determi
 var countLock sync.Mutex
 var count int
 
+var randomMessage = db.RandomMessage
+
+type messageProvider func() (*db.Plaintext, error)
+
 func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	var upRes1 db.UploadReply1
 	var upArgs1 db.UploadArgs1
@@ -101,7 +105,7 @@ func runClientLoop(hammer bool, shouldStop func() bool, signalStop func(), doUpl
 	return nil
 }
 
-func runClientWithStop(server string, msg *db.Plaintext, shouldStop func() bool, signalStop func()) error {
+func runClientWithStop(server string, nextMessage messageProvider, shouldStop func() bool, signalStop func()) error {
 	certs := make([]tls.Certificate, 1)
 	certs[0] = utils.LeaderCertificate
 	client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
@@ -130,6 +134,10 @@ func runClientWithStop(server string, msg *db.Plaintext, shouldStop func() bool,
 			}
 
 		} else {
+			msg, err := nextMessage()
+			if err != nil {
+				return err
+			}
 			err = tryUpload(client, msg)
 			if err != nil {
 				log.Printf("Upload error: %v", err)
@@ -141,10 +149,10 @@ func runClientWithStop(server string, msg *db.Plaintext, shouldStop func() bool,
 	})
 }
 
-func resolveMessageInput(x, y int, payload string) (*db.Plaintext, error) {
+func resolveMessageProvider(x, y int, payload string) (messageProvider, error) {
 	exactRequested := x >= 0 || y >= 0 || payload != ""
 	if !exactRequested {
-		return db.RandomMessage()
+		return randomMessage, nil
 	}
 	if x < 0 || y < 0 || payload == "" {
 		return nil, errors.New("must specify all of -x, -y, and -payload")
@@ -163,7 +171,9 @@ func resolveMessageInput(x, y int, payload string) (*db.Plaintext, error) {
 	msg.X = x
 	msg.Y = y
 	copy(msg.Message[:], []byte(payload))
-	return msg, nil
+	return func() (*db.Plaintext, error) {
+		return msg, nil
+	}, nil
 }
 
 func runClientWorker(target string, shouldStop func() bool, signalStop func()) error {
@@ -171,14 +181,14 @@ func runClientWorker(target string, shouldStop func() bool, signalStop func()) e
 		return runClientWithStop(target, nil, shouldStop, signalStop)
 	}
 	//log.Printf("=== Starting Client ===")
-	msg, err := resolveMessageInput(*xFlag, *yFlag, *payloadFlag)
+	nextMessage, err := resolveMessageProvider(*xFlag, *yFlag, *payloadFlag)
 	if err != nil {
 		return err
 	}
 
 	//log.Printf("Insert into [%v,%v]", xIdx, yIdx)
 	//log.Printf("Plaintext [%v]", msg)
-	return runClientWithStop(target, msg, shouldStop, signalStop)
+	return runClientWithStop(target, nextMessage, shouldStop, signalStop)
 }
 
 func runHammerClients(concurrent int, runOnce func(func() bool, func()) error) error {

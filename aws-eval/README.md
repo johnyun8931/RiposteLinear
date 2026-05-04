@@ -49,6 +49,8 @@ The initial cloud configuration reuses the local winner:
 - `client -threads 1`
 - client hammer concurrency defaults to `16`, and can be overridden with
   `CLIENT_CONCURRENCY`
+- random hammer uploads generate a fresh random message per request; deterministic
+  `-x` / `-y` / `-payload` uploads intentionally reuse the exact message
 
 Measured phases:
 
