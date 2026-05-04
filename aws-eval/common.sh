@@ -403,37 +403,32 @@ wait_remote_pid_exit() {
   local host="$1"
   local pid_path="$2"
   local timeout="$3"
-  local quoted_pid_path quoted_timeout
+  local quoted_pid_path deadline pid stat status
   quoted_pid_path="$(quote "$pid_path")"
-  quoted_timeout="$(quote "$timeout")"
-  remote_cmd "$host" "python3 - $quoted_pid_path $quoted_timeout <<'PY'
-import os
-import sys
-import time
+  deadline=$((SECONDS + timeout))
 
-pid_path = sys.argv[1]
-timeout = int(sys.argv[2])
-deadline = time.time() + timeout
+  while ! remote_cmd "$host" "test -s $quoted_pid_path" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      return 2
+    fi
+    sleep 1
+  done
 
-while not os.path.exists(pid_path):
-    if time.time() >= deadline:
-        raise SystemExit(2)
-    time.sleep(0.2)
+  pid="$(remote_cmd "$host" "cat $quoted_pid_path")"
 
-with open(pid_path) as fh:
-    pid = int(fh.read().strip())
-
-while True:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        raise SystemExit(0)
-    except PermissionError:
-        pass
-    if time.time() >= deadline:
-        raise SystemExit(1)
-    time.sleep(1)
-PY"
+  while true; do
+    set +e
+    stat="$(remote_cmd "$host" "ps -p '$pid' -o stat= 2>/dev/null")"
+    status=$?
+    set -e
+    if [[ "$status" -ne 0 || -z "${stat//[[:space:]]/}" || "$stat" == Z* ]]; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 capture_remote_process_snapshot() {
