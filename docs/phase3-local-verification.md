@@ -78,8 +78,23 @@ The benchmark artifacts for this sweep are written to:
 - `/tmp/riposte-phase3-local/benchmark-summary.tsv`
 - `/tmp/riposte-phase3-local/benchmark-summary.md`
 
+## AWS Throughput Validation
+
+The local throughput picture was mixed, so Phase 3 throughput was validated on AWS with one coordinator instance, four shard-server instances, and one client/load-generator instance.
+
+Final long-run result from `2026-05-04`:
+
+| measured_epoch_seconds | client_concurrency | retry_overload | baseline_total | baseline_req_per_sec | shard0_total | shard1_total | sharded_total | sharded_req_per_sec | delta | winner |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 600 | 16 | true | 38908 | 64.85 | 39518 | 39506 | 79024 | 131.71 | 40116 | sharded |
+
+The sharded path improved aggregate accepted-request throughput by `103.10%` over the single-shard baseline. The result artifact is:
+
+- `/Users/kevwjin/Documents/01-projects/riposte/aws-eval/results/20260504T184429Z-long-c16-retry/comparison-summary.md`
+
 ## Conclusion
 
-- local correctness for the current Phase 3 cut is good enough to continue debugging performance
+- local correctness for the current Phase 3 cut is green
 - local throughput is sensitive to thread budget on the same machine
-- AWS is now a reasonable next validation step, though the uneven shard totals at higher thread counts still justify one lighter local follow-up if cleaner attribution is needed first
+- AWS validates the expected aggregate throughput improvement for the current 2-shard topology
+- remaining work before active-passive failover should focus on coordinator/shard health/status and state/fencing design

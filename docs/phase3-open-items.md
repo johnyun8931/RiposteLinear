@@ -1,6 +1,6 @@
 # Phase 3 Open Items
 
-Local verification status as of 2026-04-20:
+Phase 3 verification status as of 2026-05-04:
 
 - verified locally with a live multi-process setup:
   - real coordinator + 2 shards + 2 servers per shard
@@ -9,10 +9,14 @@ Local verification status as of 2026-04-20:
   - shard-local result files are written under a live coordinated epoch
   - deterministic boundary writes land in the expected shard and preserve payload bytes
   - a second coordinated epoch starts cleanly after the first completes
-- still open:
-  - hammer-load aggregate throughput improvement over the single-shard baseline
-    - local measurement did not show an improvement yet (`~1233` accepted requests in the single-shard baseline epoch vs `~1076` total accepted requests across both shards in the routed 2-shard run)
-    - AWS is not the next step until this local throughput gap is understood
+- verified on AWS with a 6-node coordinator + 2-shard topology:
+  - smoke test verified deterministic row routing and per-shard result files
+  - short client-concurrency sweep showed sharded throughput winning at every tested concurrency
+  - long `600s` measured run at `CLIENT_CONCURRENCY=16` and `CLIENT_RETRY_OVERLOAD=1` confirmed aggregate throughput improvement:
+    - baseline: `38,908` accepted requests, `64.85 req/sec`
+    - sharded: `79,024` accepted requests, `131.71 req/sec`
+    - delta: `+40,116` accepted requests, `+103.10%`
+  - benchmark artifact: `aws-eval/results/20260504T184429Z-long-c16-retry/comparison-summary.md`
 
 Current rough edges / future work in the first Phase 3 cut:
 
@@ -26,5 +30,7 @@ Current rough edges / future work in the first Phase 3 cut:
 - `Standby` pair config exists to prepare for future failover work, but coordinator routing currently uses only the active shard leader
 - transport/auth still relies on the older certificate/index assumptions from the pre-coordinator architecture
 - partial pair-delivery / rollback correctness is still deferred work; if one Riposte server in a shard pair receives a write and the other does not, that failure path is not yet fully hardened
+- coordinator/shard health and richer status fanout are deferred to Phase 3.5 before active-passive coordinator failover
+- SQS or another durable ingestion queue is deferred because it changes epoch-admission semantics
 
-Keep this list temporary and remove it once the full Phase 3 integration checks have been run.
+Keep this list temporary and remove it once the Phase 3.5/Phase 4 planning docs supersede it.
