@@ -302,6 +302,18 @@ assert_file_exists() {
 	[[ -f "$file" ]] || die "expected file $file"
 }
 
+wait_for_file() {
+	local file="$1"
+	local timeout="${2:-10}"
+	for _ in $(seq 1 "$timeout"); do
+		if [[ -f "$file" ]]; then
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
 assert_result_contains_slot() {
 	local file="$1"
 	local shard_id="$2"
