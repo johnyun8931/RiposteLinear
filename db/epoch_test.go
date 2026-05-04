@@ -30,6 +30,23 @@ func newTestLeaderServerWithPeerState(state PeerConnectionState, err error) *Ser
 	return s
 }
 
+func waitForEpochState(t *testing.T, s *Server, want DbState) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for epoch state %s, got %s", want.String(), s.currentEpochMeta().State.String())
+		case <-tick.C:
+			if s.currentEpochMeta().State == want {
+				return
+			}
+		}
+	}
+}
+
 func TestUploadRejectedWithoutActiveEpoch(t *testing.T) {
 	s := newTestLeaderServer()
 
@@ -316,6 +333,186 @@ func TestUploadSessionAssemblyAndReadyQueue(t *testing.T) {
 	case queued := <-s.ready:
 		t.Fatalf("expected only one queued request, got extra uuid %d", queued)
 	default:
+	}
+}
+
+func TestClosingRejectsUpload1ButAllowsAdmittedUploadToFinish(t *testing.T) {
+	s := newTestLeaderServer()
+	mergeDone := make(chan struct{}, 1)
+	s.mergeFn = func() (string, error) {
+		mergeDone <- struct{}{}
+		return "", nil
+	}
+
+	var startReply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &startReply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	var admitted UploadReply1
+	if err := s.Upload1(&UploadArgs1{}, &admitted); err != nil {
+		t.Fatalf("admitted upload1 failed: %v", err)
+	}
+
+	finishDone := make(chan error, 1)
+	go func() {
+		finishDone <- s.finishEpoch()
+	}()
+	waitForEpochState(t, s, EpochStateClosing)
+
+	var rejected UploadReply1
+	err := s.Upload1(&UploadArgs1{}, &rejected)
+	if err == nil || err.Error() != "No active epoch" {
+		t.Fatalf("expected upload1 to reject during closing, got %v", err)
+	}
+
+	if err := s.Upload2(&UploadArgs2{Uuid: admitted.Uuid, HashKey: admitted.HashKey}, &UploadReply2{}); err != nil {
+		t.Fatalf("upload2 for admitted uuid failed during closing: %v", err)
+	}
+	if err := s.Upload3(&UploadArgs3{Uuid: admitted.Uuid, HashKey: admitted.HashKey}, &UploadReply3{}); err != nil {
+		t.Fatalf("upload3 for admitted uuid failed during closing: %v", err)
+	}
+
+	replyCh := make(chan takeAcceptedSessionResult, 1)
+	s.controlCh <- takeAcceptedSessionCommand{uuid: admitted.Uuid, reply: replyCh}
+	if session := <-replyCh; !session.ok || session.session == nil {
+		t.Fatalf("expected admitted session to drain")
+	}
+
+	select {
+	case err := <-finishDone:
+		if err != nil {
+			t.Fatalf("finish epoch failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("finish epoch did not complete after admitted upload drained")
+	}
+	select {
+	case <-mergeDone:
+	default:
+		t.Fatal("expected merge to run after admitted upload drained")
+	}
+}
+
+func TestClosingDoesNotMergeBeforeAdmittedUploadsDrain(t *testing.T) {
+	s := newTestLeaderServer()
+	mergeStarted := make(chan struct{}, 1)
+	s.mergeFn = func() (string, error) {
+		mergeStarted <- struct{}{}
+		return "", nil
+	}
+
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &StartEpochReply{}); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+	var admitted UploadReply1
+	if err := s.Upload1(&UploadArgs1{}, &admitted); err != nil {
+		t.Fatalf("upload1 failed: %v", err)
+	}
+
+	finishDone := make(chan error, 1)
+	go func() {
+		finishDone <- s.finishEpoch()
+	}()
+	waitForEpochState(t, s, EpochStateClosing)
+
+	select {
+	case <-mergeStarted:
+		t.Fatal("merge started before admitted upload drained")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := s.Upload2(&UploadArgs2{Uuid: admitted.Uuid, HashKey: admitted.HashKey}, &UploadReply2{}); err != nil {
+		t.Fatalf("upload2 failed: %v", err)
+	}
+	if err := s.Upload3(&UploadArgs3{Uuid: admitted.Uuid, HashKey: admitted.HashKey}, &UploadReply3{}); err != nil {
+		t.Fatalf("upload3 failed: %v", err)
+	}
+	replyCh := make(chan takeAcceptedSessionResult, 1)
+	s.controlCh <- takeAcceptedSessionCommand{uuid: admitted.Uuid, reply: replyCh}
+	<-replyCh
+
+	select {
+	case err := <-finishDone:
+		if err != nil {
+			t.Fatalf("finish epoch failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("finish epoch did not complete after drain")
+	}
+}
+
+func TestUpload3ReadyQueueFullReturnsOverload(t *testing.T) {
+	s := newTestLeaderServer()
+	s.ready = make(chan int64, 1)
+	s.ready <- 99
+
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &StartEpochReply{}); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	var up1 UploadReply1
+	if err := s.Upload1(&UploadArgs1{}, &up1); err != nil {
+		t.Fatalf("upload1 failed: %v", err)
+	}
+	if err := s.Upload2(&UploadArgs2{Uuid: up1.Uuid, HashKey: up1.HashKey}, &UploadReply2{}); err != nil {
+		t.Fatalf("upload2 failed: %v", err)
+	}
+	err := s.Upload3(&UploadArgs3{Uuid: up1.Uuid, HashKey: up1.HashKey}, &UploadReply3{})
+	if err == nil || err.Error() != "server overloaded: ready queue full" {
+		t.Fatalf("expected ready queue overload, got %v", err)
+	}
+
+	statusCh := make(chan error, 1)
+	go func() {
+		statusCh <- s.EpochStatus(&EpochStatusArgs{}, &EpochStatusReply{})
+	}()
+	select {
+	case err := <-statusCh:
+		if err != nil {
+			t.Fatalf("status failed after overload: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("leader control actor blocked after ready queue overload")
+	}
+}
+
+func TestFinishEpochWaitsForPublicationBarrier(t *testing.T) {
+	s := newTestLeaderServer()
+	mergeStarted := make(chan struct{}, 1)
+	s.mergeFn = func() (string, error) {
+		mergeStarted <- struct{}{}
+		return "", nil
+	}
+
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &StartEpochReply{}); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	s.amPublishingMutex.RLock()
+	finishDone := make(chan error, 1)
+	go func() {
+		finishDone <- s.finishEpoch()
+	}()
+
+	select {
+	case <-mergeStarted:
+		t.Fatal("merge started while publication barrier was held by worker")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	s.amPublishingMutex.RUnlock()
+	select {
+	case err := <-finishDone:
+		if err != nil {
+			t.Fatalf("finish epoch failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("finish epoch did not complete after publication barrier was released")
 	}
 }
 

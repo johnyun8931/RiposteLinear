@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	//"bytes"
 	//"encoding/gob"
@@ -77,7 +78,29 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	return nil
 }
 
-func runClient(server string, msg *db.Plaintext) error {
+func isNoActiveEpochError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "No active epoch")
+}
+
+func runClientLoop(hammer bool, shouldStop func() bool, signalStop func(), doUpload func() error) error {
+	for {
+		if hammer && shouldStop != nil && shouldStop() {
+			return nil
+		}
+		if err := doUpload(); err != nil {
+			if isNoActiveEpochError(err) && signalStop != nil {
+				signalStop()
+			}
+			return err
+		}
+		if !hammer {
+			break
+		}
+	}
+	return nil
+}
+
+func runClientWithStop(server string, msg *db.Plaintext, shouldStop func() bool, signalStop func()) error {
 	certs := make([]tls.Certificate, 1)
 	certs[0] = utils.LeaderCertificate
 	client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
@@ -87,7 +110,7 @@ func runClient(server string, msg *db.Plaintext) error {
 	defer client.Close()
 
 	//log.Printf("Connected")
-	for {
+	return runClientLoop(*hammerFlag, shouldStop, signalStop, func() error {
 		c := -1
 		countLock.Lock()
 		count += 1
@@ -113,11 +136,8 @@ func runClient(server string, msg *db.Plaintext) error {
 			}
 		}
 
-		if !*hammerFlag {
-			break
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 func resolveMessageInput(x, y int, payload string) (*db.Plaintext, error) {
@@ -145,9 +165,9 @@ func resolveMessageInput(x, y int, payload string) (*db.Plaintext, error) {
 	return msg, nil
 }
 
-func clientOnce(target string) error {
+func runClientWorker(target string, shouldStop func() bool, signalStop func()) error {
 	if *donothingFlag {
-		return runClient(target, nil)
+		return runClientWithStop(target, nil, shouldStop, signalStop)
 	}
 	//log.Printf("=== Starting Client ===")
 	msg, err := resolveMessageInput(*xFlag, *yFlag, *payloadFlag)
@@ -157,7 +177,41 @@ func clientOnce(target string) error {
 
 	//log.Printf("Insert into [%v,%v]", xIdx, yIdx)
 	//log.Printf("Plaintext [%v]", msg)
-	return runClient(target, msg)
+	return runClientWithStop(target, msg, shouldStop, signalStop)
+}
+
+func runHammerClients(concurrent int, runOnce func(func() bool, func()) error) error {
+	var stop uint32
+	shouldStop := func() bool {
+		return atomic.LoadUint32(&stop) != 0
+	}
+	signalStop := func() {
+		atomic.StoreUint32(&stop, 1)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, concurrent)
+	wg.Add(concurrent)
+	for i := 0; i < concurrent; i++ {
+		go func() {
+			defer wg.Done()
+			err := runOnce(shouldStop, signalStop)
+			if isNoActiveEpochError(err) {
+				signalStop()
+			}
+			errCh <- err
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+	for clientErr := range errCh {
+		if clientErr == nil || isNoActiveEpochError(clientErr) {
+			continue
+		}
+		return clientErr
+	}
+	return nil
 }
 
 func resolveTargetAddress(coordinatorAddr, leaderAddr string) (string, error) {
@@ -200,30 +254,21 @@ func main() {
 
 	// Make one request
 	if !*hammerFlag {
-		err = clientOnce(target)
+		err = runClientWorker(target, nil, nil)
 		if err != nil {
 			log.Fatal(err)
 		}
 	} else {
 		// Make many requests concurrently
 		concurrent := 16
-		var wg sync.WaitGroup
-		errCh := make(chan error, concurrent)
-		wg.Add(concurrent)
-		for i := 0; i < concurrent; i++ {
-			go func() {
-				defer wg.Done()
-				errCh <- clientOnce(target)
-			}()
-		}
-
-		wg.Wait()
-		close(errCh)
-		for clientErr := range errCh {
-			if clientErr == nil || strings.Contains(clientErr.Error(), "No active epoch") {
-				continue
-			}
-			log.Fatal(clientErr)
+		err = runHammerClients(
+			concurrent,
+			func(shouldStop func() bool, signalStop func()) error {
+				return runClientWorker(target, shouldStop, signalStop)
+			},
+		)
+		if err != nil {
+			log.Fatal(err)
 		}
 	}
 }

@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 func TestResolveTargetAddress(t *testing.T) {
 	tests := []struct {
@@ -129,5 +134,104 @@ func TestResolveMessageInputRandomFallback(t *testing.T) {
 	}
 	if msg.Y < 0 || msg.Y >= 256 {
 		t.Fatalf("random message Y out of range: %d", msg.Y)
+	}
+}
+
+func TestRunClientLoopSignalsStopOnNoActiveEpoch(t *testing.T) {
+	var signaled bool
+	var calls int
+	err := runClientLoop(
+		true,
+		func() bool { return false },
+		func() { signaled = true },
+		func() error {
+			calls++
+			return errors.New("No active epoch")
+		},
+	)
+	if err == nil || err.Error() != "No active epoch" {
+		t.Fatalf("expected No active epoch error, got %v", err)
+	}
+	if !signaled {
+		t.Fatal("expected No active epoch to signal hammer shutdown")
+	}
+	if calls != 1 {
+		t.Fatalf("expected one upload attempt, got %d", calls)
+	}
+}
+
+func TestRunClientLoopHonorsStopBeforeStartingUpload(t *testing.T) {
+	var calls int
+	err := runClientLoop(
+		true,
+		func() bool { return true },
+		nil,
+		func() error {
+			calls++
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected clean stop, got %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("expected no upload attempts after stop, got %d", calls)
+	}
+}
+
+func TestRunClientLoopStopsBetweenHammerUploads(t *testing.T) {
+	var calls int
+	stopped := false
+	err := runClientLoop(
+		true,
+		func() bool { return stopped },
+		nil,
+		func() error {
+			calls++
+			stopped = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected clean stop, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one upload before stop, got %d", calls)
+	}
+}
+
+func TestRunHammerClientsIgnoresNoActiveEpochAndSignalsStop(t *testing.T) {
+	var calls int32
+	err := runHammerClients(2, func(shouldStop func() bool, signalStop func()) error {
+		call := atomic.AddInt32(&calls, 1)
+		if call == 1 {
+			return errors.New("No active epoch")
+		}
+		deadline := time.After(time.Second)
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-deadline:
+				return errors.New("timed out waiting for hammer stop signal")
+			case <-tick.C:
+				if shouldStop() {
+					return nil
+				}
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("expected No active epoch to be treated as clean hammer completion, got %v", err)
+	}
+}
+
+func TestRunHammerClientsReturnsUnexpectedError(t *testing.T) {
+	wantErr := errors.New("unexpected EOF")
+	err := runHammerClients(1, func(func() bool, func()) error {
+		return wantErr
+	})
+	if err != wantErr {
+		t.Fatalf("expected unexpected error %v, got %v", wantErr, err)
 	}
 }

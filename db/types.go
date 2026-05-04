@@ -46,6 +46,7 @@ type DbState int
 const (
 	EpochStateNoActive DbState = iota
 	EpochStateActive
+	EpochStateClosing
 	EpochStateMerging
 	EpochStateCompleted
 )
@@ -259,6 +260,7 @@ type leaderControlRuntime struct {
 	lastResultPath string
 	peerState      PeerConnectionState
 	peerError      string
+	mergeWaiters   []chan beginEpochMergeResult
 }
 
 type leaderControlCommand interface{}
@@ -412,6 +414,8 @@ func (s DbState) String() string {
 		return "no_active_epoch"
 	case EpochStateActive:
 		return "active"
+	case EpochStateClosing:
+		return "closing"
 	case EpochStateMerging:
 		return "merging"
 	case EpochStateCompleted:

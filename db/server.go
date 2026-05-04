@@ -38,6 +38,25 @@ func (t *Server) runLeaderControl() {
 		peerState: PeerConnectionsConnecting,
 	}
 
+	startMergeIfDrained := func() {
+		if state.epoch.State != EpochStateClosing || len(state.accepted) != 0 {
+			return
+		}
+		state.epoch.State = EpochStateMerging
+		waiters := state.mergeWaiters
+		state.mergeWaiters = nil
+		for i, waiter := range waiters {
+			waiter <- beginEpochMergeResult{meta: state.epoch, shouldRun: i == 0}
+		}
+	}
+	releaseMergeWaiters := func() {
+		waiters := state.mergeWaiters
+		state.mergeWaiters = nil
+		for _, waiter := range waiters {
+			waiter <- beginEpochMergeResult{meta: state.epoch, shouldRun: false}
+		}
+	}
+
 	for cmd := range t.controlCh {
 		switch c := cmd.(type) {
 		case startEpochCommand:
@@ -45,7 +64,7 @@ func (t *Server) runLeaderControl() {
 				c.reply <- startEpochResult{err: errors.New("Epoch duration must be positive")}
 				continue
 			}
-			if state.epoch.State == EpochStateActive || state.epoch.State == EpochStateMerging {
+			if state.epoch.State == EpochStateActive || state.epoch.State == EpochStateClosing || state.epoch.State == EpochStateMerging {
 				c.reply <- startEpochResult{err: errors.New("An epoch is already in progress")}
 				continue
 			}
@@ -141,20 +160,44 @@ func (t *Server) runLeaderControl() {
 			}
 			data.args3 = c.args
 			if t.ready != nil {
-				t.ready <- c.args.Uuid
+				select {
+				case t.ready <- c.args.Uuid:
+				default:
+					delete(state.accepted, c.args.Uuid)
+					startMergeIfDrained()
+					c.reply <- upload3Result{err: errors.New("server overloaded: ready queue full")}
+					continue
+				}
 			}
 			c.reply <- upload3Result{}
 		case beginEpochMergeCommand:
 			if state.epoch.State != EpochStateActive {
-				c.reply <- beginEpochMergeResult{meta: state.epoch, shouldRun: false}
+				if state.epoch.State == EpochStateClosing {
+					if len(state.mergeWaiters) > 0 {
+						log.Printf("Duplicate epoch merge waiter while epoch %d is closing; existing_waiters=%d", state.epoch.ID, len(state.mergeWaiters))
+					}
+					state.mergeWaiters = append(state.mergeWaiters, c.reply)
+				} else {
+					c.reply <- beginEpochMergeResult{meta: state.epoch, shouldRun: false}
+				}
 				continue
 			}
 			if state.epochTimer != nil {
 				state.epochTimer.Stop()
 				state.epochTimer = nil
 			}
-			state.epoch.State = EpochStateMerging
-			c.reply <- beginEpochMergeResult{meta: state.epoch, shouldRun: true}
+			if len(state.accepted) > 0 {
+				state.epoch.State = EpochStateClosing
+				if len(state.mergeWaiters) > 0 {
+					log.Printf("Duplicate epoch merge waiter while epoch %d is closing; existing_waiters=%d", state.epoch.ID, len(state.mergeWaiters))
+				}
+				state.mergeWaiters = append(state.mergeWaiters, c.reply)
+				log.Printf("Closing epoch %d; waiting for %d admitted upload(s) to drain", state.epoch.ID, len(state.accepted))
+				startMergeIfDrained()
+			} else {
+				state.epoch.State = EpochStateMerging
+				c.reply <- beginEpochMergeResult{meta: state.epoch, shouldRun: true}
+			}
 		case completeEpochMergeCommand:
 			if c.err == nil {
 				state.epoch.State = EpochStateCompleted
@@ -171,6 +214,7 @@ func (t *Server) runLeaderControl() {
 				delete(state.accepted, c.uuid)
 			}
 			c.reply <- takeAcceptedSessionResult{session: session, ok: ok}
+			startMergeIfDrained()
 		case stopEpochTimerCommand:
 			if state.epochTimer != nil {
 				state.epochTimer.Stop()
@@ -178,7 +222,7 @@ func (t *Server) runLeaderControl() {
 			}
 			c.reply <- struct{}{}
 		case abortEpochCommand:
-			if state.epoch.ID != c.epochID || state.epoch.State != EpochStateActive {
+			if state.epoch.ID != c.epochID || (state.epoch.State != EpochStateActive && state.epoch.State != EpochStateClosing) {
 				c.reply <- errors.New("No matching active epoch to abort")
 				continue
 			}
@@ -186,6 +230,7 @@ func (t *Server) runLeaderControl() {
 				state.epochTimer.Stop()
 				state.epochTimer = nil
 			}
+			releaseMergeWaiters()
 			state.epoch = EpochMeta{State: EpochStateNoActive}
 			c.reply <- nil
 		}
@@ -685,7 +730,11 @@ func (t *Server) finishEpoch() error {
 	resultPath := ""
 	var err error
 	if t.mergeFn != nil {
-		resultPath, err = t.mergeFn()
+		func() {
+			t.amPublishingMutex.Lock()
+			defer t.amPublishingMutex.Unlock()
+			resultPath, err = t.mergeFn()
+		}()
 	}
 	doneCh := make(chan struct{}, 1)
 	t.controlCh <- completeEpochMergeCommand{
