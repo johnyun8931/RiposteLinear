@@ -681,3 +681,62 @@ func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 		t.Fatalf("expected message hex %s, got %s", expectedHex, result.Slots[0].MessageHex)
 	}
 }
+
+type fakeObjectStore struct {
+	bucket      string
+	key         string
+	body        []byte
+	contentType string
+}
+
+func (f *fakeObjectStore) PutObject(bucket, key string, body []byte, contentType string) error {
+	f.bucket = bucket
+	f.key = key
+	f.body = append([]byte(nil), body...)
+	f.contentType = contentType
+	return nil
+}
+
+func TestWritePublishedResultPublishesImmutableS3Object(t *testing.T) {
+	store := &fakeObjectStore{}
+	s := NewServer(0, []string{"127.0.0.1:9000", "127.0.0.1:9001"})
+	s.SetShardID(3)
+	s.setResultObjectStore("riposte-results", "eval/run-1", store)
+
+	var matrix BitMatrix
+	copy(matrix[2][3*SLOT_LENGTH:(3+1)*SLOT_LENGTH], []byte("hello"))
+	meta := EpochMeta{
+		ID:              7,
+		State:           EpochStateCompleted,
+		StartTime:       time.Unix(100, 0).UTC(),
+		EndTime:         time.Unix(160, 0).UTC(),
+		DurationSeconds: 60,
+	}
+	location, err := s.writePublishedResult(&matrix, meta, time.Unix(160, 0).UTC())
+	if err != nil {
+		t.Fatalf("writePublishedResult failed: %v", err)
+	}
+
+	expectedKey := "eval/run-1/shards/3/epochs/000007/result.json"
+	expectedLocation := "s3://riposte-results/" + expectedKey
+	if location != expectedLocation {
+		t.Fatalf("expected location %s, got %s", expectedLocation, location)
+	}
+	if store.bucket != "riposte-results" {
+		t.Fatalf("expected bucket riposte-results, got %s", store.bucket)
+	}
+	if store.key != expectedKey {
+		t.Fatalf("expected key %s, got %s", expectedKey, store.key)
+	}
+	if store.contentType != "application/json" {
+		t.Fatalf("expected application/json content type, got %s", store.contentType)
+	}
+
+	var result PublishedResult
+	if err := json.Unmarshal(store.body, &result); err != nil {
+		t.Fatalf("unmarshal S3 result failed: %v", err)
+	}
+	if result.EpochID != 7 || result.ShardID != 3 || result.NonZeroSlotCount != 1 {
+		t.Fatalf("unexpected S3 result metadata: %+v", result)
+	}
+}

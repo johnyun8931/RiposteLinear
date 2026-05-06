@@ -6,7 +6,9 @@ import (
 	"math/big"
 	"net/rpc"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -253,6 +255,10 @@ type PublishedResult struct {
 	Slots            []PublishedSlot `json:"slots"`
 }
 
+type objectStore interface {
+	PutObject(bucket, key string, body []byte, contentType string) error
+}
+
 type leaderControlRuntime struct {
 	epoch          EpochMeta
 	epochTimer     *time.Timer
@@ -392,9 +398,12 @@ type Server struct {
 
 	rpcClients [NUM_SERVERS + 1]*rpc.Client
 
-	resultsDir string
-	controlCh  chan leaderControlCommand
-	mergeFn    func() (string, error)
+	resultsDir   string
+	resultBucket string
+	resultPrefix string
+	resultStore  objectStore
+	controlCh    chan leaderControlCommand
+	mergeFn      func() (string, error)
 }
 
 func init() {
@@ -440,6 +449,12 @@ func (s PeerConnectionState) String() string {
 
 func (t *Server) SetResultsDir(resultsDir string) {
 	t.resultsDir = resultsDir
+}
+
+func (t *Server) setResultObjectStore(bucket, prefix string, store objectStore) {
+	t.resultBucket = bucket
+	t.resultPrefix = strings.Trim(prefix, "/")
+	t.resultStore = store
 }
 
 func (t *Server) SetShardID(shardID int) {
@@ -498,15 +513,7 @@ func extractPublishedSlots(matrix *BitMatrix) []PublishedSlot {
 	return out
 }
 
-func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, completedAt time.Time) (string, error) {
-	if t.resultsDir == "" {
-		return "", nil
-	}
-
-	if err := os.MkdirAll(t.resultsDir, 0o755); err != nil {
-		return "", err
-	}
-
+func (t *Server) buildPublishedResult(plaintext *BitMatrix, epoch EpochMeta, completedAt time.Time) PublishedResult {
 	result := PublishedResult{
 		EpochID:          epoch.ID,
 		StartTime:        epoch.StartTime.UTC(),
@@ -522,15 +529,59 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 		NonZeroSlotCount: 0,
 	}
 	result.NonZeroSlotCount = len(result.Slots)
+	return result
+}
 
+func marshalPublishedResult(result PublishedResult) ([]byte, error) {
 	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func publishedResultFilename(epoch EpochMeta, shardID, serverIdx int) string {
+	return fmt.Sprintf("epoch-%06d-shard-%d-server-%d.json", epoch.ID, shardID, serverIdx)
+}
+
+func publishedResultObjectKey(prefix string, shardID int, epochID int64) string {
+	key := fmt.Sprintf("shards/%d/epochs/%06d/result.json", shardID, epochID)
+	if prefix == "" {
+		return key
+	}
+	return path.Join(strings.Trim(prefix, "/"), key)
+}
+
+func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, completedAt time.Time) (string, error) {
+	if t.resultsDir == "" && (t.resultStore == nil || t.resultBucket == "") {
+		return "", nil
+	}
+
+	data, err := marshalPublishedResult(t.buildPublishedResult(plaintext, epoch, completedAt))
 	if err != nil {
 		return "", err
 	}
 
-	path := filepath.Join(t.resultsDir, fmt.Sprintf("epoch-%06d-shard-%d-server-%d.json", epoch.ID, t.ShardID, t.ServerIdx))
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
-		return "", err
+	locations := make([]string, 0, 2)
+	if t.resultsDir != "" {
+		if err := os.MkdirAll(t.resultsDir, 0o755); err != nil {
+			return "", err
+		}
+
+		filePath := filepath.Join(t.resultsDir, publishedResultFilename(epoch, t.ShardID, t.ServerIdx))
+		if err := os.WriteFile(filePath, data, 0o644); err != nil {
+			return "", err
+		}
+		locations = append(locations, filePath)
 	}
-	return path, nil
+
+	if t.resultStore != nil && t.resultBucket != "" {
+		key := publishedResultObjectKey(t.resultPrefix, t.ShardID, epoch.ID)
+		if err := t.resultStore.PutObject(t.resultBucket, key, data, "application/json"); err != nil {
+			return "", err
+		}
+		locations = append(locations, fmt.Sprintf("s3://%s/%s", t.resultBucket, key))
+	}
+
+	return strings.Join(locations, ","), nil
 }

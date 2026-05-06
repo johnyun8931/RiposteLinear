@@ -24,6 +24,9 @@ var flagIndex = flag.Int("idx", -1, "Server index")
 var flagLog = flag.String("log", "", "Log file")
 var flagThreads = flag.Int("threads", -1, "Number of threads to use")
 var flagResultsDir = flag.String("results-dir", "", "Directory for epoch result files on the leader")
+var flagResultsS3Bucket = flag.String("results-s3-bucket", "", "S3 bucket for immutable epoch result files on the leader")
+var flagResultsS3Prefix = flag.String("results-s3-prefix", "", "S3 key prefix for immutable epoch result files")
+var flagResultsS3Region = flag.String("results-s3-region", "", "AWS region for S3 result publication; defaults to AWS SDK configuration")
 var flagShardID = flag.Int("shard-id", 0, "Shard identifier for result publication metadata")
 var flagAdminTarget = flag.String("admin-target", "", "Target leader address for admin RPC commands")
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
@@ -121,6 +124,9 @@ func main() {
 	slotTable := db.NewServer(idx, serverList)
 	slotTable.SetShardID(*flagShardID)
 	slotTable.SetResultsDir(*flagResultsDir)
+	if err := slotTable.SetS3Results(*flagResultsS3Bucket, *flagResultsS3Prefix, *flagResultsS3Region); err != nil {
+		log.Fatal("Could not configure S3 result publication: ", err)
+	}
 	slotTable.Initialize(&a, &a)
 	rpc.Register(slotTable)
 
