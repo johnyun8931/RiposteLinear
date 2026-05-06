@@ -255,6 +255,13 @@ type PublishedResult struct {
 	Slots            []PublishedSlot `json:"slots"`
 }
 
+type PublishedResultManifest struct {
+	EpochID     int64     `json:"epoch_id"`
+	ShardID     int       `json:"shard_id"`
+	ResultKey   string    `json:"result_key"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
 type objectStore interface {
 	PutObject(bucket, key string, body []byte, contentType string) error
 }
@@ -552,6 +559,22 @@ func publishedResultObjectKey(prefix string, shardID int, epochID int64) string 
 	return path.Join(strings.Trim(prefix, "/"), key)
 }
 
+func publishedResultManifestKey(prefix string, shardID int) string {
+	key := fmt.Sprintf("shards/%d/latest.json", shardID)
+	if prefix == "" {
+		return key
+	}
+	return path.Join(strings.Trim(prefix, "/"), key)
+}
+
+func marshalPublishedResultManifest(manifest PublishedResultManifest) ([]byte, error) {
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
 func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, completedAt time.Time) (string, error) {
 	if t.resultsDir == "" && (t.resultStore == nil || t.resultBucket == "") {
 		return "", nil
@@ -578,6 +601,20 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 	if t.resultStore != nil && t.resultBucket != "" {
 		key := publishedResultObjectKey(t.resultPrefix, t.ShardID, epoch.ID)
 		if err := t.resultStore.PutObject(t.resultBucket, key, data, "application/json"); err != nil {
+			return "", err
+		}
+		manifest := PublishedResultManifest{
+			EpochID:     epoch.ID,
+			ShardID:     t.ShardID,
+			ResultKey:   key,
+			CompletedAt: completedAt.UTC(),
+		}
+		manifestData, err := marshalPublishedResultManifest(manifest)
+		if err != nil {
+			return "", err
+		}
+		manifestKey := publishedResultManifestKey(t.resultPrefix, t.ShardID)
+		if err := t.resultStore.PutObject(t.resultBucket, manifestKey, manifestData, "application/json"); err != nil {
 			return "", err
 		}
 		locations = append(locations, fmt.Sprintf("s3://%s/%s", t.resultBucket, key))

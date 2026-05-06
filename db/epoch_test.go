@@ -683,6 +683,10 @@ func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 }
 
 type fakeObjectStore struct {
+	puts []fakeObjectPut
+}
+
+type fakeObjectPut struct {
 	bucket      string
 	key         string
 	body        []byte
@@ -690,10 +694,12 @@ type fakeObjectStore struct {
 }
 
 func (f *fakeObjectStore) PutObject(bucket, key string, body []byte, contentType string) error {
-	f.bucket = bucket
-	f.key = key
-	f.body = append([]byte(nil), body...)
-	f.contentType = contentType
+	f.puts = append(f.puts, fakeObjectPut{
+		bucket:      bucket,
+		key:         key,
+		body:        append([]byte(nil), body...),
+		contentType: contentType,
+	})
 	return nil
 }
 
@@ -722,21 +728,48 @@ func TestWritePublishedResultPublishesImmutableS3Object(t *testing.T) {
 	if location != expectedLocation {
 		t.Fatalf("expected location %s, got %s", expectedLocation, location)
 	}
-	if store.bucket != "riposte-results" {
-		t.Fatalf("expected bucket riposte-results, got %s", store.bucket)
+	if len(store.puts) != 2 {
+		t.Fatalf("expected result and latest manifest PUTs, got %d", len(store.puts))
 	}
-	if store.key != expectedKey {
-		t.Fatalf("expected key %s, got %s", expectedKey, store.key)
+	resultPut := store.puts[0]
+	if resultPut.bucket != "riposte-results" {
+		t.Fatalf("expected bucket riposte-results, got %s", resultPut.bucket)
 	}
-	if store.contentType != "application/json" {
-		t.Fatalf("expected application/json content type, got %s", store.contentType)
+	if resultPut.key != expectedKey {
+		t.Fatalf("expected key %s, got %s", expectedKey, resultPut.key)
+	}
+	if resultPut.contentType != "application/json" {
+		t.Fatalf("expected application/json content type, got %s", resultPut.contentType)
 	}
 
 	var result PublishedResult
-	if err := json.Unmarshal(store.body, &result); err != nil {
+	if err := json.Unmarshal(resultPut.body, &result); err != nil {
 		t.Fatalf("unmarshal S3 result failed: %v", err)
 	}
 	if result.EpochID != 7 || result.ShardID != 3 || result.NonZeroSlotCount != 1 {
 		t.Fatalf("unexpected S3 result metadata: %+v", result)
+	}
+
+	manifestPut := store.puts[1]
+	expectedManifestKey := "eval/run-1/shards/3/latest.json"
+	if manifestPut.bucket != "riposte-results" {
+		t.Fatalf("expected manifest bucket riposte-results, got %s", manifestPut.bucket)
+	}
+	if manifestPut.key != expectedManifestKey {
+		t.Fatalf("expected manifest key %s, got %s", expectedManifestKey, manifestPut.key)
+	}
+	if manifestPut.contentType != "application/json" {
+		t.Fatalf("expected manifest application/json content type, got %s", manifestPut.contentType)
+	}
+
+	var manifest PublishedResultManifest
+	if err := json.Unmarshal(manifestPut.body, &manifest); err != nil {
+		t.Fatalf("unmarshal S3 manifest failed: %v", err)
+	}
+	if manifest.EpochID != 7 || manifest.ShardID != 3 || manifest.ResultKey != expectedKey {
+		t.Fatalf("unexpected S3 manifest: %+v", manifest)
+	}
+	if !manifest.CompletedAt.Equal(time.Unix(160, 0).UTC()) {
+		t.Fatalf("unexpected manifest completed_at: %v", manifest.CompletedAt)
 	}
 }
