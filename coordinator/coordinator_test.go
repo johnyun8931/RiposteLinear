@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -21,6 +22,20 @@ type fakeShardClient struct {
 	startErr   error
 	abortCalls int
 	abortErr   error
+}
+
+type fakeObjectReader struct {
+	objects map[string][]byte
+	gets    []string
+}
+
+func (f *fakeObjectReader) GetObject(bucket, key string) ([]byte, error) {
+	f.gets = append(f.gets, bucket+"/"+key)
+	data, ok := f.objects[bucket+"/"+key]
+	if !ok {
+		return nil, errors.New("not found")
+	}
+	return append([]byte(nil), data...), nil
 }
 
 func (f *fakeShardClient) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
@@ -254,5 +269,65 @@ func TestCoordinatorStartEpochProducesSharedMetadata(t *testing.T) {
 	}
 	if status.EpochID != reply.EpochID || status.State != db.EpochStateActive.String() || !status.Accepting {
 		t.Fatalf("unexpected coordinator status: %+v", status)
+	}
+}
+
+func TestCoordinatorReadLatestFetchesManifestThenResult(t *testing.T) {
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}})
+
+	resultKey := "eval/run-1/shards/0/epochs/000007/result.json"
+	resultData := []byte(`{"epoch_id":7,"slots":[]}` + "\n")
+	manifestData, err := json.Marshal(db.PublishedResultManifest{
+		EpochID:     7,
+		ShardID:     0,
+		ResultKey:   resultKey,
+		CompletedAt: time.Unix(160, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal manifest failed: %v", err)
+	}
+
+	reader := &fakeObjectReader{objects: map[string][]byte{
+		"riposte-results/eval/run-1/shards/0/latest.json":               manifestData,
+		"riposte-results/eval/run-1/shards/0/epochs/000007/result.json": resultData,
+	}}
+	coord.setResultObjectReader("riposte-results", "eval/run-1", reader)
+
+	var reply db.ReadLatestReply
+	if err := coord.ReadLatest(&db.ReadLatestArgs{ShardID: 0}, &reply); err != nil {
+		t.Fatalf("ReadLatest failed: %v", err)
+	}
+
+	if reply.EpochID != 7 || reply.ShardID != 0 || reply.ResultKey != resultKey {
+		t.Fatalf("unexpected read reply metadata: %+v", reply)
+	}
+	if string(reply.Content) != string(resultData) {
+		t.Fatalf("unexpected result content: %s", string(reply.Content))
+	}
+
+	expectedGets := []string{
+		"riposte-results/eval/run-1/shards/0/latest.json",
+		"riposte-results/eval/run-1/shards/0/epochs/000007/result.json",
+	}
+	if len(reader.gets) != len(expectedGets) {
+		t.Fatalf("expected %d GETs, got %d: %+v", len(expectedGets), len(reader.gets), reader.gets)
+	}
+	for i, expected := range expectedGets {
+		if reader.gets[i] != expected {
+			t.Fatalf("GET %d: expected %s, got %s", i, expected, reader.gets[i])
+		}
+	}
+}
+
+func TestCoordinatorReadLatestRejectsUnconfiguredStore(t *testing.T) {
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}})
+
+	err := coord.ReadLatest(&db.ReadLatestArgs{ShardID: 0}, &db.ReadLatestReply{})
+	if err == nil || err.Error() != "result object store is not configured" {
+		t.Fatalf("expected unconfigured store error, got %v", err)
 	}
 }

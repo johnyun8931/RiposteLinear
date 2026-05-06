@@ -220,6 +220,17 @@ type EpochStatusReply struct {
 	LastResult   string
 }
 
+type ReadLatestArgs struct {
+	ShardID int
+}
+
+type ReadLatestReply struct {
+	EpochID   int64
+	ShardID   int
+	ResultKey string
+	Content   []byte
+}
+
 type AbortEpochArgs struct {
 	EpochID int64
 }

@@ -19,6 +19,9 @@ var flagLog = flag.String("log", "", "Log file")
 var flagAdminTarget = flag.String("admin-target", "", "Target coordinator address for admin RPC commands")
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
 var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query coordinator epoch status over admin RPC and exit")
+var flagResultsS3Bucket = flag.String("results-s3-bucket", "", "S3 bucket for reading published epoch results")
+var flagResultsS3Prefix = flag.String("results-s3-prefix", "", "S3 key prefix for published epoch results")
+var flagResultsS3Region = flag.String("results-s3-region", "", "AWS region for S3 result reads; defaults to AWS SDK configuration")
 
 var shardFlags shardListType
 
@@ -63,6 +66,9 @@ func main() {
 	coord, err := NewCoordinator(shards, nil)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if err := coord.SetS3Results(*flagResultsS3Bucket, *flagResultsS3Prefix, *flagResultsS3Region); err != nil {
+		log.Fatal("Could not configure S3 result reads: ", err)
 	}
 	if err := coord.connectShards(); err != nil {
 		log.Fatal(err)

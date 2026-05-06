@@ -2,11 +2,13 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
 	"net/rpc"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -83,15 +85,22 @@ type routedSession struct {
 	hashKey   [32]byte
 }
 
+type objectReader interface {
+	GetObject(bucket, key string) ([]byte, error)
+}
+
 type Coordinator struct {
-	mu         sync.Mutex
-	shards     []ShardConfig
-	shardByID  map[int]ShardConfig
-	clients    map[int]shardClient
-	sessions   map[int64]routedSession
-	nextUUID   int64
-	epoch      db.EpochMeta
-	epochTimer *time.Timer
+	mu           sync.Mutex
+	shards       []ShardConfig
+	shardByID    map[int]ShardConfig
+	clients      map[int]shardClient
+	sessions     map[int64]routedSession
+	nextUUID     int64
+	epoch        db.EpochMeta
+	epochTimer   *time.Timer
+	resultBucket string
+	resultPrefix string
+	resultReader objectReader
 }
 
 func parseShardConfig(value string) (ShardConfig, error) {
@@ -237,6 +246,20 @@ func NewCoordinator(shards []ShardConfig, clients map[int]shardClient) (*Coordin
 		}
 	}
 	return coord, nil
+}
+
+func (c *Coordinator) setResultObjectReader(bucket, prefix string, reader objectReader) {
+	c.resultBucket = bucket
+	c.resultPrefix = strings.Trim(prefix, "/")
+	c.resultReader = reader
+}
+
+func coordinatorLatestManifestKey(prefix string, shardID int) string {
+	key := fmt.Sprintf("shards/%d/latest.json", shardID)
+	if prefix == "" {
+		return key
+	}
+	return path.Join(strings.Trim(prefix, "/"), key)
 }
 
 func dialShardLeader(leaderAddr string) (shardClient, error) {
@@ -466,5 +489,49 @@ func (c *Coordinator) EpochStatus(_ *db.EpochStatusArgs, reply *db.EpochStatusRe
 	reply.EndUnix = c.epoch.EndTime.Unix()
 	reply.DurationSecs = c.epoch.DurationSeconds
 	reply.Accepting = c.epoch.State == db.EpochStateActive
+	return nil
+}
+
+func (c *Coordinator) ReadLatest(args *db.ReadLatestArgs, reply *db.ReadLatestReply) error {
+	c.mu.Lock()
+	_, shardOK := c.shardByID[args.ShardID]
+	bucket := c.resultBucket
+	prefix := c.resultPrefix
+	reader := c.resultReader
+	c.mu.Unlock()
+
+	if !shardOK {
+		return fmt.Errorf("unknown shard %d", args.ShardID)
+	}
+	if reader == nil || bucket == "" {
+		return errors.New("result object store is not configured")
+	}
+
+	manifestKey := coordinatorLatestManifestKey(prefix, args.ShardID)
+	manifestData, err := reader.GetObject(bucket, manifestKey)
+	if err != nil {
+		return fmt.Errorf("read latest manifest for shard %d: %w", args.ShardID, err)
+	}
+
+	var manifest db.PublishedResultManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return fmt.Errorf("decode latest manifest for shard %d: %w", args.ShardID, err)
+	}
+	if manifest.ShardID != args.ShardID {
+		return fmt.Errorf("latest manifest shard mismatch: got %d want %d", manifest.ShardID, args.ShardID)
+	}
+	if manifest.ResultKey == "" {
+		return fmt.Errorf("latest manifest for shard %d has empty result key", args.ShardID)
+	}
+
+	content, err := reader.GetObject(bucket, manifest.ResultKey)
+	if err != nil {
+		return fmt.Errorf("read latest result for shard %d: %w", args.ShardID, err)
+	}
+
+	reply.EpochID = manifest.EpochID
+	reply.ShardID = manifest.ShardID
+	reply.ResultKey = manifest.ResultKey
+	reply.Content = content
 	return nil
 }
