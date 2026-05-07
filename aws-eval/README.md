@@ -185,6 +185,12 @@ waits for completion, and verifies:
 - each shard leader wrote its own result file
 - the payload bytes landed in the expected shard
 
+If `CONTROL_STORE_BACKEND=dynamodb`, smoke starts the coordinator with the
+DynamoDB control-store flags and captures the `lease`, `epoch`, and
+`shard-config` table records after epoch start and completion. The smoke check
+also verifies that the DynamoDB epoch ID and accepting flag match the observed
+coordinator lifecycle.
+
 ### 5. Benchmark
 
 ```bash
@@ -268,7 +274,10 @@ CLIENT_CONCURRENCY=16
 CLIENT_RETRY_OVERLOAD=0
 CLIENT_OVERLOAD_BACKOFF_INITIAL_MS=10
 CLIENT_OVERLOAD_BACKOFF_MAX_MS=250
+CONTROL_STORE_BACKEND=memory
 DYNAMODB_CONTROL_TABLE=riposte-aws-eval-control
+DYNAMODB_CONTROL_REGION=us-east-1
+COORDINATOR_HOLDER_ID=riposte-aws-eval-run-coordinator
 WARMUP_EPOCH_SECONDS=60
 MEASURED_EPOCH_SECONDS=600
 START_EPOCH_RETRY_TIMEOUT=90

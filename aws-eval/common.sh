@@ -25,6 +25,9 @@ START_EPOCH_RETRY_TIMEOUT="${START_EPOCH_RETRY_TIMEOUT:-90}"
 START_EPOCH_RETRY_INTERVAL="${START_EPOCH_RETRY_INTERVAL:-2}"
 POST_EPOCH_FLUSH_SECONDS="${POST_EPOCH_FLUSH_SECONDS:-12}"
 CLIENT_EXIT_GRACE_SECONDS="${CLIENT_EXIT_GRACE_SECONDS:-30}"
+CONTROL_STORE_BACKEND="${CONTROL_STORE_BACKEND:-memory}"
+DYNAMODB_CONTROL_TABLE="${DYNAMODB_CONTROL_TABLE:-}"
+DYNAMODB_CONTROL_REGION="${DYNAMODB_CONTROL_REGION:-}"
 
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
 SHARD0_LEADER_PORT="${SHARD0_LEADER_PORT:-8610}"
@@ -67,6 +70,10 @@ aws_base() {
 
 aws_region() {
   aws_base --region "$AWS_REGION" "$@"
+}
+
+aws_control_region() {
+  aws_base --region "$(dynamodb_control_region)" "$@"
 }
 
 quote() {
@@ -244,6 +251,50 @@ coordinator_addr() {
   printf '%s:%s' "$COORDINATOR_PRIVATE_IP" "$COORDINATOR_PORT"
 }
 
+coordinator_holder_id() {
+  printf '%s' "${COORDINATOR_HOLDER_ID:-${PROJECT_TAG}-${RUN_ID:-local}-coordinator}"
+}
+
+dynamodb_control_enabled() {
+  [[ "$CONTROL_STORE_BACKEND" == "dynamodb" ]]
+}
+
+dynamodb_control_table() {
+  [[ -n "$DYNAMODB_CONTROL_TABLE" ]] || die "DYNAMODB_CONTROL_TABLE is required when CONTROL_STORE_BACKEND=dynamodb"
+  printf '%s' "$DYNAMODB_CONTROL_TABLE"
+}
+
+dynamodb_control_region() {
+  printf '%s' "${DYNAMODB_CONTROL_REGION:-$AWS_REGION}"
+}
+
+coordinator_control_store_args() {
+  case "$CONTROL_STORE_BACKEND" in
+    memory)
+      return 0
+      ;;
+    dynamodb)
+      printf -- " -control-store dynamodb -control-table %s -aws-region %s -coordinator-id %s" \
+        "$(quote "$(dynamodb_control_table)")" \
+        "$(quote "$(dynamodb_control_region)")" \
+        "$(quote "$(coordinator_holder_id)")"
+      ;;
+    *)
+      die "unknown CONTROL_STORE_BACKEND: $CONTROL_STORE_BACKEND"
+      ;;
+  esac
+}
+
+capture_dynamodb_control_item() {
+  local pk="$1"
+  local output_path="$2"
+  aws_control_region dynamodb get-item \
+    --table-name "$(dynamodb_control_table)" \
+    --consistent-read \
+    --key "{\"pk\":{\"S\":\"$pk\"}}" \
+    --output json >"$output_path"
+}
+
 shard0_leader_addr() {
   printf '%s:%s' "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT"
 }
@@ -376,7 +427,9 @@ start_remote_coordinator() {
   local host="$1"
   local listen_addr="$2"
   local log_path="$3"
-  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")'; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)' > '${log_path}.nohup' 2>&1 &"
+  local control_args
+  control_args="$(coordinator_control_store_args)"
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")'; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 &"
 }
 
 start_remote_hammer_client() {

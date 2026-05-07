@@ -29,6 +29,14 @@ fi
 info "waiting for table to become active"
 aws_region dynamodb wait table-exists --table-name "$DYNAMODB_CONTROL_TABLE"
 
+info "seeding shard config version"
+aws_region dynamodb update-item \
+  --table-name "$DYNAMODB_CONTROL_TABLE" \
+  --key '{"pk":{"S":"shard-config"}}' \
+  --update-expression 'SET #version = if_not_exists(#version, :version)' \
+  --expression-attribute-names '{"#version":"version"}' \
+  --expression-attribute-values '{":version":{"N":"1"}}' >/dev/null
+
 state_tmp="$(mktemp)"
 if [[ -f "$STATE_FILE" ]]; then
   grep -v -E '^(CONTROL_STORE_BACKEND|DYNAMODB_CONTROL_TABLE|DYNAMODB_CONTROL_REGION)=' "$STATE_FILE" >"$state_tmp" || true

@@ -10,11 +10,71 @@ load_state
 require_cmd ssh
 require_cmd scp
 require_cmd python3
+if dynamodb_control_enabled; then
+  require_cmd aws
+fi
 
 SMOKE_LOCAL_DIR="$STATE_DIR/smoke"
 SMOKE_EPOCH_SECONDS="${SMOKE_EPOCH_SECONDS:-8}"
 SMOKE_RESULTS_REMOTE="$(smoke_results_dir)"
 SMOKE_LOGS_REMOTE="$(smoke_log_dir)"
+
+capture_dynamodb_smoke_state() {
+  local stage="$1"
+  local local_dir="$SMOKE_LOCAL_DIR/dynamodb-$stage"
+  local remote_dir="$SMOKE_LOGS_REMOTE/dynamodb-$stage"
+  local pk
+
+  if ! dynamodb_control_enabled; then
+    return 0
+  fi
+
+  mkdir -p "$local_dir"
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$remote_dir'"
+  for pk in lease epoch shard-config; do
+    capture_dynamodb_control_item "$pk" "$local_dir/${pk}.json"
+    copy_to_remote "$local_dir/${pk}.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/${pk}.json"
+  done
+}
+
+assert_dynamodb_smoke_state() {
+  local stage="$1"
+  local epoch_id="$2"
+  local accepting="$3"
+  local holder
+  local epoch_file="$SMOKE_LOCAL_DIR/dynamodb-$stage/epoch.json"
+  local lease_file="$SMOKE_LOCAL_DIR/dynamodb-$stage/lease.json"
+  local shard_config_file="$SMOKE_LOCAL_DIR/dynamodb-$stage/shard-config.json"
+
+  if ! dynamodb_control_enabled; then
+    return 0
+  fi
+
+  holder="$(coordinator_holder_id)"
+  python3 - "$epoch_file" "$lease_file" "$shard_config_file" "$epoch_id" "$accepting" "$holder" <<'PY'
+import json
+import sys
+
+epoch_path, lease_path, shard_config_path, epoch_id, accepting, holder = sys.argv[1:]
+epoch = json.load(open(epoch_path)).get("Item", {})
+lease = json.load(open(lease_path)).get("Item", {})
+shard_config = json.load(open(shard_config_path)).get("Item", {})
+
+actual_epoch = epoch.get("epoch_id", {}).get("N")
+actual_accepting = epoch.get("accepting", {}).get("BOOL")
+actual_holder = lease.get("holder", {}).get("S")
+actual_shard_version = shard_config.get("version", {}).get("N")
+
+if actual_epoch != epoch_id:
+    raise SystemExit(f"DynamoDB epoch id mismatch: expected {epoch_id}, got {actual_epoch}")
+if actual_accepting != (accepting == "true"):
+    raise SystemExit(f"DynamoDB accepting mismatch: expected {accepting}, got {actual_accepting}")
+if actual_holder != holder:
+    raise SystemExit(f"DynamoDB lease holder mismatch: expected {holder}, got {actual_holder}")
+if actual_shard_version != "1":
+    raise SystemExit(f"DynamoDB shard config version mismatch: expected 1, got {actual_shard_version}")
+PY
+}
 
 cleanup() {
   kill_all_remote_processes
@@ -48,6 +108,8 @@ wait_for_status_state server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" 
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-active-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard1-leader.json"
+capture_dynamodb_smoke_state active
+assert_dynamodb_smoke_state active "$epoch_id" true
 
 info "sending deterministic smoke writes through the coordinator"
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 1 -y 0 -payload shard0-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row0.log'"
@@ -57,6 +119,8 @@ wait_for_epoch_complete coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
+capture_dynamodb_smoke_state completed
+assert_dynamodb_smoke_state completed "$epoch_id" false
 
 local_shard0="$SMOKE_LOCAL_DIR/$(result_file_name "$epoch_id" 0)"
 local_shard1="$SMOKE_LOCAL_DIR/$(result_file_name "$epoch_id" 1)"

@@ -76,6 +76,10 @@ CLIENT_CONCURRENCY="$CLIENT_CONCURRENCY" \
 CLIENT_RETRY_OVERLOAD="$CLIENT_RETRY_OVERLOAD" \
 CLIENT_OVERLOAD_BACKOFF_INITIAL_MS="$CLIENT_OVERLOAD_BACKOFF_INITIAL_MS" \
 CLIENT_OVERLOAD_BACKOFF_MAX_MS="$CLIENT_OVERLOAD_BACKOFF_MAX_MS" \
+CONTROL_STORE_BACKEND="$CONTROL_STORE_BACKEND" \
+DYNAMODB_CONTROL_TABLE="$DYNAMODB_CONTROL_TABLE" \
+DYNAMODB_CONTROL_REGION="$(dynamodb_control_region)" \
+COORDINATOR_HOLDER_ID="$(coordinator_holder_id)" \
 WARMUP_EPOCH_SECONDS="$WARMUP_EPOCH_SECONDS" \
 MEASURED_EPOCH_SECONDS="$MEASURED_EPOCH_SECONDS" \
 START_EPOCH_RETRY_TIMEOUT="$START_EPOCH_RETRY_TIMEOUT" \
@@ -139,6 +143,10 @@ payload = {
         "client_retry_overload": os.environ["CLIENT_RETRY_OVERLOAD"],
         "client_overload_backoff_initial_ms": int(os.environ["CLIENT_OVERLOAD_BACKOFF_INITIAL_MS"]),
         "client_overload_backoff_max_ms": int(os.environ["CLIENT_OVERLOAD_BACKOFF_MAX_MS"]),
+        "control_store_backend": os.environ["CONTROL_STORE_BACKEND"],
+        "dynamodb_control_table": os.environ["DYNAMODB_CONTROL_TABLE"],
+        "dynamodb_control_region": os.environ["DYNAMODB_CONTROL_REGION"],
+        "coordinator_holder_id": os.environ["COORDINATOR_HOLDER_ID"],
         "warmup_epoch_seconds": int(os.environ["WARMUP_EPOCH_SECONDS"]),
         "measured_epoch_seconds": int(os.environ["MEASURED_EPOCH_SECONDS"]),
         "start_epoch_retry_timeout": int(os.environ["START_EPOCH_RETRY_TIMEOUT"]),
