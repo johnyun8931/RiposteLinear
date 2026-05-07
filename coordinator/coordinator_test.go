@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ type fakeShardClient struct {
 	lastUpload2 db.UploadArgs2
 	lastUpload3 db.UploadArgs3
 
+	startCalls  int
 	startReply  db.StartEpochReply
 	startErr    error
 	abortCalls  int
@@ -47,6 +49,7 @@ func (f *fakeShardClient) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) 
 }
 
 func (f *fakeShardClient) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochReply) error {
+	f.startCalls++
 	if f.startErr != nil {
 		return f.startErr
 	}
@@ -80,6 +83,17 @@ func mustCoordinator(t *testing.T, shards []ShardConfig, clients map[int]shardCl
 	if err != nil {
 		t.Fatalf("NewCoordinator failed: %v", err)
 	}
+	t.Cleanup(coord.Close)
+	return coord
+}
+
+func mustCoordinatorWithLease(t *testing.T, shards []ShardConfig, clients map[int]shardClient, store ControlStore, holder string, ttl time.Duration, renewInterval time.Duration) *Coordinator {
+	t.Helper()
+	coord, err := newCoordinatorWithLeaseConfig(shards, clients, store, holder, ttl, renewInterval)
+	if err != nil {
+		t.Fatalf("newCoordinatorWithLeaseConfig failed: %v", err)
+	}
+	t.Cleanup(coord.Close)
 	return coord
 }
 
@@ -220,6 +234,81 @@ func TestCoordinatorRejectsWritesWithoutActiveEpoch(t *testing.T) {
 	}
 }
 
+func TestCoordinatorAcquiresStandaloneLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, defaultCoordinatorLeaseHolder, defaultCoordinatorLeaseTTL, time.Hour)
+
+	lease, ok := store.CurrentLease(time.Now().UTC())
+	if !ok {
+		t.Fatal("expected active coordinator lease")
+	}
+	if lease.Holder != defaultCoordinatorLeaseHolder {
+		t.Fatalf("expected holder %q, got %+v", defaultCoordinatorLeaseHolder, lease)
+	}
+	if lease.FencingToken != coord.lease.FencingToken {
+		t.Fatalf("expected coordinator fencing token %d, got lease %+v", coord.lease.FencingToken, lease)
+	}
+}
+
+func TestCoordinatorRejectsSecondHolderWithActiveLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", time.Minute, time.Hour)
+
+	_, err := newCoordinatorWithLeaseConfig([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-b", time.Minute, time.Hour)
+	if !errors.Is(err, errLeaseHeld) {
+		t.Fatalf("expected held lease error, got %v", err)
+	}
+}
+
+func TestCoordinatorDifferentHolderCanAcquireAfterLeaseExpiry(t *testing.T) {
+	store := newMemoryControlStore(1)
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", time.Minute, time.Hour)
+	initialToken := coord.lease.FencingToken
+	coord.Close()
+
+	next, err := store.AcquireLease(time.Now().UTC().Add(time.Hour), "coord-b", time.Minute)
+	if err != nil {
+		t.Fatalf("expected second holder to acquire expired lease, got %v", err)
+	}
+	if next.Holder != "coord-b" || next.FencingToken <= initialToken {
+		t.Fatalf("expected coord-b with newer fencing token, got %+v", next)
+	}
+}
+
+func TestCoordinatorRenewLeaseExtendsExpiry(t *testing.T) {
+	store := newMemoryControlStore(1)
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", time.Minute, time.Hour)
+	initialExpiry := coord.lease.ExpiresAt
+	time.Sleep(time.Millisecond)
+
+	if err := coord.renewCoordinatorLease(); err != nil {
+		t.Fatalf("renewCoordinatorLease failed: %v", err)
+	}
+	if !coord.lease.ExpiresAt.After(initialExpiry) {
+		t.Fatalf("expected renewed expiry after %s, got %s", initialExpiry, coord.lease.ExpiresAt)
+	}
+}
+
+func TestCoordinatorCloseStopsRenewal(t *testing.T) {
+	store := newMemoryControlStore(1)
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", time.Minute, time.Millisecond)
+
+	coord.Close()
+	coord.Close()
+}
+
 func TestCoordinatorStartEpochRequiresAllShardsAndAbortsStartedShardOnFailure(t *testing.T) {
 	startTime := time.Unix(1000, 0).UTC()
 	left := &fakeShardClient{startReply: db.StartEpochReply{
@@ -244,6 +333,39 @@ func TestCoordinatorStartEpochRequiresAllShardsAndAbortsStartedShardOnFailure(t 
 	}
 	if coord.epoch.State != db.EpochStateNoActive {
 		t.Fatalf("expected coordinator epoch to remain closed, got %+v", coord.epoch)
+	}
+}
+
+func stealCoordinatorLease(t *testing.T, store *memoryControlStore, holder string) CoordinatorLease {
+	t.Helper()
+	lease, err := store.AcquireLease(time.Now().UTC().Add(time.Hour), holder, time.Minute)
+	if err != nil {
+		t.Fatalf("AcquireLease(%q) failed: %v", holder, err)
+	}
+	return lease
+}
+
+func TestCoordinatorStartEpochFailsWithStaleLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	startTime := time.Now().UTC().Truncate(time.Second)
+	client := &fakeShardClient{startReply: db.StartEpochReply{
+		EpochID:      1,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+	}}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: client}, store, "coord-a", time.Minute, time.Hour)
+	stealCoordinatorLease(t, store, "coord-b")
+
+	err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{})
+	if err == nil || !strings.Contains(err.Error(), "coordinator lease unavailable") {
+		t.Fatalf("expected coordinator lease error, got %v", err)
+	}
+	if client.startCalls != 0 {
+		t.Fatalf("expected stale coordinator not to contact shard, got %d StartEpoch calls", client.startCalls)
 	}
 }
 
@@ -315,6 +437,35 @@ func TestCoordinatorCompleteEpochMirrorsControlStore(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCompleteEpochSkipsStoreMutationWithStaleLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	startTime := time.Now().UTC().Truncate(time.Second)
+	reply := db.StartEpochReply{
+		EpochID:      1,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+	}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{startReply: reply}}, store, "coord-a", time.Minute, time.Hour)
+	if err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{}); err != nil {
+		t.Fatalf("StartEpoch failed: %v", err)
+	}
+	stealCoordinatorLease(t, store, "coord-b")
+
+	coord.completeEpoch()
+
+	epoch, ok := store.CurrentEpoch()
+	if !ok || epoch.State != db.EpochStateActive {
+		t.Fatalf("expected stale coordinator not to complete store epoch, ok=%t epoch=%+v", ok, epoch)
+	}
+	if coord.epoch.State != db.EpochStateActive {
+		t.Fatalf("expected stale coordinator local epoch to remain active, got %+v", coord.epoch)
+	}
+}
+
 func TestCoordinatorUpload1RejectsWhenControlStoreNotAccepting(t *testing.T) {
 	fakeClient := &fakeShardClient{}
 	coord := mustCoordinator(t, []ShardConfig{
@@ -332,6 +483,25 @@ func TestCoordinatorUpload1RejectsWhenControlStoreNotAccepting(t *testing.T) {
 	}
 	if fakeClient.upload1Calls != 0 {
 		t.Fatalf("expected Upload1 not to reach shard when control store is not accepting, got %d calls", fakeClient.upload1Calls)
+	}
+}
+
+func TestCoordinatorUpload1RejectsWithStaleLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	fakeClient := &fakeShardClient{}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: fakeClient}, store, "coord-a", time.Minute, time.Hour)
+	epoch := db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60}
+	setCoordinatorActiveEpoch(t, coord, epoch)
+	stealCoordinatorLease(t, store, "coord-b")
+
+	err := coord.Upload1(&db.UploadArgs1{RouteRow: 0}, &db.UploadReply1{})
+	if err == nil || err.Error() != "No active epoch" {
+		t.Fatalf("expected no active epoch error, got %v", err)
+	}
+	if fakeClient.upload1Calls != 0 {
+		t.Fatalf("expected Upload1 not to reach shard with stale lease, got %d calls", fakeClient.upload1Calls)
 	}
 }
 

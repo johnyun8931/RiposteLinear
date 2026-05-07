@@ -88,7 +88,12 @@ type routedSession struct {
 	hashKey   [32]byte
 }
 
-const defaultShardStatusTimeout = 2 * time.Second
+const (
+	defaultShardStatusTimeout            = 2 * time.Second
+	defaultCoordinatorLeaseHolder        = "standalone"
+	defaultCoordinatorLeaseTTL           = 30 * time.Second
+	defaultCoordinatorLeaseRenewInterval = 10 * time.Second
+)
 
 type Coordinator struct {
 	mu           sync.Mutex
@@ -100,6 +105,11 @@ type Coordinator struct {
 	epoch        db.EpochMeta
 	epochTimer   *time.Timer
 	controlStore ControlStore
+	leaseHolder  string
+	leaseTTL     time.Duration
+	lease        CoordinatorLease
+	leaseStopCh  chan struct{}
+	leaseDoneCh  chan struct{}
 }
 
 func parseShardConfig(value string) (ShardConfig, error) {
@@ -232,12 +242,43 @@ func NewCoordinator(shards []ShardConfig, clients map[int]shardClient) (*Coordin
 }
 
 func newCoordinatorWithControlStore(shards []ShardConfig, clients map[int]shardClient, controlStore ControlStore) (*Coordinator, error) {
+	return newCoordinatorWithLeaseConfig(
+		shards,
+		clients,
+		controlStore,
+		defaultCoordinatorLeaseHolder,
+		defaultCoordinatorLeaseTTL,
+		defaultCoordinatorLeaseRenewInterval,
+	)
+}
+
+func newCoordinatorWithLeaseConfig(
+	shards []ShardConfig,
+	clients map[int]shardClient,
+	controlStore ControlStore,
+	leaseHolder string,
+	leaseTTL time.Duration,
+	leaseRenewInterval time.Duration,
+) (*Coordinator, error) {
 	if controlStore == nil {
 		return nil, errors.New("control store is required")
+	}
+	if leaseHolder == "" {
+		return nil, errors.New("coordinator lease holder is required")
+	}
+	if leaseTTL <= 0 {
+		return nil, errors.New("coordinator lease ttl must be positive")
+	}
+	if leaseRenewInterval <= 0 {
+		return nil, errors.New("coordinator lease renew interval must be positive")
 	}
 	validated, err := validateShardMap(shards)
 	if err != nil {
 		return nil, err
+	}
+	lease, err := controlStore.AcquireLease(time.Now().UTC(), leaseHolder, leaseTTL)
+	if err != nil {
+		return nil, fmt.Errorf("acquire coordinator lease: %w", err)
 	}
 	coord := &Coordinator{
 		shards:       validated,
@@ -245,6 +286,11 @@ func newCoordinatorWithControlStore(shards []ShardConfig, clients map[int]shardC
 		clients:      make(map[int]shardClient, len(validated)),
 		sessions:     make(map[int64]routedSession),
 		controlStore: controlStore,
+		leaseHolder:  leaseHolder,
+		leaseTTL:     leaseTTL,
+		lease:        lease,
+		leaseStopCh:  make(chan struct{}),
+		leaseDoneCh:  make(chan struct{}),
 	}
 	for _, shard := range validated {
 		coord.shardByID[shard.ID] = shard
@@ -252,7 +298,75 @@ func newCoordinatorWithControlStore(shards []ShardConfig, clients map[int]shardC
 			coord.clients[shard.ID] = client
 		}
 	}
+	coord.startLeaseRenewal(leaseRenewInterval)
 	return coord, nil
+}
+
+func (c *Coordinator) startLeaseRenewal(interval time.Duration) {
+	stopCh := c.leaseStopCh
+	doneCh := c.leaseDoneCh
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer close(doneCh)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := c.renewCoordinatorLease(); err != nil {
+					log.Printf("Renew coordinator lease failed: %v", err)
+				}
+			case <-stopCh:
+				return
+			}
+		}
+	}()
+}
+
+func (c *Coordinator) Close() {
+	c.mu.Lock()
+	stopCh := c.leaseStopCh
+	doneCh := c.leaseDoneCh
+	c.leaseStopCh = nil
+	c.leaseDoneCh = nil
+	if c.epochTimer != nil {
+		c.epochTimer.Stop()
+		c.epochTimer = nil
+	}
+	c.mu.Unlock()
+
+	if stopCh == nil {
+		return
+	}
+	close(stopCh)
+	<-doneCh
+}
+
+func (c *Coordinator) renewCoordinatorLease() error {
+	c.mu.Lock()
+	controlStore := c.controlStore
+	holder := c.leaseHolder
+	token := c.lease.FencingToken
+	ttl := c.leaseTTL
+	c.mu.Unlock()
+
+	lease, err := controlStore.RenewLease(time.Now().UTC(), holder, token, ttl)
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	if c.lease.FencingToken == token && c.leaseHolder == holder {
+		c.lease = lease
+	}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Coordinator) requireCoordinatorLease() error {
+	if err := c.renewCoordinatorLease(); err != nil {
+		return fmt.Errorf("coordinator lease unavailable: %w", err)
+	}
+	return nil
 }
 
 func dialShardLeader(leaderAddr string) (shardClient, error) {
@@ -301,6 +415,9 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 	controlStore := c.controlStore
 	c.mu.Unlock()
 	if !active {
+		return errors.New("No active epoch")
+	}
+	if err := c.requireCoordinatorLease(); err != nil {
 		return errors.New("No active epoch")
 	}
 	accepting, err := controlStore.Accepting(epoch.ID)
@@ -392,6 +509,9 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 	if args.DurationSeconds <= 0 {
 		return errors.New("Epoch duration must be positive")
 	}
+	if err := c.requireCoordinatorLease(); err != nil {
+		return err
+	}
 
 	c.mu.Lock()
 	if c.epoch.State == db.EpochStateActive {
@@ -434,6 +554,11 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 			return fmt.Errorf("shard %d returned mismatched epoch metadata", shard.ID)
 		}
 		started = append(started, shard.ID)
+	}
+
+	if err := c.requireCoordinatorLease(); err != nil {
+		c.abortStarted(started, nextEpochID)
+		return err
 	}
 
 	c.mu.Lock()
@@ -487,6 +612,18 @@ func (c *Coordinator) completeEpoch() {
 		return
 	}
 	epochID := c.epoch.ID
+	c.mu.Unlock()
+
+	if err := c.requireCoordinatorLease(); err != nil {
+		log.Printf("Coordinator lease unavailable; skipping epoch %d completion: %v", epochID, err)
+		return
+	}
+
+	c.mu.Lock()
+	if c.epoch.State != db.EpochStateActive || c.epoch.ID != epochID {
+		c.mu.Unlock()
+		return
+	}
 	c.epoch.State = db.EpochStateCompleted
 	c.epochTimer = nil
 	controlStore := c.controlStore

@@ -15,16 +15,20 @@ This is the Phase 4 direction after parking the Raft coordinator spike on
 The committed Phase 3.5 health/status RPCs remain useful for observability, but
 they do not decide failover by themselves.
 
-## First Local Slice
+## Local Slices
 
-The first AWS-native implementation slice is intentionally SDK-free:
+The first AWS-native implementation slices are intentionally SDK-free:
 
 - `ControlStore` defines lease/fencing, epoch state, accepting state, and shard
   config version operations.
 - `IngestionQueue` defines enqueue, receive, and ack operations for durable
   accepted write/session work.
-- In-memory implementations provide deterministic local tests and keep current
-  coordinator runtime behavior unchanged.
+- In-memory implementations provide deterministic local tests and model the
+  DynamoDB/SQS semantics before SDK wiring.
+- The coordinator mirrors epoch metadata and accepting state into the local
+  control store.
+- The coordinator acquires and renews a local fenced lease before admitting new
+  `StartEpoch` or `Upload1` mutations.
 
 AWS SDK wiring is deferred until the local interfaces and semantics are reviewed.
 
@@ -41,8 +45,9 @@ remain a known failover limitation.
 
 ## Current Boundary
 
-No DynamoDB, SQS, or S3 SDK calls are implemented yet. The current slice only
-adds compile-safe interfaces, in-memory implementations, and tests.
+No DynamoDB, SQS, or S3 SDK calls are implemented yet. The current code has
+local control-store wiring and lease/fencing enforcement, but no active-passive
+promotion.
 
 Shard active/passive promotion, pair partial-delivery hardening, and
 horizontally scaled stateless write routers remain later work.
