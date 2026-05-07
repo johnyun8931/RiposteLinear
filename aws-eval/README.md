@@ -190,13 +190,15 @@ resources.
 ```
 
 Starts the full sharded topology, retries coordinator `StartEpoch` until the
-leaders are ready, sends deterministic writes for row `0` and row `128`,
+leaders are ready, sends deterministic writes for global row `0` and global row
+`256`,
 waits for completion, and verifies:
 
 - each shard leader wrote its own result file
-- the payload bytes landed in the expected shard
+- the payload bytes landed in the expected shard, with shard 1 publishing
+  global row `256`
 - completed coordinator status reports scaling metrics for the two accepted
-  smoke writes
+  smoke writes and `global_table_height=512`
 
 If `CONTROL_STORE_BACKEND=dynamodb`, smoke starts the coordinator with the
 DynamoDB control-store flags and captures the `lease`, `epoch`, and

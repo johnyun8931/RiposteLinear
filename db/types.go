@@ -266,6 +266,7 @@ type CoordinatorStatusReply struct {
 	Healthy                   bool                     `json:"healthy"`
 	Role                      string                   `json:"role"`
 	LeaderAddr                string                   `json:"leader_addr"`
+	GlobalTableHeight         int                      `json:"global_table_height"`
 	EpochID                   int64                    `json:"epoch_id"`
 	State                     string                   `json:"state"`
 	StartUnix                 int64                    `json:"start_unix"`
@@ -317,6 +318,8 @@ type PublishedResult struct {
 	ShardID          int             `json:"shard_id"`
 	ServerIndex      int             `json:"server_index"`
 	CompletedAt      time.Time       `json:"completed_at"`
+	GlobalStartRow   int             `json:"global_start_row"`
+	GlobalEndRow     int             `json:"global_end_row"`
 	TableHeight      int             `json:"table_height"`
 	TableWidth       int             `json:"table_width"`
 	SlotLength       int             `json:"slot_length"`
@@ -463,9 +466,10 @@ type Server struct {
 
 	rpcClients [NUM_SERVERS + 1]*rpc.Client
 
-	resultsDir string
-	controlCh  chan leaderControlCommand
-	mergeFn    func() (string, error)
+	resultsDir     string
+	globalRowStart int
+	controlCh      chan leaderControlCommand
+	mergeFn        func() (string, error)
 }
 
 func init() {
@@ -517,6 +521,14 @@ func (t *Server) SetShardID(shardID int) {
 	t.ShardID = shardID
 }
 
+func (t *Server) SetGlobalRowStart(globalRowStart int) error {
+	if globalRowStart < 0 {
+		return fmt.Errorf("global row start must be non-negative")
+	}
+	t.globalRowStart = globalRowStart
+	return nil
+}
+
 func (t *Server) currentEpochMeta() EpochMeta {
 	reply := make(chan controlSnapshot, 1)
 	t.controlCh <- controlSnapshotCommand{reply: reply}
@@ -548,7 +560,7 @@ func (t *Server) stopEpochTimer() {
 	<-reply
 }
 
-func extractPublishedSlots(matrix *BitMatrix) []PublishedSlot {
+func extractPublishedSlots(matrix *BitMatrix, globalRowStart int) []PublishedSlot {
 	var zeros SlotContents
 	out := make([]PublishedSlot, 0)
 	for row := 0; row < TABLE_HEIGHT; row++ {
@@ -559,7 +571,7 @@ func extractPublishedSlots(matrix *BitMatrix) []PublishedSlot {
 			copy(slot[:], matrix[row][start:end])
 			if slot != zeros {
 				out = append(out, PublishedSlot{
-					Row:        row,
+					Row:        globalRowStart + row,
 					Column:     col,
 					MessageHex: fmt.Sprintf("%x", slot[:]),
 				})
@@ -586,10 +598,12 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 		ShardID:          t.ShardID,
 		ServerIndex:      t.ServerIdx,
 		CompletedAt:      completedAt.UTC(),
+		GlobalStartRow:   t.globalRowStart,
+		GlobalEndRow:     t.globalRowStart + TABLE_HEIGHT,
 		TableHeight:      TABLE_HEIGHT,
 		TableWidth:       TABLE_WIDTH,
 		SlotLength:       SLOT_LENGTH,
-		Slots:            extractPublishedSlots(plaintext),
+		Slots:            extractPublishedSlots(plaintext, t.globalRowStart),
 		NonZeroSlotCount: 0,
 	}
 	result.NonZeroSlotCount = len(result.Slots)

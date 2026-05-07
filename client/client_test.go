@@ -102,7 +102,7 @@ func TestResolveMessageProvider(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			provider, err := resolveMessageProvider(tc.x, tc.y, tc.payload)
+			provider, err := resolveMessageProvider(tc.x, tc.y, tc.payload, db.TABLE_HEIGHT)
 			if tc.wantErr != "" {
 				if err == nil || err.Error() != tc.wantErr {
 					t.Fatalf("expected error %q, got %v", tc.wantErr, err)
@@ -112,14 +112,14 @@ func TestResolveMessageProvider(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
 			}
-			msg, err := provider()
+			req, err := provider()
 			if err != nil {
 				t.Fatalf("message provider returned unexpected error: %v", err)
 			}
-			if msg.X != tc.wantX || msg.Y != tc.wantY {
-				t.Fatalf("expected coordinates (%d,%d), got (%d,%d)", tc.wantX, tc.wantY, msg.X, msg.Y)
+			if req.msg.X != tc.wantX || req.msg.Y != tc.wantY || req.routeRow != tc.wantY {
+				t.Fatalf("expected coordinates (%d,%d) route row %d, got (%d,%d) route row %d", tc.wantX, tc.wantY, tc.wantY, req.msg.X, req.msg.Y, req.routeRow)
 			}
-			gotPayload := string(msg.Message[:len(tc.wantPayload)])
+			gotPayload := string(req.msg.Message[:len(tc.wantPayload)])
 			if gotPayload != tc.wantPayload {
 				t.Fatalf("expected payload %q, got %q", tc.wantPayload, gotPayload)
 			}
@@ -128,27 +128,47 @@ func TestResolveMessageProvider(t *testing.T) {
 }
 
 func TestResolveMessageProviderRandomFallback(t *testing.T) {
-	provider, err := resolveMessageProvider(-1, -1, "")
+	provider, err := resolveMessageProvider(-1, -1, "", db.TABLE_HEIGHT)
 	if err != nil {
 		t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
 	}
-	msg, err := provider()
+	req, err := provider()
 	if err != nil {
 		t.Fatalf("message provider returned unexpected error: %v", err)
 	}
-	if msg == nil {
+	if req.msg == nil {
 		t.Fatal("message provider returned nil message")
 	}
-	if msg.X < 0 || msg.X >= 256 {
-		t.Fatalf("random message X out of range: %d", msg.X)
+	if req.msg.X < 0 || req.msg.X >= db.TABLE_WIDTH {
+		t.Fatalf("random message X out of range: %d", req.msg.X)
 	}
-	if msg.Y < 0 || msg.Y >= 256 {
-		t.Fatalf("random message Y out of range: %d", msg.Y)
+	if req.msg.Y < 0 || req.msg.Y >= db.TABLE_HEIGHT {
+		t.Fatalf("random message Y out of range: %d", req.msg.Y)
+	}
+	if req.routeRow != req.msg.Y {
+		t.Fatalf("expected local random route row %d, got %d", req.msg.Y, req.routeRow)
+	}
+}
+
+func TestResolveMessageProviderCoordinatorGlobalRows(t *testing.T) {
+	provider, err := resolveMessageProvider(3, db.TABLE_HEIGHT, "global", 2*db.TABLE_HEIGHT)
+	if err != nil {
+		t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
+	}
+	req, err := provider()
+	if err != nil {
+		t.Fatalf("message provider returned unexpected error: %v", err)
+	}
+	if req.routeRow != db.TABLE_HEIGHT {
+		t.Fatalf("expected global route row %d, got %d", db.TABLE_HEIGHT, req.routeRow)
+	}
+	if req.msg.Y != 0 {
+		t.Fatalf("expected local plaintext row 0 for global row %d, got %d", db.TABLE_HEIGHT, req.msg.Y)
 	}
 }
 
 func TestResolveMessageProviderExactReusesMessage(t *testing.T) {
-	provider, err := resolveMessageProvider(3, 5, "same")
+	provider, err := resolveMessageProvider(3, 5, "same", db.TABLE_HEIGHT)
 	if err != nil {
 		t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
 	}
@@ -160,8 +180,11 @@ func TestResolveMessageProviderExactReusesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("message provider returned unexpected error: %v", err)
 	}
-	if first != second {
+	if first.msg != second.msg {
 		t.Fatal("expected exact-message provider to reuse the deterministic message")
+	}
+	if first.routeRow != 5 || second.routeRow != 5 {
+		t.Fatalf("expected exact route row 5, got first=%d second=%d", first.routeRow, second.routeRow)
 	}
 }
 
@@ -177,7 +200,7 @@ func TestResolveMessageProviderRandomGeneratesEachTime(t *testing.T) {
 		return &db.Plaintext{X: calls, Y: calls}, nil
 	}
 
-	provider, err := resolveMessageProvider(-1, -1, "")
+	provider, err := resolveMessageProvider(-1, -1, "", db.TABLE_HEIGHT)
 	if err != nil {
 		t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
 	}
@@ -192,7 +215,7 @@ func TestResolveMessageProviderRandomGeneratesEachTime(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("expected random generator to be called twice, got %d", calls)
 	}
-	if first == second || first.X == second.X || first.Y == second.Y {
+	if first.msg == second.msg || first.msg.X == second.msg.X || first.msg.Y == second.msg.Y {
 		t.Fatalf("expected fresh random messages, got first=%v second=%v", first, second)
 	}
 }
@@ -208,7 +231,7 @@ func TestResolveMessageProviderRandomError(t *testing.T) {
 		return nil, wantErr
 	}
 
-	provider, err := resolveMessageProvider(-1, -1, "")
+	provider, err := resolveMessageProvider(-1, -1, "", db.TABLE_HEIGHT)
 	if err != nil {
 		t.Fatalf("resolveMessageProvider returned unexpected error: %v", err)
 	}
@@ -220,13 +243,14 @@ func TestResolveMessageProviderRandomError(t *testing.T) {
 func TestUploadWithOverloadRetryDisabledReturnsOverload(t *testing.T) {
 	wantErr := errors.New("server overloaded: ready queue full")
 	msg := &db.Plaintext{X: 1, Y: 2}
+	req := uploadRequest{msg: msg, routeRow: msg.Y}
 	calls := 0
 	err := uploadWithOverloadRetry(
-		msg,
+		req,
 		overloadRetryConfig{},
-		func(got *db.Plaintext) error {
+		func(got uploadRequest) error {
 			calls++
-			if got != msg {
+			if got.msg != msg || got.routeRow != msg.Y {
 				t.Fatal("expected upload to receive original message")
 			}
 			return wantErr
@@ -245,6 +269,7 @@ func TestUploadWithOverloadRetryDisabledReturnsOverload(t *testing.T) {
 
 func TestUploadWithOverloadRetryRetriesSamePlaintext(t *testing.T) {
 	msg := &db.Plaintext{X: 3, Y: 4}
+	req := uploadRequest{msg: msg, routeRow: msg.Y}
 	config := overloadRetryConfig{
 		enabled:        true,
 		initialBackoff: 10 * time.Millisecond,
@@ -253,11 +278,11 @@ func TestUploadWithOverloadRetryRetriesSamePlaintext(t *testing.T) {
 	calls := 0
 	var sleeps []time.Duration
 	err := uploadWithOverloadRetry(
-		msg,
+		req,
 		config,
-		func(got *db.Plaintext) error {
+		func(got uploadRequest) error {
 			calls++
-			if got != msg {
+			if got.msg != msg || got.routeRow != msg.Y {
 				t.Fatal("expected retry to reuse the same plaintext")
 			}
 			if calls <= 3 {
@@ -295,10 +320,11 @@ func TestUploadWithOverloadRetryBackoffResetsAfterSuccess(t *testing.T) {
 	var sleeps []time.Duration
 	for i := 0; i < 2; i++ {
 		calls := 0
+		req := uploadRequest{msg: &db.Plaintext{X: i, Y: i}, routeRow: i}
 		err := uploadWithOverloadRetry(
-			&db.Plaintext{X: i, Y: i},
+			req,
 			config,
-			func(*db.Plaintext) error {
+			func(uploadRequest) error {
 				calls++
 				if calls == 1 {
 					return errors.New("server overloaded: ready queue full")
@@ -332,9 +358,9 @@ func TestUploadWithOverloadRetryStopsOnNoActiveEpoch(t *testing.T) {
 	}
 	calls := 0
 	err := uploadWithOverloadRetry(
-		&db.Plaintext{},
+		uploadRequest{msg: &db.Plaintext{}},
 		config,
-		func(*db.Plaintext) error {
+		func(uploadRequest) error {
 			calls++
 			if calls == 1 {
 				return errors.New("server overloaded: ready queue full")
@@ -359,9 +385,9 @@ func TestUploadWithOverloadRetryReturnsUnexpectedError(t *testing.T) {
 	}
 	wantErr := errors.New("unexpected EOF")
 	err := uploadWithOverloadRetry(
-		&db.Plaintext{},
+		uploadRequest{msg: &db.Plaintext{}},
 		config,
-		func(*db.Plaintext) error {
+		func(uploadRequest) error {
 			return wantErr
 		},
 		func(time.Duration) {

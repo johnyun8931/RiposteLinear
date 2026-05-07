@@ -128,6 +128,10 @@ func (t *Server) runLeaderControl() {
 				c.reply <- upload1Result{err: errors.New("No active epoch")}
 				continue
 			}
+			if c.args.RouteRow < 0 || c.args.RouteRow >= TABLE_HEIGHT {
+				c.reply <- upload1Result{err: fmt.Errorf("route row %d outside local table height %d", c.args.RouteRow, TABLE_HEIGHT)}
+				continue
+			}
 			uuid, err := utils.RandomInt64(math.MaxInt64)
 			if err != nil {
 				c.reply <- upload1Result{err: err}

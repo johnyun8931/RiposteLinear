@@ -28,6 +28,7 @@ Shard startup readiness is now enforced in the server: if a leader receives `Sta
   - coordinator `127.0.0.1:8630`
   - shard 0 leader/follower: `127.0.0.1:8610`, `127.0.0.1:8611`
   - shard 1 leader/follower: `127.0.0.1:8620`, `127.0.0.1:8621`
+  - global rows `[0,256)` route to shard 0; global rows `[256,512)` route to shard 1 and are rewritten to shard-local rows `[0,256)`
 
 ## What Was Verified
 
@@ -38,14 +39,14 @@ Shard startup readiness is now enforced in the server: if a leader receives `Sta
   - all three reported the same `epoch_id`, `start`, `end`, and `duration`
 - boundary routing and payload preservation:
   - uploaded `shard0-boundary` to `(row=0, col=1)`
-  - uploaded `shard1-boundary` to `(row=128, col=2)`
+  - uploaded `shard1-boundary` to global `(row=256, col=2)`
   - `DumpPlaintext` on shard 0 leader matched the shard 0 payload at `(0,1)`
-  - `DumpPlaintext` on shard 1 leader matched the shard 1 payload at `(128,2)`
+  - `DumpPlaintext` on shard 1 leader matched the shard 1 payload at local `(0,2)`
 - publication:
   - shard 0 wrote `/tmp/riposte-results-s0/epoch-000002-shard-0-server-0.json`
   - shard 1 wrote `/tmp/riposte-results-s1/epoch-000002-shard-1-server-0.json`
   - filenames and metadata were unambiguous across shards
-  - published slot rows stayed within the owning shard range
+  - published slot rows used global row coordinates and stayed within the owning shard range
   - published `message_hex` values matched the deterministic payload bytes
 - second epoch start:
   - a second coordinated epoch started cleanly after the first completed

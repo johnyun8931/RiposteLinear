@@ -190,7 +190,7 @@ func completeCoordinatorUpload(t *testing.T, coord *Coordinator, routeRow int) {
 }
 
 func TestParseShardConfigRequiresActivePairAndAllowsMissingStandby(t *testing.T) {
-	shard, err := parseShardConfig("0,0,128,127.0.0.1:8090,127.0.0.1:8091")
+	shard, err := parseShardConfig("0,0,256,127.0.0.1:8090,127.0.0.1:8091")
 	if err != nil {
 		t.Fatalf("parseShardConfig failed: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestParseShardConfigRequiresActivePairAndAllowsMissingStandby(t *testing.T)
 		t.Fatalf("expected nil standby, got %+v", shard.Standby)
 	}
 
-	shard, err = parseShardConfig("1,128,256,127.0.0.1:8190,127.0.0.1:8191,127.0.0.1:8290|127.0.0.1:8291")
+	shard, err = parseShardConfig("1,256,512,127.0.0.1:8190,127.0.0.1:8191,127.0.0.1:8290|127.0.0.1:8291")
 	if err != nil {
 		t.Fatalf("parseShardConfig with standby failed: %v", err)
 	}
@@ -209,32 +209,32 @@ func TestParseShardConfigRequiresActivePairAndAllowsMissingStandby(t *testing.T)
 		t.Fatalf("unexpected standby pair: %+v", shard.Standby)
 	}
 
-	_, err = parseShardConfig("2,0,128,127.0.0.1:8090,")
+	_, err = parseShardConfig("2,0,256,127.0.0.1:8090,")
 	if err == nil {
 		t.Fatal("expected missing active follower to fail")
 	}
 }
 
-func TestValidateShardMapRejectsOutOfRangeGapAndOverlap(t *testing.T) {
+func TestValidateShardMapRejectsBadHeightGapAndOverlap(t *testing.T) {
 	_, err := validateShardMap([]ShardConfig{
 		activeOnlyShard(0, 0, 128),
 		activeOnlyShard(1, 128, 300),
 	})
 	if err == nil {
-		t.Fatal("expected out-of-range shard map to fail")
+		t.Fatal("expected wrong-height shard map to fail")
 	}
 
 	_, err = validateShardMap([]ShardConfig{
-		activeOnlyShard(0, 0, 100),
-		activeOnlyShard(1, 120, db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT+10, 2*db.TABLE_HEIGHT+10),
 	})
 	if err == nil {
 		t.Fatal("expected gap shard map to fail")
 	}
 
 	_, err = validateShardMap([]ShardConfig{
-		activeOnlyShard(0, 0, 140),
-		activeOnlyShard(1, 120, db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT-10, 2*db.TABLE_HEIGHT-10),
 	})
 	if err == nil {
 		t.Fatal("expected overlap shard map to fail")
@@ -243,8 +243,8 @@ func TestValidateShardMapRejectsOutOfRangeGapAndOverlap(t *testing.T) {
 
 func TestValidateShardMapAcceptsContiguousCoverage(t *testing.T) {
 	_, err := validateShardMap([]ShardConfig{
-		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
-		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
 	})
 	if err != nil {
 		t.Fatalf("expected contiguous shard map to pass, got %v", err)
@@ -255,8 +255,8 @@ func TestCoordinatorRoutesBoundaryRowsAndPreservesSessionMapping(t *testing.T) {
 	left := &fakeShardClient{}
 	right := &fakeShardClient{}
 	coord := mustCoordinator(t, []ShardConfig{
-		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
-		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
 	}, map[int]shardClient{
 		0: left,
 		1: right,
@@ -264,15 +264,24 @@ func TestCoordinatorRoutesBoundaryRowsAndPreservesSessionMapping(t *testing.T) {
 	setCoordinatorActiveEpoch(t, coord, db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60})
 
 	var up1Left db.UploadReply1
-	if err := coord.Upload1(&db.UploadArgs1{RouteRow: db.TABLE_HEIGHT/2 - 1}, &up1Left); err != nil {
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: db.TABLE_HEIGHT - 1}, &up1Left); err != nil {
 		t.Fatalf("Upload1 left failed: %v", err)
 	}
 	var up1Right db.UploadReply1
-	if err := coord.Upload1(&db.UploadArgs1{RouteRow: db.TABLE_HEIGHT / 2}, &up1Right); err != nil {
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: db.TABLE_HEIGHT}, &up1Right); err != nil {
 		t.Fatalf("Upload1 right failed: %v", err)
 	}
 	if left.upload1Calls != 1 || right.upload1Calls != 1 {
 		t.Fatalf("expected one routed upload1 per shard, got left=%d right=%d", left.upload1Calls, right.upload1Calls)
+	}
+	if left.lastUpload1.RouteRow != db.TABLE_HEIGHT-1 {
+		t.Fatalf("expected shard 0 local route row %d, got %d", db.TABLE_HEIGHT-1, left.lastUpload1.RouteRow)
+	}
+	if right.lastUpload1.RouteRow != 0 {
+		t.Fatalf("expected shard 1 local route row 0, got %d", right.lastUpload1.RouteRow)
+	}
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: 2 * db.TABLE_HEIGHT}, &db.UploadReply1{}); err == nil {
+		t.Fatal("expected global route row outside the configured table to fail")
 	}
 
 	up2 := db.UploadArgs2{Uuid: up1Right.Uuid, HashKey: up1Right.HashKey}
@@ -490,8 +499,8 @@ func TestCoordinatorStartEpochRequiresAllShardsAndAbortsStartedShardOnFailure(t 
 	}}
 	right := &fakeShardClient{startErr: errors.New("boom")}
 	coord := mustCoordinator(t, []ShardConfig{
-		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
-		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
 	}, map[int]shardClient{0: left, 1: right})
 
 	err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{})
@@ -576,8 +585,8 @@ func TestCoordinatorStartEpochProducesSharedMetadata(t *testing.T) {
 	left := &fakeShardClient{startReply: reply}
 	right := &fakeShardClient{startReply: reply}
 	coord := mustCoordinator(t, []ShardConfig{
-		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
-		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
 	}, map[int]shardClient{0: left, 1: right})
 
 	var startReply db.StartEpochReply
@@ -826,8 +835,8 @@ func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 	rightStatus.ShardID = 1
 
 	coord := mustCoordinator(t, []ShardConfig{
-		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
-		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
 	}, map[int]shardClient{
 		0: &fakeShardClient{statusReply: leftStatus},
 		1: &fakeShardClient{statusReply: rightStatus},
@@ -855,6 +864,9 @@ func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 	}
 	if reply.CurrentShardCount != 2 || reply.RecommendedNextShardCount != 2 {
 		t.Fatalf("unexpected default scaling shard counts: current=%d recommended=%d", reply.CurrentShardCount, reply.RecommendedNextShardCount)
+	}
+	if reply.GlobalTableHeight != 2*db.TABLE_HEIGHT {
+		t.Fatalf("unexpected global table height: %d", reply.GlobalTableHeight)
 	}
 	if reply.TargetRowsPerShard != db.TABLE_HEIGHT {
 		t.Fatalf("unexpected target rows per shard: %d", reply.TargetRowsPerShard)
@@ -911,15 +923,15 @@ func TestCoordinatorStatusIncludesStandbyHealthWhenConfigured(t *testing.T) {
 func TestCoordinatorStatusScalingDoesNotMutateRoutingOrControlStore(t *testing.T) {
 	store := newMemoryControlStore(7)
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
-		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
-		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
 	}, map[int]shardClient{
 		0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}},
 		1: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 1}},
 	}, store, defaultCoordinatorLeaseHolder, testLeaseTTL, testLeaseRenewInterval)
 
 	beforeVersion := store.ShardConfigVersion()
-	beforeShard, err := coord.routeShard(db.TABLE_HEIGHT / 2)
+	beforeShard, err := coord.routeShard(db.TABLE_HEIGHT)
 	if err != nil {
 		t.Fatalf("routeShard failed before status: %v", err)
 	}
@@ -929,7 +941,7 @@ func TestCoordinatorStatusScalingDoesNotMutateRoutingOrControlStore(t *testing.T
 		t.Fatalf("Coordinator.Status failed: %v", err)
 	}
 
-	afterShard, err := coord.routeShard(db.TABLE_HEIGHT / 2)
+	afterShard, err := coord.routeShard(db.TABLE_HEIGHT)
 	if err != nil {
 		t.Fatalf("routeShard failed after status: %v", err)
 	}
@@ -1056,8 +1068,8 @@ func TestCoordinatorCloseStopsHealthLoop(t *testing.T) {
 
 func TestCoordinatorStatusRecordsUnreachableShardErrors(t *testing.T) {
 	coord := mustCoordinator(t, []ShardConfig{
-		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
-		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
 	}, map[int]shardClient{
 		0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}},
 		1: &fakeShardClient{statusErr: errors.New("dial failed")},
@@ -1077,8 +1089,8 @@ func TestCoordinatorStatusRecordsUnreachableShardErrors(t *testing.T) {
 
 func TestCoordinatorStatusTimeoutDoesNotFailWholeCall(t *testing.T) {
 	coord := mustCoordinator(t, []ShardConfig{
-		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
-		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
 	}, map[int]shardClient{
 		0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}},
 		1: &fakeShardClient{statusDelay: 50 * time.Millisecond},

@@ -97,10 +97,13 @@ func (r *rpcShardClient) Close() error {
 }
 
 type routedSession struct {
-	shardID   int
-	localUUID int64
-	hashKey   [32]byte
-	epochID   int64
+	shardID       int
+	localUUID     int64
+	hashKey       [32]byte
+	epochID       int64
+	globalRow     int
+	localRow      int
+	shardStartRow int
 }
 
 type pairHealthSnapshot struct {
@@ -259,11 +262,11 @@ func validateShardMap(shards []ShardConfig) ([]ShardConfig, error) {
 			return nil, fmt.Errorf("duplicate shard id %d", shard.ID)
 		}
 		seenIDs[shard.ID] = true
-		if shard.StartRow < 0 || shard.EndRow > db.TABLE_HEIGHT {
-			return nil, fmt.Errorf("shard %d range [%d,%d) outside [0,%d)", shard.ID, shard.StartRow, shard.EndRow, db.TABLE_HEIGHT)
+		if shard.StartRow < 0 {
+			return nil, fmt.Errorf("shard %d has negative start row %d", shard.ID, shard.StartRow)
 		}
-		if shard.EndRow <= shard.StartRow {
-			return nil, fmt.Errorf("shard %d has empty or inverted range [%d,%d)", shard.ID, shard.StartRow, shard.EndRow)
+		if shard.EndRow-shard.StartRow != db.TABLE_HEIGHT {
+			return nil, fmt.Errorf("shard %d range [%d,%d) must have height %d", shard.ID, shard.StartRow, shard.EndRow, db.TABLE_HEIGHT)
 		}
 		if shard.Active.LeaderAddr == "" || shard.Active.FollowerAddr == "" {
 			return nil, fmt.Errorf("shard %d missing active pair addresses", shard.ID)
@@ -276,8 +279,8 @@ func validateShardMap(shards []ShardConfig) ([]ShardConfig, error) {
 		}
 		expectedStart = shard.EndRow
 	}
-	if expectedStart != db.TABLE_HEIGHT {
-		return nil, fmt.Errorf("shard map ends at row %d, want %d", expectedStart, db.TABLE_HEIGHT)
+	if expectedStart != len(sorted)*db.TABLE_HEIGHT {
+		return nil, fmt.Errorf("shard map ends at row %d, want %d", expectedStart, len(sorted)*db.TABLE_HEIGHT)
 	}
 
 	return sorted, nil
@@ -569,6 +572,10 @@ func (c *Coordinator) routeShard(row int) (ShardConfig, error) {
 	return ShardConfig{}, fmt.Errorf("row %d outside shard map", row)
 }
 
+func globalTableHeightForShards(shards []ShardConfig) int {
+	return len(shards) * db.TABLE_HEIGHT
+}
+
 func (c *Coordinator) nextGlobalUUIDLocked() (int64, error) {
 	if c.nextUUID == math.MaxInt64 {
 		return 0, errors.New("coordinator session space exhausted")
@@ -603,8 +610,11 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 		return fmt.Errorf("missing shard client for shard %d", shard.ID)
 	}
 
+	localArgs := *args
+	localArgs.RouteRow = args.RouteRow - shard.StartRow
+
 	var shardReply db.UploadReply1
-	if err := client.Upload1(args, &shardReply); err != nil {
+	if err := client.Upload1(&localArgs, &shardReply); err != nil {
 		return err
 	}
 
@@ -615,10 +625,13 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 		return err
 	}
 	c.sessions[globalUUID] = routedSession{
-		shardID:   shard.ID,
-		localUUID: shardReply.Uuid,
-		hashKey:   shardReply.HashKey,
-		epochID:   epoch.ID,
+		shardID:       shard.ID,
+		localUUID:     shardReply.Uuid,
+		hashKey:       shardReply.HashKey,
+		epochID:       epoch.ID,
+		globalRow:     args.RouteRow,
+		localRow:      localArgs.RouteRow,
+		shardStartRow: shard.StartRow,
 	}
 	reply.Uuid = globalUUID
 	reply.HashKey = shardReply.HashKey
@@ -1002,6 +1015,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	reply.Healthy = true
 	reply.Role = role
 	reply.LeaderAddr = ""
+	reply.GlobalTableHeight = globalTableHeightForShards(shards)
 	reply.EpochID = epoch.ID
 	reply.State = epoch.State.String()
 	reply.StartUnix = epoch.StartTime.Unix()

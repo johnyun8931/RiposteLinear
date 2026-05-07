@@ -15,7 +15,7 @@ if dynamodb_control_enabled; then
 fi
 
 SMOKE_LOCAL_DIR="$STATE_DIR/smoke"
-SMOKE_EPOCH_SECONDS="${SMOKE_EPOCH_SECONDS:-8}"
+SMOKE_EPOCH_SECONDS="${SMOKE_EPOCH_SECONDS:-30}"
 SMOKE_RESULTS_REMOTE="$(smoke_results_dir)"
 SMOKE_LOGS_REMOTE="$(smoke_log_dir)"
 
@@ -84,12 +84,13 @@ assert_remote_scaling_status() {
   local path="$1"
   local epoch_id="$2"
   local accepted_requests="$3"
+  local expected_global_height="$4"
 
-  remote_cmd "$COORDINATOR_PUBLIC_IP" "python3 - '$path' '$epoch_id' '$accepted_requests' <<'PY'
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "python3 - '$path' '$epoch_id' '$accepted_requests' '$expected_global_height' <<'PY'
 import json
 import sys
 
-path, epoch_id, accepted_requests = sys.argv[1:]
+path, epoch_id, accepted_requests, expected_global_height = sys.argv[1:]
 status = json.load(open(path))
 
 if int(status.get('scaling_epoch_id', 0)) != int(epoch_id):
@@ -102,6 +103,8 @@ if 'request_density' not in status:
     raise SystemExit('missing request_density')
 if not status.get('scaling_action'):
     raise SystemExit('missing scaling_action')
+if int(status.get('global_table_height', 0)) != int(expected_global_height):
+    raise SystemExit(f\"global_table_height mismatch: expected {expected_global_height}, got {status.get('global_table_height')}\")
 PY"
 }
 
@@ -142,13 +145,13 @@ assert_dynamodb_smoke_state active "$epoch_id" true true
 
 info "sending deterministic smoke writes through the coordinator"
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 1 -y 0 -payload shard0-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row0.log'"
-remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 2 -y 128 -payload shard1-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row128.log'"
+remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 2 -y 256 -payload shard1-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row256.log'"
 
 wait_for_epoch_complete coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" 120
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
-assert_remote_scaling_status "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json" "$epoch_id" 2
+assert_remote_scaling_status "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json" "$epoch_id" 2 512
 capture_dynamodb_smoke_state completed
 assert_dynamodb_smoke_state completed "$epoch_id" false
 
@@ -160,8 +163,8 @@ copy_from_remote "$SHARD1_LEADER_PUBLIC_IP" "$SMOKE_RESULTS_REMOTE/shard1/$(resu
 [[ -f "$local_shard0" ]] || die "missing shard0 result file: $local_shard0"
 [[ -f "$local_shard1" ]] || die "missing shard1 result file: $local_shard1"
 
-assert_result_contains_slot "$local_shard0" 0 0 128 0 1 "shard0-boundary"
-assert_result_contains_slot "$local_shard1" 1 128 256 128 2 "shard1-boundary"
+assert_result_contains_slot "$local_shard0" 0 0 256 0 1 "shard0-boundary"
+assert_result_contains_slot "$local_shard1" 1 256 512 256 2 "shard1-boundary"
 
 cat <<EOF
 AWS smoke test passed.

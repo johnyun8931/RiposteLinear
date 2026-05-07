@@ -41,7 +41,12 @@ var count int
 
 var randomMessage = db.RandomMessage
 
-type messageProvider func() (*db.Plaintext, error)
+type uploadRequest struct {
+	msg      *db.Plaintext
+	routeRow int
+}
+
+type messageProvider func() (uploadRequest, error)
 
 type overloadRetryConfig struct {
 	enabled        bool
@@ -49,14 +54,15 @@ type overloadRetryConfig struct {
 	maxBackoff     time.Duration
 }
 
-func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
+func tryUpload(client *rpc.Client, req uploadRequest) error {
 	var upRes1 db.UploadReply1
 	var upArgs1 db.UploadArgs1
 
-	msgBitShares, err := db.InitializeUploadArgs(&upArgs1, msg, *bogusFlag)
+	msgBitShares, err := db.InitializeUploadArgs(&upArgs1, req.msg, *bogusFlag)
 	if err != nil {
 		panic("Error initializing upload args")
 	}
+	upArgs1.RouteRow = req.routeRow
 
 	//var buf []byte
 	//b := bytes.NewBuffer(buf)
@@ -81,7 +87,7 @@ func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
 	}
 
 	var upRes3 db.UploadReply3
-	upArgs3 := db.SetUploadArgs3(msg, mint, &upArgs1, &upRes1, upArgs2, &upRes2)
+	upArgs3 := db.SetUploadArgs3(req.msg, mint, &upArgs1, &upRes1, upArgs2, &upRes2)
 
 	// Get third msg
 	err = client.Call("Server.Upload3", &upArgs3, &upRes3)
@@ -101,10 +107,10 @@ func isOverloadError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "server overloaded: ready queue full")
 }
 
-func uploadWithOverloadRetry(msg *db.Plaintext, config overloadRetryConfig, upload func(*db.Plaintext) error, sleep func(time.Duration)) error {
+func uploadWithOverloadRetry(req uploadRequest, config overloadRetryConfig, upload func(uploadRequest) error, sleep func(time.Duration)) error {
 	backoff := config.initialBackoff
 	for {
-		err := upload(msg)
+		err := upload(req)
 		if err == nil {
 			return nil
 		}
@@ -169,12 +175,12 @@ func runClientWithStop(server string, nextMessage messageProvider, retryConfig o
 			}
 
 		} else {
-			msg, err := nextMessage()
+			req, err := nextMessage()
 			if err != nil {
 				return err
 			}
-			err = uploadWithOverloadRetry(msg, retryConfig, func(msg *db.Plaintext) error {
-				return tryUpload(client, msg)
+			err = uploadWithOverloadRetry(req, retryConfig, func(req uploadRequest) error {
+				return tryUpload(client, req)
 			}, time.Sleep)
 			if err != nil {
 				log.Printf("Upload error: %v", err)
@@ -186,10 +192,37 @@ func runClientWithStop(server string, nextMessage messageProvider, retryConfig o
 	})
 }
 
-func resolveMessageProvider(x, y int, payload string) (messageProvider, error) {
+func randomLocalUploadRequest() (uploadRequest, error) {
+	msg, err := randomMessage()
+	if err != nil {
+		return uploadRequest{}, err
+	}
+	return uploadRequest{msg: msg, routeRow: msg.Y}, nil
+}
+
+func randomCoordinatorUploadRequest(globalTableHeight int) (uploadRequest, error) {
+	if globalTableHeight <= 0 {
+		return uploadRequest{}, errors.New("global table height must be positive")
+	}
+	msg := new(db.Plaintext)
+	msg.X = utils.RandIntShort(db.TABLE_WIDTH)
+	globalRow := utils.RandIntShort(globalTableHeight)
+	msg.Y = globalRow % db.TABLE_HEIGHT
+	if err := db.RandomSlot(&msg.Message); err != nil {
+		return uploadRequest{}, err
+	}
+	return uploadRequest{msg: msg, routeRow: globalRow}, nil
+}
+
+func resolveMessageProvider(x, y int, payload string, globalTableHeight int) (messageProvider, error) {
 	exactRequested := x >= 0 || y >= 0 || payload != ""
 	if !exactRequested {
-		return randomMessage, nil
+		if globalTableHeight > db.TABLE_HEIGHT {
+			return func() (uploadRequest, error) {
+				return randomCoordinatorUploadRequest(globalTableHeight)
+			}, nil
+		}
+		return randomLocalUploadRequest, nil
 	}
 	if x < 0 || y < 0 || payload == "" {
 		return nil, errors.New("must specify all of -x, -y, and -payload")
@@ -197,8 +230,12 @@ func resolveMessageProvider(x, y int, payload string) (messageProvider, error) {
 	if x >= db.TABLE_WIDTH {
 		return nil, fmt.Errorf("-x must be in [0,%d)", db.TABLE_WIDTH)
 	}
-	if y >= db.TABLE_HEIGHT {
-		return nil, fmt.Errorf("-y must be in [0,%d)", db.TABLE_HEIGHT)
+	rowLimit := db.TABLE_HEIGHT
+	if globalTableHeight > rowLimit {
+		rowLimit = globalTableHeight
+	}
+	if y >= rowLimit {
+		return nil, fmt.Errorf("-y must be in [0,%d)", rowLimit)
 	}
 	if len(payload) > db.SLOT_LENGTH {
 		return nil, fmt.Errorf("-payload must be at most %d bytes", db.SLOT_LENGTH)
@@ -206,14 +243,29 @@ func resolveMessageProvider(x, y int, payload string) (messageProvider, error) {
 
 	msg := new(db.Plaintext)
 	msg.X = x
-	msg.Y = y
+	msg.Y = y % db.TABLE_HEIGHT
 	copy(msg.Message[:], []byte(payload))
-	return func() (*db.Plaintext, error) {
-		return msg, nil
+	return func() (uploadRequest, error) {
+		return uploadRequest{msg: msg, routeRow: y}, nil
 	}, nil
 }
 
-func runClientWorker(target string, shouldStop func() bool, signalStop func()) error {
+func queryCoordinatorGlobalTableHeight(target string) (int, error) {
+	certs := make([]tls.Certificate, 1)
+	certs[0] = utils.LeaderCertificate
+	client, err := utils.DialHTTPWithTLS("tcp", target, -1, certs)
+	if err != nil {
+		return 0, err
+	}
+	defer client.Close()
+	var reply db.CoordinatorStatusReply
+	if err := client.Call("Server.Status", &db.CoordinatorStatusArgs{}, &reply); err != nil {
+		return 0, err
+	}
+	return reply.GlobalTableHeight, nil
+}
+
+func runClientWorker(target string, globalTableHeight int, shouldStop func() bool, signalStop func()) error {
 	retryConfig, err := resolveOverloadRetryConfig(*hammerFlag && *retryOverloadFlag, *overloadBackoffInitialFlag, *overloadBackoffMaxFlag)
 	if err != nil {
 		return err
@@ -222,7 +274,7 @@ func runClientWorker(target string, shouldStop func() bool, signalStop func()) e
 		return runClientWithStop(target, nil, retryConfig, shouldStop, signalStop)
 	}
 	//log.Printf("=== Starting Client ===")
-	nextMessage, err := resolveMessageProvider(*xFlag, *yFlag, *payloadFlag)
+	nextMessage, err := resolveMessageProvider(*xFlag, *yFlag, *payloadFlag, globalTableHeight)
 	if err != nil {
 		return err
 	}
@@ -333,9 +385,17 @@ func main() {
 
 	defer log.Printf("Client died.")
 
+	globalTableHeight := db.TABLE_HEIGHT
+	if *coordinatorFlag != "" {
+		globalTableHeight, err = queryCoordinatorGlobalTableHeight(target)
+		if err != nil {
+			log.Fatal("Could not query coordinator status: ", err)
+		}
+	}
+
 	// Make one request
 	if !*hammerFlag {
-		err = runClientWorker(target, nil, nil)
+		err = runClientWorker(target, globalTableHeight, nil, nil)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -348,7 +408,7 @@ func main() {
 		err = runHammerClients(
 			concurrent,
 			func(shouldStop func() bool, signalStop func()) error {
-				return runClientWorker(target, shouldStop, signalStop)
+				return runClientWorker(target, globalTableHeight, shouldStop, signalStop)
 			},
 		)
 		if err != nil {

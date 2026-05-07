@@ -24,8 +24,8 @@ Current rough edges / future work in the first Phase 3 cut:
 - coordinator `EpochStatus()` currently reports only coordinator-local shared state, not live fanout status from shard leaders
 - `StartEpoch` fans out to shard leaders serially today; parallel fanout may be worth adding later if epoch-start latency starts to matter
 - coordinator epoch start currently uses all-or-nothing fanout with best-effort rollback on partial failure; it is not a full 2PC/3PC-style durable commit protocol
-- current sharding splits routed write traffic by row range, but each shard still allocates and processes the full global table shape (`256x256`); shard 1 stores global rows like `128`, not local row `0`
-- true row-local shards would require a later data-layout/protocol change so each shard stores only its assigned row range and maps global rows to shard-local rows
+- sharding now treats each shard as adding one full local table of rows to the global dataset; with two shards the coordinator routes global rows `[0,512)` and rewrites shard 1 global row `256` to local row `0`
+- each shard still uses the same fixed local table shape internally; runtime-resizable local shard height remains future work
 - hammer random mode now generates a fresh random message per upload; deterministic `-x` / `-y` / `-payload` mode remains fixed for targeted verification writes
 - `Standby` pair config exists to prepare for future failover work; coordinator status now monitors active/standby health, but routing still uses only the active shard leader
 - transport/auth still relies on the older certificate/index assumptions from the pre-coordinator architecture

@@ -18,8 +18,9 @@ request_density = accepted_requests / current_logical_rows
 ```
 
 `target_rows_per_shard` defaults to `db.TABLE_HEIGHT`, currently `256`. The
-logical dataset size is implicit: each shard contributes the same fixed number
-of rows.
+logical dataset size is explicit in the coordinator shard map: each shard
+contributes one full local table of rows, so `global_table_height =
+shard_count * db.TABLE_HEIGHT`.
 
 The current coordinator metrics are local and in-memory. During an active epoch,
 the coordinator counts an upload only after `Upload3` succeeds and the routed
@@ -88,8 +89,8 @@ logical_rows = shard_count * target_rows_per_shard
 
 ## Current Boundary
 
-This document is scaffolding only. Existing table dimensions are compile-time
-constants, runtime table resizing is not implemented, and recommendations are
-not applied to the coordinator shard map yet. Applying a new shard count at
-epoch boundaries, recording metrics durably, and changing the data layout for
-true row-local shards remain future work.
+This document is scaffolding only. Existing per-shard table dimensions are
+compile-time constants, runtime local table resizing is not implemented, and
+recommendations are not applied to the coordinator shard map yet. Applying a
+new shard count at epoch boundaries and recording metrics durably remain future
+work.

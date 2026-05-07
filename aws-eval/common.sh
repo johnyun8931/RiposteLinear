@@ -42,6 +42,7 @@ REMOTE_ROOT="${REMOTE_ROOT:-/tmp/riposte-eval}"
 REMOTE_BIN_DIR="$REMOTE_ROOT/bin"
 REMOTE_PHASES_DIR="$REMOTE_ROOT/phases"
 REMOTE_SMOKE_DIR="$REMOTE_ROOT/smoke"
+ROWS_PER_SHARD=256
 
 STATE_DIR="$SCRIPT_DIR/.state"
 STATE_FILE="$STATE_DIR/env.sh"
@@ -440,7 +441,8 @@ start_remote_server() {
   local servers_csv="$4"
   local results_dir="$5"
   local log_path="$6"
-  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv' > '${log_path}.nohup' 2>&1 &"
+  local global_row_start=$((shard_id * ROWS_PER_SHARD))
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -global-row-start '$global_row_start' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv' > '${log_path}.nohup' 2>&1 &"
 }
 
 start_remote_coordinator() {
@@ -460,9 +462,9 @@ start_remote_coordinator() {
   mkdir_cmd="mkdir -p '$(dirname "$log_path")'"
   if [[ -n "$pid_path" ]]; then
     mkdir_cmd="$mkdir_cmd '$(dirname "$pid_path")'"
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
   else
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 &"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 &"
   fi
 }
 

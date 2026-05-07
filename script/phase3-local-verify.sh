@@ -40,24 +40,24 @@ echo "PASS: coordinator and shard leaders report matching active epoch metadata"
 
 info "Sending deterministic boundary writes"
 run_client -coordinator "$COORDINATOR_ADDR" -x 1 -y 0 -payload shard0-boundary -log "$VERIFY0_LOG"
-run_client -coordinator "$COORDINATOR_ADDR" -x 2 -y 128 -payload shard1-boundary -log "$VERIFY1_LOG"
-echo "PASS: deterministic writes to rows 0 and 128 succeeded"
+run_client -coordinator "$COORDINATOR_ADDR" -x 2 -y 256 -payload shard1-boundary -log "$VERIFY1_LOG"
+echo "PASS: deterministic writes to rows 0 and 256 succeeded"
 
 coord_complete="$(wait_for_status_state coordinator "$COORDINATOR_ADDR" completed 20)" || die "coordinator did not reach completed state"
 assert_equals "$(extract_field "$coord_complete" "epoch")" "$epoch_id" "completed epoch id"
 status_json coordinator "$COORDINATOR_ADDR" >"$TMP_DIR/status-completed-coordinator.json"
 status_json server "$SHARD0_LEADER_ADDR" >"$TMP_DIR/status-completed-shard0-leader.json"
 status_json server "$SHARD1_LEADER_ADDR" >"$TMP_DIR/status-completed-shard1-leader.json"
-assert_scaling_status "$TMP_DIR/status-completed-coordinator.json" "$epoch_id" 2
+assert_scaling_status "$TMP_DIR/status-completed-coordinator.json" "$epoch_id" 2 512
 echo "PASS: verification epoch completed"
-echo "PASS: completed coordinator status reports scaling metrics"
+echo "PASS: completed coordinator status reports scaling metrics and global table height"
 
 result_s0="$(latest_result_file "$RESULTS_S0_DIR" "$epoch_id" 0)"
 result_s1="$(latest_result_file "$RESULTS_S1_DIR" "$epoch_id" 1)"
 wait_for_file "$result_s0" 10 || die "expected file $result_s0"
 wait_for_file "$result_s1" 10 || die "expected file $result_s1"
-assert_result_contains_slot "$result_s0" 0 0 128 0 1 "shard0-boundary"
-assert_result_contains_slot "$result_s1" 1 128 256 128 2 "shard1-boundary"
+assert_result_contains_slot "$result_s0" 0 0 256 0 1 "shard0-boundary"
+assert_result_contains_slot "$result_s1" 1 256 512 256 2 "shard1-boundary"
 echo "PASS: shard-local result files are present, unambiguous, and preserve deterministic payload bytes"
 
 info "Starting a second coordinated epoch"

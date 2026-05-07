@@ -11,6 +11,7 @@ TMP_DIR="$STATE_DIR/tmp"
 RESULTS_SINGLE_DIR="$STATE_DIR/results-single"
 RESULTS_S0_DIR="$STATE_DIR/results-s0"
 RESULTS_S1_DIR="$STATE_DIR/results-s1"
+ROWS_PER_SHARD=256
 
 # utils.ListenAndServe currently slices the last 5 chars of the address, so keep
 # local verification ports at 4 digits until that helper is cleaned up.
@@ -150,12 +151,12 @@ start_sharded_topology() {
 	fi
 
 	info "Starting shard 0 (server threads=$threads)"
-	start_process "shard0-follower" "$SERVER_BIN" -idx 1 -servers "$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_S0_DIR" -log "$(log_file shard0-follower)" "${thread_args[@]}"
-	start_process "shard0-leader" "$SERVER_BIN" -idx 0 -servers "$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_S0_DIR" -log "$(log_file shard0-leader)" "${thread_args[@]}"
+	start_process "shard0-follower" "$SERVER_BIN" -idx 1 -servers "$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" -shard-id 0 -global-row-start 0 -results-dir "$RESULTS_S0_DIR" -log "$(log_file shard0-follower)" "${thread_args[@]}"
+	start_process "shard0-leader" "$SERVER_BIN" -idx 0 -servers "$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" -shard-id 0 -global-row-start 0 -results-dir "$RESULTS_S0_DIR" -log "$(log_file shard0-leader)" "${thread_args[@]}"
 
 	info "Starting shard 1 (server threads=$threads)"
-	start_process "shard1-follower" "$SERVER_BIN" -idx 1 -servers "$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR" -shard-id 1 -results-dir "$RESULTS_S1_DIR" -log "$(log_file shard1-follower)" "${thread_args[@]}"
-	start_process "shard1-leader" "$SERVER_BIN" -idx 0 -servers "$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR" -shard-id 1 -results-dir "$RESULTS_S1_DIR" -log "$(log_file shard1-leader)" "${thread_args[@]}"
+	start_process "shard1-follower" "$SERVER_BIN" -idx 1 -servers "$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR" -shard-id 1 -global-row-start "$ROWS_PER_SHARD" -results-dir "$RESULTS_S1_DIR" -log "$(log_file shard1-follower)" "${thread_args[@]}"
+	start_process "shard1-leader" "$SERVER_BIN" -idx 0 -servers "$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR" -shard-id 1 -global-row-start "$ROWS_PER_SHARD" -results-dir "$RESULTS_S1_DIR" -log "$(log_file shard1-leader)" "${thread_args[@]}"
 
 	wait_for_port "$SHARD0_LEADER_ADDR" 50 || die "shard 0 leader did not start listening"
 	wait_for_port "$SHARD1_LEADER_ADDR" 50 || die "shard 1 leader did not start listening"
@@ -163,8 +164,8 @@ start_sharded_topology() {
 
 	info "Starting coordinator"
 	start_process "coordinator" "$COORDINATOR_BIN" -listen "$COORDINATOR_ADDR" -log "$(log_file coordinator)" \
-		-shard "0,0,128,$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" \
-		-shard "1,128,256,$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR"
+		-shard "0,0,256,$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" \
+		-shard "1,256,512,$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR"
 	wait_for_port "$COORDINATOR_ADDR" 50 || die "coordinator did not start listening"
 }
 
@@ -183,8 +184,8 @@ start_baseline_pair() {
 		thread_args=(-threads "$threads")
 	fi
 	info "Starting single-shard baseline pair (server threads=$threads)"
-	start_process "baseline-follower" "$SERVER_BIN" -idx 1 -servers "$BASELINE_LEADER_ADDR,$BASELINE_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_SINGLE_DIR" -log "$(log_file baseline-follower)" "${thread_args[@]}"
-	start_process "baseline-leader" "$SERVER_BIN" -idx 0 -servers "$BASELINE_LEADER_ADDR,$BASELINE_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_SINGLE_DIR" -log "$(log_file baseline-leader)" "${thread_args[@]}"
+	start_process "baseline-follower" "$SERVER_BIN" -idx 1 -servers "$BASELINE_LEADER_ADDR,$BASELINE_FOLLOWER_ADDR" -shard-id 0 -global-row-start 0 -results-dir "$RESULTS_SINGLE_DIR" -log "$(log_file baseline-follower)" "${thread_args[@]}"
+	start_process "baseline-leader" "$SERVER_BIN" -idx 0 -servers "$BASELINE_LEADER_ADDR,$BASELINE_FOLLOWER_ADDR" -shard-id 0 -global-row-start 0 -results-dir "$RESULTS_SINGLE_DIR" -log "$(log_file baseline-leader)" "${thread_args[@]}"
 	wait_for_port "$BASELINE_LEADER_ADDR" 50 || die "baseline leader did not start listening"
 	sleep "$RIPOSTE_TOPOLOGY_SETTLE_DELAY"
 }
@@ -306,12 +307,13 @@ assert_scaling_status() {
 	local file="$1"
 	local want_epoch="$2"
 	local want_accepted="$3"
+	local want_global_height="${4:-}"
 
-	python3 - "$file" "$want_epoch" "$want_accepted" <<'PY'
+	python3 - "$file" "$want_epoch" "$want_accepted" "$want_global_height" <<'PY'
 import json
 import sys
 
-path, want_epoch, want_accepted = sys.argv[1:]
+path, want_epoch, want_accepted, want_global_height = sys.argv[1:]
 data = json.load(open(path))
 
 checks = {
@@ -329,6 +331,11 @@ if "request_density" not in data:
     raise SystemExit(f"{path}: missing request_density")
 if not data.get("scaling_action"):
     raise SystemExit(f"{path}: missing scaling_action")
+if want_global_height:
+    got = int(data.get("global_table_height", 0))
+    want = int(want_global_height)
+    if got != want:
+        raise SystemExit(f"{path}: global_table_height mismatch: got {got}, want {want}")
 PY
 }
 

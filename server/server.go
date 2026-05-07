@@ -26,6 +26,7 @@ var flagLog = flag.String("log", "", "Log file")
 var flagThreads = flag.Int("threads", -1, "Number of threads to use")
 var flagResultsDir = flag.String("results-dir", "", "Directory for epoch result files on the leader")
 var flagShardID = flag.Int("shard-id", 0, "Shard identifier for result publication metadata")
+var flagGlobalRowStart = flag.Int("global-row-start", 0, "First global row represented by this server's local row 0")
 var flagAdminTarget = flag.String("admin-target", "", "Target leader address for admin RPC commands")
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
 var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query leader epoch status over admin RPC and exit")
@@ -122,6 +123,9 @@ func main() {
 	var a int
 	slotTable := db.NewServer(idx, serverList)
 	slotTable.SetShardID(*flagShardID)
+	if err := slotTable.SetGlobalRowStart(*flagGlobalRowStart); err != nil {
+		log.Fatal(err)
+	}
 	slotTable.SetResultsDir(*flagResultsDir)
 	slotTable.Initialize(&a, &a)
 	rpc.Register(slotTable)

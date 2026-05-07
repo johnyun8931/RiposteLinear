@@ -57,6 +57,20 @@ func TestUploadRejectedWithoutActiveEpoch(t *testing.T) {
 	}
 }
 
+func TestUpload1RejectsLocalRouteRowOutsideTable(t *testing.T) {
+	s := newTestLeaderServer()
+	var start StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &start); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	err := s.Upload1(&UploadArgs1{RouteRow: TABLE_HEIGHT}, &UploadReply1{})
+	if err == nil || !strings.Contains(err.Error(), "outside local table height") {
+		t.Fatalf("expected local route row error, got %v", err)
+	}
+}
+
 func TestStartEpochSetsActiveState(t *testing.T) {
 	s := newTestLeaderServer()
 
@@ -708,6 +722,9 @@ func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 	dir := t.TempDir()
 	s := NewServer(0, []string{"127.0.0.1:9000", "127.0.0.1:9001"})
 	s.SetShardID(3)
+	if err := s.SetGlobalRowStart(512); err != nil {
+		t.Fatalf("SetGlobalRowStart failed: %v", err)
+	}
 	s.SetResultsDir(dir)
 
 	var matrix BitMatrix
@@ -752,10 +769,13 @@ func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 	if result.ShardID != 3 {
 		t.Fatalf("expected shard id 3, got %d", result.ShardID)
 	}
+	if result.GlobalStartRow != 512 || result.GlobalEndRow != 512+TABLE_HEIGHT {
+		t.Fatalf("unexpected global row range: [%d,%d)", result.GlobalStartRow, result.GlobalEndRow)
+	}
 	if result.NonZeroSlotCount != 1 || len(result.Slots) != 1 {
 		t.Fatalf("expected one non-zero slot, got count=%d slots=%d", result.NonZeroSlotCount, len(result.Slots))
 	}
-	if result.Slots[0].Row != 2 || result.Slots[0].Column != 3 {
+	if result.Slots[0].Row != 514 || result.Slots[0].Column != 3 {
 		t.Fatalf("unexpected slot coordinates: %+v", result.Slots[0])
 	}
 	expectedHex := hex.EncodeToString(matrix[2][3*SLOT_LENGTH : (3+1)*SLOT_LENGTH])
