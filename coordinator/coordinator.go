@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -96,16 +97,6 @@ func (r *rpcShardClient) Close() error {
 	return r.client.Close()
 }
 
-type routedSession struct {
-	shardID       int
-	localUUID     int64
-	hashKey       [32]byte
-	epochID       int64
-	globalRow     int
-	localRow      int
-	shardStartRow int
-}
-
 type pairHealthSnapshot struct {
 	Reachable bool
 	Status    db.StatusReply
@@ -130,21 +121,22 @@ const (
 )
 
 type Coordinator struct {
-	mu           sync.Mutex
-	shards       []ShardConfig
-	shardByID    map[int]ShardConfig
-	clients      map[int]shardClient
-	sessions     map[int64]routedSession
-	nextUUID     int64
-	epoch        db.EpochMeta
-	epochTimer   *time.Timer
-	controlStore ControlStore
-	leaseHolder  string
-	leaseTTL     time.Duration
-	lease        CoordinatorLease
-	role         string
-	leaseStopCh  chan struct{}
-	leaseDoneCh  chan struct{}
+	mu                  sync.Mutex
+	shards              []ShardConfig
+	shardByID           map[int]ShardConfig
+	clients             map[int]shardClient
+	sessions            map[int64]SessionRecord
+	epoch               db.EpochMeta
+	epochTimer          *time.Timer
+	controlStore        ControlStore
+	sessionStore        SessionStore
+	sessionStoreBackend string
+	leaseHolder         string
+	leaseTTL            time.Duration
+	lease               CoordinatorLease
+	role                string
+	leaseStopCh         chan struct{}
+	leaseDoneCh         chan struct{}
 
 	health              map[int]shardHealthSnapshot
 	healthInterval      time.Duration
@@ -287,14 +279,20 @@ func validateShardMap(shards []ShardConfig) ([]ShardConfig, error) {
 }
 
 func NewCoordinator(shards []ShardConfig, clients map[int]shardClient) (*Coordinator, error) {
-	return newCoordinatorWithControlStore(shards, clients, newMemoryControlStore(1))
+	return newCoordinatorWithStores(shards, clients, newMemoryControlStore(1), newMemorySessionStore(), "memory")
 }
 
 func newCoordinatorWithControlStore(shards []ShardConfig, clients map[int]shardClient, controlStore ControlStore) (*Coordinator, error) {
+	return newCoordinatorWithStores(shards, clients, controlStore, newMemorySessionStore(), "memory")
+}
+
+func newCoordinatorWithStores(shards []ShardConfig, clients map[int]shardClient, controlStore ControlStore, sessionStore SessionStore, sessionStoreBackend string) (*Coordinator, error) {
 	return newCoordinatorWithLeaseConfig(
 		shards,
 		clients,
 		controlStore,
+		sessionStore,
+		sessionStoreBackend,
 		defaultCoordinatorLeaseHolder,
 		defaultCoordinatorLeaseTTL,
 		defaultCoordinatorLeaseRenewInterval,
@@ -305,17 +303,21 @@ func newCoordinatorWithLeaseConfig(
 	shards []ShardConfig,
 	clients map[int]shardClient,
 	controlStore ControlStore,
+	sessionStore SessionStore,
+	sessionStoreBackend string,
 	leaseHolder string,
 	leaseTTL time.Duration,
 	leaseRenewInterval time.Duration,
 ) (*Coordinator, error) {
-	return newCoordinatorWithStandbyConfig(shards, clients, controlStore, leaseHolder, leaseTTL, leaseRenewInterval, false)
+	return newCoordinatorWithStandbyConfig(shards, clients, controlStore, sessionStore, sessionStoreBackend, leaseHolder, leaseTTL, leaseRenewInterval, false)
 }
 
 func newCoordinatorWithStandbyConfig(
 	shards []ShardConfig,
 	clients map[int]shardClient,
 	controlStore ControlStore,
+	sessionStore SessionStore,
+	sessionStoreBackend string,
 	leaseHolder string,
 	leaseTTL time.Duration,
 	leaseRenewInterval time.Duration,
@@ -323,6 +325,12 @@ func newCoordinatorWithStandbyConfig(
 ) (*Coordinator, error) {
 	if controlStore == nil {
 		return nil, errors.New("control store is required")
+	}
+	if sessionStore == nil {
+		return nil, errors.New("session store is required")
+	}
+	if sessionStoreBackend == "" {
+		sessionStoreBackend = "unknown"
 	}
 	if err := validateCoordinatorLeaseConfig(leaseHolder, leaseTTL, leaseRenewInterval); err != nil {
 		return nil, err
@@ -345,8 +353,10 @@ func newCoordinatorWithStandbyConfig(
 		shards:              validated,
 		shardByID:           make(map[int]ShardConfig, len(validated)),
 		clients:             make(map[int]shardClient, len(validated)),
-		sessions:            make(map[int64]routedSession),
+		sessions:            make(map[int64]SessionRecord),
 		controlStore:        controlStore,
+		sessionStore:        sessionStore,
+		sessionStoreBackend: sessionStoreBackend,
 		leaseHolder:         leaseHolder,
 		leaseTTL:            leaseTTL,
 		lease:               lease,
@@ -576,12 +586,21 @@ func globalTableHeightForShards(shards []ShardConfig) int {
 	return len(shards) * db.TABLE_HEIGHT
 }
 
-func (c *Coordinator) nextGlobalUUIDLocked() (int64, error) {
-	if c.nextUUID == math.MaxInt64 {
-		return 0, errors.New("coordinator session space exhausted")
+func (c *Coordinator) cachedOrStoredSession(globalUUID int64) (SessionRecord, error) {
+	c.mu.Lock()
+	session, ok := c.sessions[globalUUID]
+	c.mu.Unlock()
+	if ok {
+		return session, nil
 	}
-	c.nextUUID++
-	return c.nextUUID, nil
+	session, err := c.sessionStore.GetSession(context.Background(), globalUUID)
+	if err != nil {
+		return SessionRecord{}, err
+	}
+	c.mu.Lock()
+	c.sessions[globalUUID] = session
+	c.mu.Unlock()
+	return session, nil
 }
 
 func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
@@ -613,70 +632,114 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 	localArgs := *args
 	localArgs.RouteRow = args.RouteRow - shard.StartRow
 
+	var session SessionRecord
+	persisted := false
+	for attempt := 0; attempt < 16; attempt++ {
+		globalUUID, err := utils.RandomInt64(math.MaxInt64)
+		if err != nil {
+			return err
+		}
+		if globalUUID <= 0 {
+			continue
+		}
+
+		var hashKey [32]byte
+		utils.RandBytes(hashKey[:])
+		session = SessionRecord{
+			EpochID:       epoch.ID,
+			ShardID:       shard.ID,
+			GlobalUUID:    globalUUID,
+			LocalUUID:     globalUUID,
+			HashKey:       hashKey,
+			GlobalRow:     args.RouteRow,
+			LocalRow:      localArgs.RouteRow,
+			ShardStartRow: shard.StartRow,
+			CreatedAt:     time.Now().UTC(),
+		}
+		err = c.sessionStore.PutSession(context.Background(), session)
+		if errors.Is(err, errSessionExists) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		persisted = true
+		break
+	}
+	if !persisted {
+		return errors.New("could not allocate unique coordinator session")
+	}
+
+	localArgs.UseAssignedSession = true
+	localArgs.AssignedUUID = session.LocalUUID
+	localArgs.AssignedHashKey = session.HashKey
+
 	var shardReply db.UploadReply1
 	if err := client.Upload1(&localArgs, &shardReply); err != nil {
+		if deleteErr := c.sessionStore.DeleteSession(context.Background(), session.GlobalUUID); deleteErr != nil && !errors.Is(deleteErr, errSessionMissing) {
+			log.Printf("Delete persisted session %d after shard Upload1 failure failed: %v", session.GlobalUUID, deleteErr)
+		}
 		return err
+	}
+	if shardReply.Uuid != session.LocalUUID || shardReply.HashKey != session.HashKey {
+		if deleteErr := c.sessionStore.DeleteSession(context.Background(), session.GlobalUUID); deleteErr != nil && !errors.Is(deleteErr, errSessionMissing) {
+			log.Printf("Delete persisted session %d after mismatched shard Upload1 reply failed: %v", session.GlobalUUID, deleteErr)
+		}
+		return errors.New("shard returned mismatched assigned session")
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	globalUUID, err := c.nextGlobalUUIDLocked()
-	if err != nil {
-		return err
-	}
-	c.sessions[globalUUID] = routedSession{
-		shardID:       shard.ID,
-		localUUID:     shardReply.Uuid,
-		hashKey:       shardReply.HashKey,
-		epochID:       epoch.ID,
-		globalRow:     args.RouteRow,
-		localRow:      localArgs.RouteRow,
-		shardStartRow: shard.StartRow,
-	}
-	reply.Uuid = globalUUID
-	reply.HashKey = shardReply.HashKey
+	c.sessions[session.GlobalUUID] = session
+	c.mu.Unlock()
+	reply.Uuid = session.GlobalUUID
+	reply.HashKey = session.HashKey
 	return nil
 }
 
 func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) error {
-	c.mu.Lock()
-	session, ok := c.sessions[args.Uuid]
-	c.mu.Unlock()
-	if !ok || session.hashKey != args.HashKey {
+	if err := c.requireCoordinatorLease(); err != nil {
+		return errors.New("No active epoch")
+	}
+	session, err := c.cachedOrStoredSession(args.Uuid)
+	if err != nil || session.HashKey != args.HashKey {
 		return errors.New("Bogus UUID")
 	}
 
-	client := c.clients[session.shardID]
+	client := c.clients[session.ShardID]
 	if client == nil {
-		return fmt.Errorf("missing shard client for shard %d", session.shardID)
+		return fmt.Errorf("missing shard client for shard %d", session.ShardID)
 	}
 	localArgs := *args
-	localArgs.Uuid = session.localUUID
+	localArgs.Uuid = session.LocalUUID
 	return client.Upload2(&localArgs, reply)
 }
 
 func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error {
-	c.mu.Lock()
-	session, ok := c.sessions[args.Uuid]
-	c.mu.Unlock()
-	if !ok || session.hashKey != args.HashKey {
+	if err := c.requireCoordinatorLease(); err != nil {
+		return errors.New("No active epoch")
+	}
+	session, err := c.cachedOrStoredSession(args.Uuid)
+	if err != nil || session.HashKey != args.HashKey {
 		return errors.New("Bogus UUID")
 	}
 
-	client := c.clients[session.shardID]
+	client := c.clients[session.ShardID]
 	if client == nil {
-		return fmt.Errorf("missing shard client for shard %d", session.shardID)
+		return fmt.Errorf("missing shard client for shard %d", session.ShardID)
 	}
 	localArgs := *args
-	localArgs.Uuid = session.localUUID
-	err := client.Upload3(&localArgs, reply)
+	localArgs.Uuid = session.LocalUUID
+	err = client.Upload3(&localArgs, reply)
 	if err != nil {
 		return err
 	}
 
+	if err := c.sessionStore.DeleteSession(context.Background(), session.GlobalUUID); err != nil && !errors.Is(err, errSessionMissing) {
+		return err
+	}
 	c.mu.Lock()
 	delete(c.sessions, args.Uuid)
-	if c.hasActiveScalingMetrics && c.activeScalingMetrics.EpochID == session.epochID {
+	if c.hasActiveScalingMetrics && c.activeScalingMetrics.EpochID == session.EpochID {
 		c.activeScalingMetrics.AcceptedRequestCount++
 	}
 	c.mu.Unlock()
@@ -1006,6 +1069,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	controlStore := c.controlStore
 	lease := c.lease
 	role := c.role
+	sessionStoreBackend := c.sessionStoreBackend
 	shards := append([]ShardConfig(nil), c.shards...)
 	health := make(map[int]shardHealthSnapshot, len(c.health))
 	maps.Copy(health, c.health)
@@ -1015,6 +1079,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	reply.Healthy = true
 	reply.Role = role
 	reply.LeaderAddr = ""
+	reply.SessionStoreBackend = sessionStoreBackend
 	reply.GlobalTableHeight = globalTableHeightForShards(shards)
 	reply.EpochID = epoch.ID
 	reply.State = epoch.State.String()

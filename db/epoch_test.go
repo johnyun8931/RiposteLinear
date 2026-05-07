@@ -71,6 +71,32 @@ func TestUpload1RejectsLocalRouteRowOutsideTable(t *testing.T) {
 	}
 }
 
+func TestUpload1UsesAssignedSessionWhenProvided(t *testing.T) {
+	s := newTestLeaderServer()
+	var start StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &start); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	var hashKey [32]byte
+	hashKey[0] = 9
+	var reply UploadReply1
+	if err := s.Upload1(&UploadArgs1{
+		UseAssignedSession: true,
+		AssignedUUID:       42,
+		AssignedHashKey:    hashKey,
+	}, &reply); err != nil {
+		t.Fatalf("Upload1 failed: %v", err)
+	}
+	if reply.Uuid != 42 || reply.HashKey != hashKey {
+		t.Fatalf("expected assigned session in reply, got %+v", reply)
+	}
+	if err := s.Upload2(&UploadArgs2{Uuid: reply.Uuid, HashKey: reply.HashKey}, &UploadReply2{}); err != nil {
+		t.Fatalf("Upload2 with assigned session failed: %v", err)
+	}
+}
+
 func TestStartEpochSetsActiveState(t *testing.T) {
 	s := newTestLeaderServer()
 

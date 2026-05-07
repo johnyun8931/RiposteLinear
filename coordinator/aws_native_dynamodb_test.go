@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -17,8 +18,10 @@ import (
 type fakeDynamoDBControlClient struct {
 	getItem    func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
 	updateItem func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
+	deleteItem func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
 
 	updateInputs []*dynamodb.UpdateItemInput
+	deleteInputs []*dynamodb.DeleteItemInput
 }
 
 func (f *fakeDynamoDBControlClient) GetItem(_ context.Context, input *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -34,6 +37,14 @@ func (f *fakeDynamoDBControlClient) UpdateItem(_ context.Context, input *dynamod
 		return &dynamodb.UpdateItemOutput{}, nil
 	}
 	return f.updateItem(input)
+}
+
+func (f *fakeDynamoDBControlClient) DeleteItem(_ context.Context, input *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.deleteInputs = append(f.deleteInputs, input)
+	if f.deleteItem == nil {
+		return &dynamodb.DeleteItemOutput{}, nil
+	}
+	return f.deleteItem(input)
 }
 
 func leaseItem(holder string, token int64, expires time.Time) map[string]ddbtypes.AttributeValue {
@@ -54,6 +65,21 @@ func epochItem(epoch db.EpochMeta, accepting bool) map[string]ddbtypes.Attribute
 		"end_unix":          numberAttr(epoch.EndTime.Unix()),
 		"duration_secs":     numberAttr(epoch.DurationSeconds),
 		"accepting":         &ddbtypes.AttributeValueMemberBOOL{Value: accepting},
+	}
+}
+
+func sessionItem(session SessionRecord) map[string]ddbtypes.AttributeValue {
+	return map[string]ddbtypes.AttributeValue{
+		dynamoControlPKName: &ddbtypes.AttributeValueMemberS{Value: dynamoSessionPK(session.GlobalUUID)},
+		"epoch_id":          numberAttr(session.EpochID),
+		"shard_id":          numberAttr(int64(session.ShardID)),
+		"global_uuid":       numberAttr(session.GlobalUUID),
+		"local_uuid":        numberAttr(session.LocalUUID),
+		"hash_key":          &ddbtypes.AttributeValueMemberS{Value: hex.EncodeToString(session.HashKey[:])},
+		"global_row":        numberAttr(int64(session.GlobalRow)),
+		"local_row":         numberAttr(int64(session.LocalRow)),
+		"shard_start_row":   numberAttr(int64(session.ShardStartRow)),
+		"created_unix_ms":   numberAttr(session.CreatedAt.UnixMilli()),
 	}
 }
 
@@ -192,5 +218,92 @@ func TestDynamoDBControlStoreEpochOperations(t *testing.T) {
 	}
 	if err := store.SetShardConfigVersion(4); err != nil {
 		t.Fatalf("SetShardConfigVersion failed: %v", err)
+	}
+}
+
+func TestDynamoDBControlStoreSessionOperations(t *testing.T) {
+	createdAt := time.Unix(3000, 0).UTC()
+	var hashKey [32]byte
+	hashKey[0] = 8
+	session := SessionRecord{
+		EpochID:       5,
+		ShardID:       1,
+		GlobalUUID:    10,
+		LocalUUID:     20,
+		HashKey:       hashKey,
+		GlobalRow:     300,
+		LocalRow:      44,
+		ShardStartRow: 256,
+		CreatedAt:     createdAt,
+	}
+	fake := &fakeDynamoDBControlClient{}
+	fake.updateItem = func(input *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+		if input.ConditionExpression == nil || aws.ToString(input.ConditionExpression) != "attribute_not_exists(pk)" {
+			t.Fatalf("expected session put to be conditional, got %v", aws.ToString(input.ConditionExpression))
+		}
+		if got := input.Key[dynamoControlPKName].(*ddbtypes.AttributeValueMemberS).Value; got != dynamoSessionPK(session.GlobalUUID) {
+			t.Fatalf("unexpected session key %q", got)
+		}
+		return &dynamodb.UpdateItemOutput{}, nil
+	}
+	fake.getItem = func(input *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+		if got := input.Key[dynamoControlPKName].(*ddbtypes.AttributeValueMemberS).Value; got != dynamoSessionPK(session.GlobalUUID) {
+			t.Fatalf("unexpected get key %q", got)
+		}
+		return &dynamodb.GetItemOutput{Item: sessionItem(session)}, nil
+	}
+	fake.deleteItem = func(input *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+		if input.ConditionExpression == nil || aws.ToString(input.ConditionExpression) != "attribute_exists(pk)" {
+			t.Fatalf("expected session delete to be conditional, got %v", aws.ToString(input.ConditionExpression))
+		}
+		if got := input.Key[dynamoControlPKName].(*ddbtypes.AttributeValueMemberS).Value; got != dynamoSessionPK(session.GlobalUUID) {
+			t.Fatalf("unexpected delete key %q", got)
+		}
+		return &dynamodb.DeleteItemOutput{}, nil
+	}
+	store, err := newDynamoDBControlStore(fake, "control")
+	if err != nil {
+		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+	}
+
+	if err := store.PutSession(context.Background(), session); err != nil {
+		t.Fatalf("PutSession failed: %v", err)
+	}
+	got, err := store.GetSession(context.Background(), session.GlobalUUID)
+	if err != nil {
+		t.Fatalf("GetSession failed: %v", err)
+	}
+	if got != session {
+		t.Fatalf("unexpected session: got %+v want %+v", got, session)
+	}
+	if err := store.DeleteSession(context.Background(), session.GlobalUUID); err != nil {
+		t.Fatalf("DeleteSession failed: %v", err)
+	}
+}
+
+func TestDynamoDBControlStoreSessionConditionalFailures(t *testing.T) {
+	conditionalErr := &ddbtypes.ConditionalCheckFailedException{}
+	fake := &fakeDynamoDBControlClient{
+		updateItem: func(input *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			return nil, conditionalErr
+		},
+		deleteItem: func(input *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+			return nil, conditionalErr
+		},
+	}
+	store, err := newDynamoDBControlStore(fake, "control")
+	if err != nil {
+		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+	}
+
+	err = store.PutSession(context.Background(), SessionRecord{EpochID: 1, GlobalUUID: 1, LocalUUID: 1})
+	if !errors.Is(err, errSessionExists) {
+		t.Fatalf("expected session exists error, got %v", err)
+	}
+	if _, err := store.GetSession(context.Background(), 1); !errors.Is(err, errSessionMissing) {
+		t.Fatalf("expected missing session error, got %v", err)
+	}
+	if err := store.DeleteSession(context.Background(), 1); !errors.Is(err, errSessionMissing) {
+		t.Fatalf("expected missing session delete error, got %v", err)
 	}
 }

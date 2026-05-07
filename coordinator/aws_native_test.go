@@ -185,3 +185,69 @@ func TestMemoryIngestionQueueValidationAndContextCancellation(t *testing.T) {
 		t.Fatalf("expected ack context cancellation, got %v", err)
 	}
 }
+
+func TestMemorySessionStorePutGetDelete(t *testing.T) {
+	store := newMemorySessionStore()
+	ctx := context.Background()
+	createdAt := time.Unix(3000, 0).UTC()
+	var hashKey [32]byte
+	hashKey[0] = 7
+	session := SessionRecord{
+		EpochID:       5,
+		ShardID:       1,
+		GlobalUUID:    10,
+		LocalUUID:     20,
+		HashKey:       hashKey,
+		GlobalRow:     300,
+		LocalRow:      44,
+		ShardStartRow: 256,
+		CreatedAt:     createdAt,
+	}
+
+	if err := store.PutSession(ctx, session); err != nil {
+		t.Fatalf("PutSession failed: %v", err)
+	}
+	if err := store.PutSession(ctx, session); !errors.Is(err, errSessionExists) {
+		t.Fatalf("expected duplicate session error, got %v", err)
+	}
+
+	got, err := store.GetSession(ctx, session.GlobalUUID)
+	if err != nil {
+		t.Fatalf("GetSession failed: %v", err)
+	}
+	if got != session {
+		t.Fatalf("unexpected session: got %+v want %+v", got, session)
+	}
+
+	if err := store.DeleteSession(ctx, session.GlobalUUID); err != nil {
+		t.Fatalf("DeleteSession failed: %v", err)
+	}
+	if _, err := store.GetSession(ctx, session.GlobalUUID); !errors.Is(err, errSessionMissing) {
+		t.Fatalf("expected missing session after delete, got %v", err)
+	}
+	if err := store.DeleteSession(ctx, session.GlobalUUID); !errors.Is(err, errSessionMissing) {
+		t.Fatalf("expected missing session delete error, got %v", err)
+	}
+}
+
+func TestMemorySessionStoreValidationAndContextCancellation(t *testing.T) {
+	store := newMemorySessionStore()
+	ctx := context.Background()
+
+	if err := store.PutSession(ctx, SessionRecord{}); err == nil {
+		t.Fatal("expected invalid session to fail")
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	session := SessionRecord{EpochID: 1, GlobalUUID: 1, LocalUUID: 1}
+	if err := store.PutSession(cancelled, session); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected put context cancellation, got %v", err)
+	}
+	if _, err := store.GetSession(cancelled, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected get context cancellation, got %v", err)
+	}
+	if err := store.DeleteSession(cancelled, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected delete context cancellation, got %v", err)
+	}
+}

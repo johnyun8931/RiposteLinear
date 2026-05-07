@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -38,14 +39,42 @@ type fakeShardClient struct {
 	closeCalls  int
 }
 
+type collidingSessionStore struct {
+	inner       *memorySessionStore
+	collisions  int
+	putAttempts int
+}
+
+func (s *collidingSessionStore) PutSession(ctx context.Context, session SessionRecord) error {
+	s.putAttempts++
+	if s.collisions > 0 {
+		s.collisions--
+		return errSessionExists
+	}
+	return s.inner.PutSession(ctx, session)
+}
+
+func (s *collidingSessionStore) GetSession(ctx context.Context, globalUUID int64) (SessionRecord, error) {
+	return s.inner.GetSession(ctx, globalUUID)
+}
+
+func (s *collidingSessionStore) DeleteSession(ctx context.Context, globalUUID int64) error {
+	return s.inner.DeleteSession(ctx, globalUUID)
+}
+
 func (f *fakeShardClient) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
 	f.upload1Calls++
 	if f.upload1Err != nil {
 		return f.upload1Err
 	}
 	f.lastUpload1 = *args
-	reply.Uuid = int64(100 + f.upload1Calls)
-	reply.HashKey[0] = byte(10 + f.upload1Calls)
+	if args.UseAssignedSession {
+		reply.Uuid = args.AssignedUUID
+		reply.HashKey = args.AssignedHashKey
+	} else {
+		reply.Uuid = int64(100 + f.upload1Calls)
+		reply.HashKey[0] = byte(10 + f.upload1Calls)
+	}
 	return nil
 }
 
@@ -114,7 +143,7 @@ func mustCoordinator(t *testing.T, shards []ShardConfig, clients map[int]shardCl
 
 func mustCoordinatorWithLease(t *testing.T, shards []ShardConfig, clients map[int]shardClient, store ControlStore, holder string, ttl time.Duration, renewInterval time.Duration) *Coordinator {
 	t.Helper()
-	coord, err := newCoordinatorWithLeaseConfig(shards, clients, store, holder, ttl, renewInterval)
+	coord, err := newCoordinatorWithLeaseConfig(shards, clients, store, newMemorySessionStore(), "memory", holder, ttl, renewInterval)
 	if err != nil {
 		t.Fatalf("newCoordinatorWithLeaseConfig failed: %v", err)
 	}
@@ -124,7 +153,7 @@ func mustCoordinatorWithLease(t *testing.T, shards []ShardConfig, clients map[in
 
 func mustStandbyCoordinator(t *testing.T, shards []ShardConfig, clients map[int]shardClient, store ControlStore, holder string, ttl time.Duration, renewInterval time.Duration) *Coordinator {
 	t.Helper()
-	coord, err := newCoordinatorWithStandbyConfig(shards, clients, store, holder, ttl, renewInterval, true)
+	coord, err := newCoordinatorWithStandbyConfig(shards, clients, store, newMemorySessionStore(), "memory", holder, ttl, renewInterval, true)
 	if err != nil {
 		t.Fatalf("newCoordinatorWithStandbyConfig failed: %v", err)
 	}
@@ -288,19 +317,128 @@ func TestCoordinatorRoutesBoundaryRowsAndPreservesSessionMapping(t *testing.T) {
 	if err := coord.Upload2(&up2, &db.UploadReply2{}); err != nil {
 		t.Fatalf("Upload2 failed: %v", err)
 	}
-	if right.lastUpload2.Uuid != 101 {
-		t.Fatalf("expected local uuid 101, got %d", right.lastUpload2.Uuid)
+	if !right.lastUpload1.UseAssignedSession || right.lastUpload1.AssignedUUID != up1Right.Uuid || right.lastUpload1.AssignedHashKey != up1Right.HashKey {
+		t.Fatalf("expected assigned shard session to match coordinator reply, args=%+v reply=%+v", right.lastUpload1, up1Right)
+	}
+	if right.lastUpload2.Uuid != up1Right.Uuid {
+		t.Fatalf("expected local uuid %d, got %d", up1Right.Uuid, right.lastUpload2.Uuid)
 	}
 
 	up3 := db.UploadArgs3{Uuid: up1Right.Uuid, HashKey: up1Right.HashKey}
 	if err := coord.Upload3(&up3, &db.UploadReply3{}); err != nil {
 		t.Fatalf("Upload3 failed: %v", err)
 	}
-	if right.lastUpload3.Uuid != 101 {
-		t.Fatalf("expected local uuid 101, got %d", right.lastUpload3.Uuid)
+	if right.lastUpload3.Uuid != up1Right.Uuid {
+		t.Fatalf("expected local uuid %d, got %d", up1Right.Uuid, right.lastUpload3.Uuid)
 	}
 	if _, ok := coord.sessions[up1Right.Uuid]; ok {
 		t.Fatalf("expected coordinator session %d to be deleted after upload3", up1Right.Uuid)
+	}
+}
+
+func TestCoordinatorUpload1PersistsAssignedSessionBeforeShardAdmission(t *testing.T) {
+	store := newMemorySessionStore()
+	shard := &fakeShardClient{}
+	coord, err := newCoordinatorWithStores([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: shard}, newMemoryControlStore(1), store, "memory")
+	if err != nil {
+		t.Fatalf("newCoordinatorWithStores failed: %v", err)
+	}
+	t.Cleanup(coord.Close)
+	setCoordinatorActiveEpoch(t, coord, db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60})
+
+	var reply db.UploadReply1
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: 7}, &reply); err != nil {
+		t.Fatalf("Upload1 failed: %v", err)
+	}
+	if !shard.lastUpload1.UseAssignedSession || shard.lastUpload1.AssignedUUID != reply.Uuid || shard.lastUpload1.AssignedHashKey != reply.HashKey {
+		t.Fatalf("expected coordinator-assigned shard session, args=%+v reply=%+v", shard.lastUpload1, reply)
+	}
+	session, err := store.GetSession(context.Background(), reply.Uuid)
+	if err != nil {
+		t.Fatalf("expected persisted session: %v", err)
+	}
+	if session.GlobalUUID != reply.Uuid || session.LocalUUID != reply.Uuid || session.HashKey != reply.HashKey || session.LocalRow != 7 {
+		t.Fatalf("unexpected persisted session: %+v reply=%+v", session, reply)
+	}
+}
+
+func TestCoordinatorUpload1RetriesSessionUUIDCollision(t *testing.T) {
+	store := &collidingSessionStore{inner: newMemorySessionStore(), collisions: 1}
+	shard := &fakeShardClient{}
+	coord, err := newCoordinatorWithStores([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: shard}, newMemoryControlStore(1), store, "memory")
+	if err != nil {
+		t.Fatalf("newCoordinatorWithStores failed: %v", err)
+	}
+	t.Cleanup(coord.Close)
+	setCoordinatorActiveEpoch(t, coord, db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60})
+
+	var reply db.UploadReply1
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: 7}, &reply); err != nil {
+		t.Fatalf("Upload1 failed after collision retry: %v", err)
+	}
+	if store.putAttempts < 2 {
+		t.Fatalf("expected collision retry, got %d put attempts", store.putAttempts)
+	}
+	if _, err := store.GetSession(context.Background(), reply.Uuid); err != nil {
+		t.Fatalf("expected persisted session after retry: %v", err)
+	}
+}
+
+func TestCoordinatorUpload1DeletesPersistedSessionOnShardFailure(t *testing.T) {
+	store := newMemorySessionStore()
+	shard := &fakeShardClient{upload1Err: errors.New("shard down")}
+	coord, err := newCoordinatorWithStores([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: shard}, newMemoryControlStore(1), store, "memory")
+	if err != nil {
+		t.Fatalf("newCoordinatorWithStores failed: %v", err)
+	}
+	t.Cleanup(coord.Close)
+	setCoordinatorActiveEpoch(t, coord, db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60})
+
+	err = coord.Upload1(&db.UploadArgs1{RouteRow: 7}, &db.UploadReply1{})
+	if err == nil || err.Error() != "shard down" {
+		t.Fatalf("expected shard error, got %v", err)
+	}
+	if len(store.sessions) != 0 {
+		t.Fatalf("expected persisted session cleanup after shard failure, got %+v", store.sessions)
+	}
+}
+
+func TestCoordinatorUpload2AndUpload3RecoverSessionFromStore(t *testing.T) {
+	store := newMemorySessionStore()
+	shard := &fakeShardClient{}
+	coord, err := newCoordinatorWithStores([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: shard}, newMemoryControlStore(1), store, "memory")
+	if err != nil {
+		t.Fatalf("newCoordinatorWithStores failed: %v", err)
+	}
+	t.Cleanup(coord.Close)
+	setCoordinatorActiveEpoch(t, coord, db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60})
+
+	var up1 db.UploadReply1
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: 1}, &up1); err != nil {
+		t.Fatalf("Upload1 failed: %v", err)
+	}
+	coord.mu.Lock()
+	coord.sessions = make(map[int64]SessionRecord)
+	coord.mu.Unlock()
+	if err := coord.Upload2(&db.UploadArgs2{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply2{}); err != nil {
+		t.Fatalf("Upload2 failed using stored session: %v", err)
+	}
+	if shard.lastUpload2.Uuid != up1.Uuid {
+		t.Fatalf("expected stored local uuid %d, got %d", up1.Uuid, shard.lastUpload2.Uuid)
+	}
+	if err := coord.Upload3(&db.UploadArgs3{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply3{}); err != nil {
+		t.Fatalf("Upload3 failed using stored session: %v", err)
+	}
+	if _, err := store.GetSession(context.Background(), up1.Uuid); !errors.Is(err, errSessionMissing) {
+		t.Fatalf("expected session deleted after Upload3, got %v", err)
 	}
 }
 
@@ -341,7 +479,7 @@ func TestCoordinatorRejectsSecondHolderWithActiveLease(t *testing.T) {
 
 	_, err := newCoordinatorWithLeaseConfig([]ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-b", testLeaseTTL, testLeaseRenewInterval)
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, newMemorySessionStore(), "memory", "coord-b", testLeaseTTL, testLeaseRenewInterval)
 	if !errors.Is(err, errLeaseHeld) {
 		t.Fatalf("expected held lease error, got %v", err)
 	}
@@ -861,6 +999,9 @@ func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 	}
 	if reply.ActiveHolder != defaultCoordinatorLeaseHolder {
 		t.Fatalf("expected active holder %q, got %+v", defaultCoordinatorLeaseHolder, reply)
+	}
+	if reply.SessionStoreBackend != "memory" {
+		t.Fatalf("expected memory session store backend, got %+v", reply)
 	}
 	if reply.CurrentShardCount != 2 || reply.RecommendedNextShardCount != 2 {
 		t.Fatalf("unexpected default scaling shard counts: current=%d recommended=%d", reply.CurrentShardCount, reply.RecommendedNextShardCount)

@@ -7,8 +7,10 @@ This is the Phase 4 direction after parking the Raft coordinator spike on
 
 - DynamoDB-style control store is the source of truth for coordinator lease,
   fencing token, epoch metadata, accepting state, and shard config version.
+- DynamoDB-backed coordinator session records are an interim durability layer
+  for uploads admitted by `Upload1` and not yet finished by `Upload3`.
 - SQS-style ingestion queue is the durability and backpressure layer for
-  accepted write/session work.
+  accepted write work in the fuller AWS-native design.
 - S3 is reserved for published result files, backups, and offline recovery
   artifacts. It is not live coordination storage.
 
@@ -47,9 +49,9 @@ The first AWS-native implementation slices are intentionally SDK-free:
 - The coordinator acquires and renews a local fenced lease before admitting new
   `StartEpoch` or `Upload1` mutations.
 
-The current implementation adds an opt-in DynamoDB-backed `ControlStore`.
-The in-memory backend remains the default for local runs and existing smoke
-or benchmark scripts.
+The current implementation adds opt-in DynamoDB-backed `ControlStore` and
+`SessionStore` implementations. The in-memory backends remain the default for
+local runs and existing smoke or benchmark scripts.
 
 ## DynamoDB Control Store
 
@@ -57,6 +59,9 @@ Coordinator flags:
 
 - `-control-store memory|dynamodb`, default `memory`
 - `-control-table <name>`, required when `-control-store dynamodb`
+- `-session-store memory|dynamodb`, default `memory`
+- `-session-table <name>`, required when `-session-store dynamodb` unless
+  `-control-table` is set; defaults to the control table
 - `-aws-region <region>`, optional AWS SDK region override
 - `-coordinator-id <id>`, optional lease holder ID; defaults to `hostname-pid`
 - `-lease-ttl-seconds <seconds>`, optional lease TTL; defaults to `30`
@@ -70,11 +75,15 @@ The DynamoDB table uses a single string partition key named `pk`:
   expiry timestamp.
 - `pk="epoch"` stores epoch metadata and accepting state.
 - `pk="shard-config"` stores the shard config version.
+- `pk="session#<global_uuid>"` stores a coordinator session admitted by
+  `Upload1`, including epoch ID, shard ID, local UUID, hash key, global row, and
+  shard-local row. The coordinator deletes this record after successful
+  `Upload3`.
 
 Use `aws-eval/07-create-control-table.sh` to create the minimal table when
-testing the DynamoDB backend. The helper records the selected table and region
+testing the DynamoDB backends. The helper records the selected table and region
 in `aws-eval/.state/env.sh`, but existing smoke and benchmark scripts continue
-to use the memory backend unless explicitly configured otherwise.
+to use the memory backends unless explicitly configured otherwise.
 
 ## Coordinator Role Terms
 
@@ -130,17 +139,18 @@ Coordinators will use the control store to acquire/renew a fenced active lease
 before making epoch-control decisions. Epoch start/close and accepting state will
 be conditional control-store updates, not process-local truth.
 
-Accepted write/session work will be placed on the ingestion queue so a
-coordinator crash does not lose already accepted work. Until the queue is wired
-into `Upload1` / `Upload2` / `Upload3`, in-flight coordinator-local sessions
-remain a known failover limitation.
+Coordinator sessions can now be persisted in DynamoDB, so a coordinator can
+recover the route/session metadata for uploads that already passed `Upload1`.
+This is still not the final ingestion design: SQS remains needed so accepted
+write work has durable backpressure and replay semantics beyond the
+`Upload1`/`Upload2`/`Upload3` RPC lifecycle.
 
 ## Current Boundary
 
-DynamoDB control-store wiring is opt-in. SQS and S3 SDK calls are not
-implemented yet. The current code has local and DynamoDB control-store wiring,
-lease/fencing enforcement, and active-passive shard health monitoring, but no
-active-passive promotion.
+DynamoDB control-store and session-store wiring is opt-in. SQS and S3 SDK calls
+are not implemented yet. The current code has local and DynamoDB control-store
+wiring, local and DynamoDB session-store wiring, lease/fencing enforcement, and
+active-passive shard health monitoring, but no active-passive shard promotion.
 
 Shard health monitoring is a prerequisite for failover, not failover itself.
 Shard active/passive promotion still requires durable accepted-work/session

@@ -86,8 +86,11 @@ type EncryptedInsertQuery3 struct {
 }
 
 type UploadArgs1 struct {
-	RouteRow int
-	Query    [NUM_SERVERS]EncryptedInsertQuery
+	RouteRow           int
+	UseAssignedSession bool
+	AssignedUUID       int64
+	AssignedHashKey    [32]byte
+	Query              [NUM_SERVERS]EncryptedInsertQuery
 }
 
 type UploadArgs2 struct {
@@ -266,6 +269,7 @@ type CoordinatorStatusReply struct {
 	Healthy                   bool                     `json:"healthy"`
 	Role                      string                   `json:"role"`
 	LeaderAddr                string                   `json:"leader_addr"`
+	SessionStoreBackend       string                   `json:"session_store_backend"`
 	GlobalTableHeight         int                      `json:"global_table_height"`
 	EpochID                   int64                    `json:"epoch_id"`
 	State                     string                   `json:"state"`

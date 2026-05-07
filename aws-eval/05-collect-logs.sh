@@ -79,6 +79,9 @@ CLIENT_OVERLOAD_BACKOFF_MAX_MS="$CLIENT_OVERLOAD_BACKOFF_MAX_MS" \
 CONTROL_STORE_BACKEND="$CONTROL_STORE_BACKEND" \
 DYNAMODB_CONTROL_TABLE="$DYNAMODB_CONTROL_TABLE" \
 DYNAMODB_CONTROL_REGION="$(dynamodb_control_region)" \
+SESSION_STORE_BACKEND="$SESSION_STORE_BACKEND" \
+DYNAMODB_SESSION_TABLE="$(dynamodb_session_table)" \
+DYNAMODB_SESSION_REGION="$(dynamodb_session_region)" \
 COORDINATOR_HOLDER_ID="$(coordinator_holder_id)" \
 COORDINATOR_LEASE_TTL_SECONDS="$COORDINATOR_LEASE_TTL_SECONDS" \
 COORDINATOR_LEASE_RENEW_SECONDS="$COORDINATOR_LEASE_RENEW_SECONDS" \
@@ -148,6 +151,9 @@ payload = {
         "control_store_backend": os.environ["CONTROL_STORE_BACKEND"],
         "dynamodb_control_table": os.environ["DYNAMODB_CONTROL_TABLE"],
         "dynamodb_control_region": os.environ["DYNAMODB_CONTROL_REGION"],
+        "session_store_backend": os.environ["SESSION_STORE_BACKEND"],
+        "dynamodb_session_table": os.environ["DYNAMODB_SESSION_TABLE"],
+        "dynamodb_session_region": os.environ["DYNAMODB_SESSION_REGION"],
         "coordinator_holder_id": os.environ["COORDINATOR_HOLDER_ID"],
         "coordinator_lease_ttl_seconds": int(os.environ["COORDINATOR_LEASE_TTL_SECONDS"]),
         "coordinator_lease_renew_seconds": int(os.environ["COORDINATOR_LEASE_RENEW_SECONDS"]),

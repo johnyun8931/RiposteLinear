@@ -109,6 +109,9 @@ REMOTE_SMOKE_DIR=$(quote "$REMOTE_SMOKE_DIR")
 CONTROL_STORE_BACKEND=$(quote "$CONTROL_STORE_BACKEND")
 DYNAMODB_CONTROL_TABLE=$(quote "$DYNAMODB_CONTROL_TABLE")
 DYNAMODB_CONTROL_REGION=$(quote "$(dynamodb_control_region)")
+SESSION_STORE_BACKEND=$(quote "$SESSION_STORE_BACKEND")
+DYNAMODB_SESSION_TABLE=$(quote "$(dynamodb_session_table)")
+DYNAMODB_SESSION_REGION=$(quote "$(dynamodb_session_region)")
 COORDINATOR_HOLDER_ID=$(quote "$(coordinator_holder_id)")
 COORDINATOR_LEASE_TTL_SECONDS=$(quote "$COORDINATOR_LEASE_TTL_SECONDS")
 COORDINATOR_LEASE_RENEW_SECONDS=$(quote "$COORDINATOR_LEASE_RENEW_SECONDS")
@@ -119,11 +122,12 @@ EOF_STATE
 }
 
 create_coordinator_instance_profile() {
-  local account_id role_name profile_name policy_arn trust_doc policy_doc
+  local account_id role_name profile_name control_policy_arn session_policy_arn trust_doc policy_doc
   account_id="$(aws_base sts get-caller-identity --query Account --output text)"
   role_name="$(coordinator_iam_role_name)"
   profile_name="$(coordinator_iam_instance_profile_name)"
-  policy_arn="arn:aws:dynamodb:$(dynamodb_control_region):${account_id}:table/$(dynamodb_control_table)"
+  control_policy_arn="arn:aws:dynamodb:$(dynamodb_control_region):${account_id}:table/$(dynamodb_control_table)"
+  session_policy_arn="arn:aws:dynamodb:$(dynamodb_session_region):${account_id}:table/$(dynamodb_session_table)"
   trust_doc="$(mktemp)"
   policy_doc="$(mktemp)"
 
@@ -151,15 +155,19 @@ JSON
       "Action": [
         "dynamodb:DescribeTable",
         "dynamodb:GetItem",
-        "dynamodb:UpdateItem"
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem"
       ],
-      "Resource": "$policy_arn"
+      "Resource": [
+        "$control_policy_arn",
+        "$session_policy_arn"
+      ]
     }
   ]
 }
 JSON
 
-  info "creating coordinator IAM role/profile for DynamoDB control store: role=$role_name profile=$profile_name"
+  info "creating coordinator IAM role/profile for DynamoDB stores: role=$role_name profile=$profile_name"
   if ! aws_base iam get-role --role-name "$role_name" >/dev/null 2>&1; then
     aws_base iam create-role \
       --role-name "$role_name" \
@@ -199,7 +207,7 @@ JSON
 
 info "launch run id: $RUN_ID"
 info "selected network: vpc=$SELECTED_VPC_ID subnet=$SELECTED_SUBNET_ID az=$SELECTED_AZ"
-if dynamodb_control_enabled; then
+if dynamodb_runtime_enabled; then
   create_coordinator_instance_profile
   write_launch_state
 fi
@@ -244,7 +252,7 @@ launch_instance() {
   local instance_profile_name=""
   local attempt out status
 
-  if [[ "$role" == "coordinator" ]] && dynamodb_control_enabled; then
+  if [[ "$role" == "coordinator" ]] && dynamodb_runtime_enabled; then
     instance_profile_name="$(coordinator_iam_instance_profile_name)"
   fi
 

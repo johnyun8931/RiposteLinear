@@ -156,28 +156,31 @@ Builds Linux binaries locally and copies:
 - `~/coordinator` to the coordinator node
 - `~/client` to the client node
 
-### Optional DynamoDB Control Table
+### Optional DynamoDB Tables
 
-The coordinator defaults to the in-memory control store. To create the minimal
-DynamoDB table for opt-in control-store testing, launch with the DynamoDB
-backend enabled so the coordinator instance receives an IAM instance profile:
+The coordinator defaults to in-memory control and session stores. To create the
+minimal DynamoDB table for opt-in control/session-store testing, launch with at
+least one DynamoDB backend enabled so the coordinator instance receives an IAM
+instance profile:
 
 ```bash
-CONTROL_STORE_BACKEND=dynamodb ./aws-eval/01-launch.sh
+CONTROL_STORE_BACKEND=dynamodb SESSION_STORE_BACKEND=dynamodb ./aws-eval/01-launch.sh
 ```
 
-Then create or record the control table:
+Then create or record the DynamoDB table:
 
 ```bash
 ./aws-eval/07-create-control-table.sh
 ```
 
-The table has one string partition key, `pk`, and stores three control records:
-`lease`, `epoch`, and `shard-config`. The helper records
-`CONTROL_STORE_BACKEND=dynamodb`, `DYNAMODB_CONTROL_TABLE`, and
-`DYNAMODB_CONTROL_REGION` in `aws-eval/.state/env.sh`, but smoke and benchmark
-scripts do not use DynamoDB unless their coordinator commands are explicitly
-configured with `-control-store dynamodb`.
+The table has one string partition key, `pk`. It stores control records
+`lease`, `epoch`, and `shard-config`; when the session store uses the same table,
+it also stores transient `session#<global_uuid>` records for coordinator-routed
+uploads that have completed `Upload1` but not yet completed `Upload3`. The
+helper records `CONTROL_STORE_BACKEND=dynamodb`, `DYNAMODB_CONTROL_TABLE`,
+`DYNAMODB_CONTROL_REGION`, `SESSION_STORE_BACKEND=dynamodb`,
+`DYNAMODB_SESSION_TABLE`, and `DYNAMODB_SESSION_REGION` in
+`aws-eval/.state/env.sh`.
 
 The launch script creates a temporary coordinator IAM role and instance profile
 for DynamoDB runtime access. Teardown removes that role/profile with the EC2
@@ -202,9 +205,11 @@ waits for completion, and verifies:
 
 If `CONTROL_STORE_BACKEND=dynamodb`, smoke starts the coordinator with the
 DynamoDB control-store flags and captures the `lease`, `epoch`, and
-`shard-config` table records after epoch start and completion. The smoke check
-also verifies that the DynamoDB epoch ID and accepting flag match the observed
-coordinator lifecycle.
+`shard-config` table records after epoch start and completion. If
+`SESSION_STORE_BACKEND=dynamodb`, coordinator status reports that backend and
+the coordinator persists in-flight session records in DynamoDB until `Upload3`
+completes. The smoke check also verifies that the DynamoDB epoch ID and
+accepting flag match the observed coordinator lifecycle.
 
 To validate coordinator lease/fencing behavior with two coordinator attempts:
 
@@ -313,6 +318,9 @@ CLIENT_OVERLOAD_BACKOFF_MAX_MS=250
 CONTROL_STORE_BACKEND=memory
 DYNAMODB_CONTROL_TABLE=riposte-aws-eval-control
 DYNAMODB_CONTROL_REGION=us-east-1
+SESSION_STORE_BACKEND=memory
+DYNAMODB_SESSION_TABLE=riposte-aws-eval-control
+DYNAMODB_SESSION_REGION=us-east-1
 COORDINATOR_HOLDER_ID=riposte-aws-eval-run-coordinator
 WARMUP_EPOCH_SECONDS=60
 MEASURED_EPOCH_SECONDS=600

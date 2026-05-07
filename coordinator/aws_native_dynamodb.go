@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -25,6 +26,7 @@ const (
 type dynamoDBControlClient interface {
 	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
 type dynamoDBControlStore struct {
@@ -48,7 +50,14 @@ func newDynamoDBControlStore(client dynamoDBControlClient, table string) (*dynam
 }
 
 func (s *dynamoDBControlStore) operationContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), s.timeout)
+	return s.operationContextFrom(context.Background())
+}
+
+func (s *dynamoDBControlStore) operationContextFrom(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, s.timeout)
 }
 
 func dynamoKey(pk string) map[string]ddbtypes.AttributeValue {
@@ -101,7 +110,11 @@ func leaseFromItem(item map[string]ddbtypes.AttributeValue) CoordinatorLease {
 }
 
 func (s *dynamoDBControlStore) getItem(pk string) (map[string]ddbtypes.AttributeValue, bool, error) {
-	ctx, cancel := s.operationContext()
+	return s.getItemWithContext(context.Background(), pk)
+}
+
+func (s *dynamoDBControlStore) getItemWithContext(parent context.Context, pk string) (map[string]ddbtypes.AttributeValue, bool, error) {
+	ctx, cancel := s.operationContextFrom(parent)
 	defer cancel()
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.table),
@@ -369,5 +382,110 @@ func (s *dynamoDBControlStore) SetShardConfigVersion(version int64) error {
 }
 
 func dynamoDBControlStoreConfigError(name string) error {
-	return fmt.Errorf("%s is required for dynamodb control store", name)
+	return fmt.Errorf("%s is required for dynamodb store", name)
+}
+
+func dynamoSessionPK(globalUUID int64) string {
+	return fmt.Sprintf("session#%d", globalUUID)
+}
+
+func sessionToAttributes(session SessionRecord) map[string]ddbtypes.AttributeValue {
+	return map[string]ddbtypes.AttributeValue{
+		":epoch_id":        numberAttr(session.EpochID),
+		":shard_id":        numberAttr(int64(session.ShardID)),
+		":global_uuid":     numberAttr(session.GlobalUUID),
+		":local_uuid":      numberAttr(session.LocalUUID),
+		":hash_key":        &ddbtypes.AttributeValueMemberS{Value: hex.EncodeToString(session.HashKey[:])},
+		":global_row":      numberAttr(int64(session.GlobalRow)),
+		":local_row":       numberAttr(int64(session.LocalRow)),
+		":shard_start_row": numberAttr(int64(session.ShardStartRow)),
+		":created_unix_ms": numberAttr(session.CreatedAt.UnixMilli()),
+	}
+}
+
+func sessionFromItem(item map[string]ddbtypes.AttributeValue) SessionRecord {
+	var hashKey [32]byte
+	decoded, err := hex.DecodeString(stringAttr(item, "hash_key"))
+	if err == nil {
+		copy(hashKey[:], decoded)
+	}
+	return SessionRecord{
+		EpochID:       int64Attr(item, "epoch_id"),
+		ShardID:       int(int64Attr(item, "shard_id")),
+		GlobalUUID:    int64Attr(item, "global_uuid"),
+		LocalUUID:     int64Attr(item, "local_uuid"),
+		HashKey:       hashKey,
+		GlobalRow:     int(int64Attr(item, "global_row")),
+		LocalRow:      int(int64Attr(item, "local_row")),
+		ShardStartRow: int(int64Attr(item, "shard_start_row")),
+		CreatedAt:     time.UnixMilli(int64Attr(item, "created_unix_ms")).UTC(),
+	}
+}
+
+func (s *dynamoDBControlStore) PutSession(ctx context.Context, session SessionRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if session.EpochID <= 0 {
+		return errors.New("session epoch id must be positive")
+	}
+	if session.GlobalUUID <= 0 {
+		return errors.New("session global uuid must be positive")
+	}
+	if session.LocalUUID <= 0 {
+		return errors.New("session local uuid must be positive")
+	}
+	if session.CreatedAt.IsZero() {
+		session.CreatedAt = time.Now().UTC()
+	}
+	opCtx, cancel := s.operationContextFrom(ctx)
+	defer cancel()
+	_, err := s.client.UpdateItem(opCtx, &dynamodb.UpdateItemInput{
+		TableName:                 aws.String(s.table),
+		Key:                       dynamoKey(dynamoSessionPK(session.GlobalUUID)),
+		UpdateExpression:          aws.String("SET epoch_id = :epoch_id, shard_id = :shard_id, global_uuid = :global_uuid, local_uuid = :local_uuid, hash_key = :hash_key, global_row = :global_row, local_row = :local_row, shard_start_row = :shard_start_row, created_unix_ms = :created_unix_ms"),
+		ConditionExpression:       aws.String("attribute_not_exists(pk)"),
+		ExpressionAttributeValues: sessionToAttributes(session),
+	})
+	if err != nil {
+		if isConditionalCheckFailed(err) {
+			return errSessionExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *dynamoDBControlStore) GetSession(ctx context.Context, globalUUID int64) (SessionRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionRecord{}, err
+	}
+	item, ok, err := s.getItemWithContext(ctx, dynamoSessionPK(globalUUID))
+	if err != nil {
+		return SessionRecord{}, err
+	}
+	if !ok {
+		return SessionRecord{}, errSessionMissing
+	}
+	return sessionFromItem(item), nil
+}
+
+func (s *dynamoDBControlStore) DeleteSession(ctx context.Context, globalUUID int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	opCtx, cancel := s.operationContextFrom(ctx)
+	defer cancel()
+	_, err := s.client.DeleteItem(opCtx, &dynamodb.DeleteItemInput{
+		TableName:           aws.String(s.table),
+		Key:                 dynamoKey(dynamoSessionPK(globalUUID)),
+		ConditionExpression: aws.String("attribute_exists(pk)"),
+	})
+	if err != nil {
+		if isConditionalCheckFailed(err) {
+			return errSessionMissing
+		}
+		return err
+	}
+	return nil
 }

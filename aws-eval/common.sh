@@ -28,6 +28,9 @@ CLIENT_EXIT_GRACE_SECONDS="${CLIENT_EXIT_GRACE_SECONDS:-30}"
 CONTROL_STORE_BACKEND="${CONTROL_STORE_BACKEND:-memory}"
 DYNAMODB_CONTROL_TABLE="${DYNAMODB_CONTROL_TABLE:-${PROJECT_TAG}-control}"
 DYNAMODB_CONTROL_REGION="${DYNAMODB_CONTROL_REGION:-}"
+SESSION_STORE_BACKEND="${SESSION_STORE_BACKEND:-memory}"
+DYNAMODB_SESSION_TABLE="${DYNAMODB_SESSION_TABLE:-}"
+DYNAMODB_SESSION_REGION="${DYNAMODB_SESSION_REGION:-}"
 COORDINATOR_IAM_POLICY_NAME="${COORDINATOR_IAM_POLICY_NAME:-RiposteDynamoDBControlStore}"
 COORDINATOR_LEASE_TTL_SECONDS="${COORDINATOR_LEASE_TTL_SECONDS:-30}"
 COORDINATOR_LEASE_RENEW_SECONDS="${COORDINATOR_LEASE_RENEW_SECONDS:-10}"
@@ -271,6 +274,14 @@ dynamodb_control_enabled() {
   [[ "$CONTROL_STORE_BACKEND" == "dynamodb" ]]
 }
 
+dynamodb_session_enabled() {
+  [[ "$SESSION_STORE_BACKEND" == "dynamodb" ]]
+}
+
+dynamodb_runtime_enabled() {
+  dynamodb_control_enabled || dynamodb_session_enabled
+}
+
 dynamodb_control_table() {
   [[ -n "$DYNAMODB_CONTROL_TABLE" ]] || die "DYNAMODB_CONTROL_TABLE is required when CONTROL_STORE_BACKEND=dynamodb"
   printf '%s' "$DYNAMODB_CONTROL_TABLE"
@@ -278,6 +289,14 @@ dynamodb_control_table() {
 
 dynamodb_control_region() {
   printf '%s' "${DYNAMODB_CONTROL_REGION:-$AWS_REGION}"
+}
+
+dynamodb_session_table() {
+  printf '%s' "${DYNAMODB_SESSION_TABLE:-$DYNAMODB_CONTROL_TABLE}"
+}
+
+dynamodb_session_region() {
+  printf '%s' "${DYNAMODB_SESSION_REGION:-$(dynamodb_control_region)}"
 }
 
 coordinator_control_store_args() {
@@ -302,6 +321,27 @@ coordinator_control_store_args() {
       ;;
     *)
       die "unknown CONTROL_STORE_BACKEND: $CONTROL_STORE_BACKEND"
+      ;;
+  esac
+}
+
+coordinator_session_store_args() {
+  case "$SESSION_STORE_BACKEND" in
+    memory)
+      return 0
+      ;;
+    dynamodb)
+      if dynamodb_control_enabled; then
+        printf -- " -session-store dynamodb -session-table %s" \
+          "$(quote "$(dynamodb_session_table)")"
+      else
+        printf -- " -session-store dynamodb -session-table %s -aws-region %s" \
+          "$(quote "$(dynamodb_session_table)")" \
+          "$(quote "$(dynamodb_session_region)")"
+      fi
+      ;;
+    *)
+      die "unknown SESSION_STORE_BACKEND: $SESSION_STORE_BACKEND"
       ;;
   esac
 }
@@ -454,17 +494,18 @@ start_remote_coordinator() {
   local lease_renew="${6:-$COORDINATOR_LEASE_RENEW_SECONDS}"
   local pid_path="${7:-}"
   local standby="${8:-0}"
-  local control_args mkdir_cmd
+  local control_args session_args mkdir_cmd
   control_args="$(coordinator_control_store_args "$holder" "$lease_ttl" "$lease_renew")"
+  session_args="$(coordinator_session_store_args)"
   if [[ "$standby" == "1" || "$standby" == "true" ]]; then
     control_args="$control_args -standby"
   fi
   mkdir_cmd="mkdir -p '$(dirname "$log_path")'"
   if [[ -n "$pid_path" ]]; then
     mkdir_cmd="$mkdir_cmd '$(dirname "$pid_path")'"
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args$session_args > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
   else
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 &"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args$session_args > '${log_path}.nohup' 2>&1 &"
   fi
 }
 

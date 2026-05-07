@@ -153,6 +153,66 @@ type memoryIngestionQueue struct {
 	inflight      map[string]string
 }
 
+type memorySessionStore struct {
+	mu       sync.Mutex
+	sessions map[int64]SessionRecord
+}
+
+func newMemorySessionStore() *memorySessionStore {
+	return &memorySessionStore{sessions: make(map[int64]SessionRecord)}
+}
+
+func (s *memorySessionStore) PutSession(ctx context.Context, session SessionRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if session.EpochID <= 0 {
+		return errors.New("session epoch id must be positive")
+	}
+	if session.GlobalUUID <= 0 {
+		return errors.New("session global uuid must be positive")
+	}
+	if session.LocalUUID <= 0 {
+		return errors.New("session local uuid must be positive")
+	}
+	if session.CreatedAt.IsZero() {
+		session.CreatedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.sessions[session.GlobalUUID]; exists {
+		return errSessionExists
+	}
+	s.sessions[session.GlobalUUID] = session
+	return nil
+}
+
+func (s *memorySessionStore) GetSession(ctx context.Context, globalUUID int64) (SessionRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionRecord{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[globalUUID]
+	if !ok {
+		return SessionRecord{}, errSessionMissing
+	}
+	return session, nil
+}
+
+func (s *memorySessionStore) DeleteSession(ctx context.Context, globalUUID int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessions[globalUUID]; !ok {
+		return errSessionMissing
+	}
+	delete(s.sessions, globalUUID)
+	return nil
+}
+
 func newMemoryIngestionQueue() *memoryIngestionQueue {
 	return &memoryIngestionQueue{
 		messages: make(map[string]IngestionMessage),

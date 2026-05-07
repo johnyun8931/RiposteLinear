@@ -28,6 +28,8 @@ var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query coordinato
 var flagStatus = flag.Bool("status", false, "If set, query coordinator status over admin RPC and exit")
 var flagControlStore = flag.String("control-store", "memory", "Control store backend: memory or dynamodb")
 var flagControlTable = flag.String("control-table", "", "DynamoDB table name for -control-store dynamodb")
+var flagSessionStore = flag.String("session-store", "memory", "Session store backend: memory or dynamodb")
+var flagSessionTable = flag.String("session-table", "", "DynamoDB table name for -session-store dynamodb; defaults to -control-table")
 var flagAWSRegion = flag.String("aws-region", "", "AWS region override for DynamoDB control store")
 var flagCoordinatorID = flag.String("coordinator-id", "", "Coordinator lease holder ID; defaults to hostname-pid")
 var flagLeaseTTLSeconds = flag.Int64("lease-ttl-seconds", int64(defaultCoordinatorLeaseTTL/time.Second), "Coordinator lease TTL in seconds")
@@ -78,6 +80,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	sessionStore, sessionStoreBackend, err := buildSessionStore()
+	if err != nil {
+		log.Fatal(err)
+	}
 	leaseTTL := time.Duration(*flagLeaseTTLSeconds) * time.Second
 	leaseRenewInterval := time.Duration(*flagLeaseRenewSeconds) * time.Second
 
@@ -85,6 +91,8 @@ func main() {
 		shards,
 		nil,
 		controlStore,
+		sessionStore,
+		sessionStoreBackend,
 		holderID,
 		leaseTTL,
 		leaseRenewInterval,
@@ -143,6 +151,40 @@ func buildControlStore() (ControlStore, string, error) {
 		return store, holderID, nil
 	default:
 		return nil, "", fmt.Errorf("unknown -control-store %q", *flagControlStore)
+	}
+}
+
+func awsLoadOptions() []func(*awsconfig.LoadOptions) error {
+	options := []func(*awsconfig.LoadOptions) error{}
+	if *flagAWSRegion != "" {
+		options = append(options, awsconfig.WithRegion(*flagAWSRegion))
+	}
+	return options
+}
+
+func buildSessionStore() (SessionStore, string, error) {
+	switch *flagSessionStore {
+	case "memory":
+		return newMemorySessionStore(), "memory", nil
+	case "dynamodb":
+		table := *flagSessionTable
+		if table == "" {
+			table = *flagControlTable
+		}
+		if table == "" {
+			return nil, "", dynamoDBControlStoreConfigError("-session-table")
+		}
+		cfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsLoadOptions()...)
+		if err != nil {
+			return nil, "", err
+		}
+		store, err := newDynamoDBControlStore(dynamodb.NewFromConfig(cfg), table)
+		if err != nil {
+			return nil, "", err
+		}
+		return store, "dynamodb", nil
+	default:
+		return nil, "", fmt.Errorf("unknown -session-store %q", *flagSessionStore)
 	}
 }
 

@@ -9,10 +9,12 @@ import (
 )
 
 var (
-	errLeaseHeld     = errors.New("coordinator lease is held")
-	errLeaseNotHeld  = errors.New("coordinator lease is not held")
-	errStaleFence    = errors.New("stale coordinator fencing token")
-	errEpochMismatch = errors.New("epoch mismatch")
+	errLeaseHeld      = errors.New("coordinator lease is held")
+	errLeaseNotHeld   = errors.New("coordinator lease is not held")
+	errStaleFence     = errors.New("stale coordinator fencing token")
+	errEpochMismatch  = errors.New("epoch mismatch")
+	errSessionExists  = errors.New("coordinator session already exists")
+	errSessionMissing = errors.New("coordinator session is missing")
 )
 
 type CoordinatorLease struct {
@@ -54,4 +56,22 @@ type IngestionQueue interface {
 	Enqueue(ctx context.Context, message IngestionMessage) (string, error)
 	Receive(ctx context.Context, maxMessages int) ([]QueuedIngestionMessage, error)
 	Ack(ctx context.Context, receiptHandle string) error
+}
+
+type SessionRecord struct {
+	EpochID       int64
+	ShardID       int
+	GlobalUUID    int64
+	LocalUUID     int64
+	HashKey       [32]byte
+	GlobalRow     int
+	LocalRow      int
+	ShardStartRow int
+	CreatedAt     time.Time
+}
+
+type SessionStore interface {
+	PutSession(ctx context.Context, session SessionRecord) error
+	GetSession(ctx context.Context, globalUUID int64) (SessionRecord, error)
+	DeleteSession(ctx context.Context, globalUUID int64) error
 }
