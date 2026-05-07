@@ -159,7 +159,14 @@ Builds Linux binaries locally and copies:
 ### Optional DynamoDB Control Table
 
 The coordinator defaults to the in-memory control store. To create the minimal
-DynamoDB table for opt-in control-store testing, run:
+DynamoDB table for opt-in control-store testing, launch with the DynamoDB
+backend enabled so the coordinator instance receives an IAM instance profile:
+
+```bash
+CONTROL_STORE_BACKEND=dynamodb ./aws-eval/01-launch.sh
+```
+
+Then create or record the control table:
 
 ```bash
 ./aws-eval/07-create-control-table.sh
@@ -171,6 +178,10 @@ The table has one string partition key, `pk`, and stores three control records:
 `DYNAMODB_CONTROL_REGION` in `aws-eval/.state/env.sh`, but smoke and benchmark
 scripts do not use DynamoDB unless their coordinator commands are explicitly
 configured with `-control-store dynamodb`.
+
+The launch script creates a temporary coordinator IAM role and instance profile
+for DynamoDB runtime access. Teardown removes that role/profile with the EC2
+resources.
 
 ### 4. Smoke
 

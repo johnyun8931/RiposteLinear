@@ -45,6 +45,37 @@ if [[ -n "${SG_ID:-}" ]]; then
   done
 fi
 
+if [[ -n "${COORDINATOR_IAM_INSTANCE_PROFILE_NAME:-}" && -n "${COORDINATOR_IAM_ROLE_NAME:-}" ]]; then
+  info "deleting coordinator IAM instance profile: $COORDINATOR_IAM_INSTANCE_PROFILE_NAME"
+  aws_base iam remove-role-from-instance-profile \
+    --instance-profile-name "$COORDINATOR_IAM_INSTANCE_PROFILE_NAME" \
+    --role-name "$COORDINATOR_IAM_ROLE_NAME" >/dev/null 2>&1 || true
+
+  for _ in $(seq 1 30); do
+    if aws_base iam delete-instance-profile \
+      --instance-profile-name "$COORDINATOR_IAM_INSTANCE_PROFILE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+fi
+
+if [[ -n "${COORDINATOR_IAM_ROLE_NAME:-}" ]]; then
+  info "deleting coordinator IAM role: $COORDINATOR_IAM_ROLE_NAME"
+  if [[ -n "${COORDINATOR_IAM_POLICY_NAME:-}" ]]; then
+    aws_base iam delete-role-policy \
+      --role-name "$COORDINATOR_IAM_ROLE_NAME" \
+      --policy-name "$COORDINATOR_IAM_POLICY_NAME" >/dev/null 2>&1 || true
+  fi
+
+  for _ in $(seq 1 30); do
+    if aws_base iam delete-role --role-name "$COORDINATOR_IAM_ROLE_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+fi
+
 remaining_instances="$(aws_region ec2 describe-instances \
   --filters Name=tag:Project,Values="$PROJECT_TAG" Name=instance-state-name,Values=pending,running,stopping,stopped \
   --query 'Reservations[].Instances[].{InstanceId:InstanceId,State:State.Name,Name:Tags[?Key==`Name`]|[0].Value}' \

@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/common.sh"
 require_cmd aws
 require_cmd curl
 require_cmd chmod
+require_cmd mktemp
 
 if [[ -f "$STATE_FILE" && "${FORCE:-0}" != "1" ]]; then
   die "state already exists at $STATE_FILE. Run 06-teardown.sh first, or set FORCE=1 to overwrite local state."
@@ -105,11 +106,101 @@ REMOTE_ROOT=$(quote "$REMOTE_ROOT")
 REMOTE_BIN_DIR=$(quote "$REMOTE_BIN_DIR")
 REMOTE_PHASES_DIR=$(quote "$REMOTE_PHASES_DIR")
 REMOTE_SMOKE_DIR=$(quote "$REMOTE_SMOKE_DIR")
+CONTROL_STORE_BACKEND=$(quote "$CONTROL_STORE_BACKEND")
+DYNAMODB_CONTROL_TABLE=$(quote "$DYNAMODB_CONTROL_TABLE")
+DYNAMODB_CONTROL_REGION=$(quote "$(dynamodb_control_region)")
+COORDINATOR_HOLDER_ID=$(quote "$(coordinator_holder_id)")
+COORDINATOR_IAM_ROLE_NAME=$(quote "$(coordinator_iam_role_name)")
+COORDINATOR_IAM_INSTANCE_PROFILE_NAME=$(quote "$(coordinator_iam_instance_profile_name)")
+COORDINATOR_IAM_POLICY_NAME=$(quote "$COORDINATOR_IAM_POLICY_NAME")
 EOF_STATE
+}
+
+create_coordinator_instance_profile() {
+  local account_id role_name profile_name policy_arn trust_doc policy_doc
+  account_id="$(aws_base sts get-caller-identity --query Account --output text)"
+  role_name="$(coordinator_iam_role_name)"
+  profile_name="$(coordinator_iam_instance_profile_name)"
+  policy_arn="arn:aws:dynamodb:$(dynamodb_control_region):${account_id}:table/$(dynamodb_control_table)"
+  trust_doc="$(mktemp)"
+  policy_doc="$(mktemp)"
+
+  cat >"$trust_doc" <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+JSON
+
+  cat >"$policy_doc" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "$policy_arn"
+    }
+  ]
+}
+JSON
+
+  info "creating coordinator IAM role/profile for DynamoDB control store: role=$role_name profile=$profile_name"
+  if ! aws_base iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+    aws_base iam create-role \
+      --role-name "$role_name" \
+      --assume-role-policy-document "file://$trust_doc" \
+      --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" >/dev/null
+  fi
+
+  aws_base iam put-role-policy \
+    --role-name "$role_name" \
+    --policy-name "$COORDINATOR_IAM_POLICY_NAME" \
+    --policy-document "file://$policy_doc" >/dev/null
+
+  if ! aws_base iam get-instance-profile --instance-profile-name "$profile_name" >/dev/null 2>&1; then
+    aws_base iam create-instance-profile \
+      --instance-profile-name "$profile_name" \
+      --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" >/dev/null
+  fi
+
+  aws_base iam add-role-to-instance-profile \
+    --instance-profile-name "$profile_name" \
+    --role-name "$role_name" >/dev/null 2>&1 || true
+
+  for _ in $(seq 1 30); do
+    if aws_base iam get-instance-profile \
+      --instance-profile-name "$profile_name" \
+      --query "InstanceProfile.Roles[?RoleName=='${role_name}'].RoleName | [0]" \
+      --output text | grep -qx "$role_name"; then
+      rm -f "$trust_doc" "$policy_doc"
+      return 0
+    fi
+    sleep 2
+  done
+
+  rm -f "$trust_doc" "$policy_doc"
+  die "coordinator IAM instance profile did not become ready: $profile_name"
 }
 
 info "launch run id: $RUN_ID"
 info "selected network: vpc=$SELECTED_VPC_ID subnet=$SELECTED_SUBNET_ID az=$SELECTED_AZ"
+if dynamodb_control_enabled; then
+  create_coordinator_instance_profile
+  write_launch_state
+fi
 info "creating key pair: $KEY_NAME"
 aws_region ec2 create-key-pair \
   --key-name "$KEY_NAME" \
@@ -148,8 +239,13 @@ launch_instance() {
   local name="$1"
   local role="$2"
   local instance_type="$3"
+  local instance_profile_name=""
 
-  aws_region ec2 run-instances \
+  if [[ "$role" == "coordinator" ]] && dynamodb_control_enabled; then
+    instance_profile_name="$(coordinator_iam_instance_profile_name)"
+  fi
+
+  local args=(
     --image-id "$AMI_ID" \
     --instance-type "$instance_type" \
     --key-name "$KEY_NAME" \
@@ -161,6 +257,13 @@ launch_instance() {
       "ResourceType=volume,Tags=[{Key=Project,Value=${PROJECT_TAG}},{Key=RunId,Value=${RUN_ID}},{Key=Name,Value=${name}-root},{Key=Role,Value=${role}}]" \
     --query 'Instances[0].InstanceId' \
     --output text
+  )
+
+  if [[ -n "$instance_profile_name" ]]; then
+    args+=(--iam-instance-profile "Name=$instance_profile_name")
+  fi
+
+  aws_region ec2 run-instances "${args[@]}"
 }
 
 info "launching instances"

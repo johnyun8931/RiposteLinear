@@ -41,6 +41,7 @@ assert_dynamodb_smoke_state() {
   local stage="$1"
   local epoch_id="$2"
   local accepting="$3"
+  local allow_completed="${4:-false}"
   local holder
   local epoch_file="$SMOKE_LOCAL_DIR/dynamodb-$stage/epoch.json"
   local lease_file="$SMOKE_LOCAL_DIR/dynamodb-$stage/lease.json"
@@ -51,23 +52,26 @@ assert_dynamodb_smoke_state() {
   fi
 
   holder="$(coordinator_holder_id)"
-  python3 - "$epoch_file" "$lease_file" "$shard_config_file" "$epoch_id" "$accepting" "$holder" <<'PY'
+  python3 - "$epoch_file" "$lease_file" "$shard_config_file" "$epoch_id" "$accepting" "$allow_completed" "$holder" <<'PY'
 import json
 import sys
 
-epoch_path, lease_path, shard_config_path, epoch_id, accepting, holder = sys.argv[1:]
+epoch_path, lease_path, shard_config_path, epoch_id, accepting, allow_completed, holder = sys.argv[1:]
 epoch = json.load(open(epoch_path)).get("Item", {})
 lease = json.load(open(lease_path)).get("Item", {})
 shard_config = json.load(open(shard_config_path)).get("Item", {})
 
 actual_epoch = epoch.get("epoch_id", {}).get("N")
 actual_accepting = epoch.get("accepting", {}).get("BOOL")
+actual_state = epoch.get("state", {}).get("S")
 actual_holder = lease.get("holder", {}).get("S")
 actual_shard_version = shard_config.get("version", {}).get("N")
 
 if actual_epoch != epoch_id:
     raise SystemExit(f"DynamoDB epoch id mismatch: expected {epoch_id}, got {actual_epoch}")
-if actual_accepting != (accepting == "true"):
+expected_accepting = accepting == "true"
+completed_is_allowed = allow_completed == "true" and actual_state == "completed" and actual_accepting is False
+if actual_accepting != expected_accepting and not completed_is_allowed:
     raise SystemExit(f"DynamoDB accepting mismatch: expected {accepting}, got {actual_accepting}")
 if actual_holder != holder:
     raise SystemExit(f"DynamoDB lease holder mismatch: expected {holder}, got {actual_holder}")
@@ -109,7 +113,7 @@ capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_a
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard1-leader.json"
 capture_dynamodb_smoke_state active
-assert_dynamodb_smoke_state active "$epoch_id" true
+assert_dynamodb_smoke_state active "$epoch_id" true true
 
 info "sending deterministic smoke writes through the coordinator"
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 1 -y 0 -payload shard0-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row0.log'"
