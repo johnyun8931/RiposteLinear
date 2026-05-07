@@ -127,8 +127,12 @@ host_context_line | tee "$HOST_INFO_FILE"
 
 for threads in $THREAD_SWEEP; do
 	info "Benchmark sweep for server threads=$threads"
-	IFS=$'\t' read -r baseline_total baseline_client_max_sent <<<"$(run_baseline_pair_for_threads "$threads")"
-	IFS=$'\t' read -r shard0_total shard1_total sharded_total sharded_client_max_sent scaling_epoch_id scaling_accepted_requests scaling_duration_secs request_density scaling_action scaling_reason <<<"$(run_sharded_topology_for_threads "$threads")"
+	baseline_output="$TMP_DIR/baseline-t${threads}.tsv"
+	sharded_output="$TMP_DIR/sharded-t${threads}.tsv"
+	run_baseline_pair_for_threads "$threads" >"$baseline_output"
+	IFS=$'\t' read -r baseline_total baseline_client_max_sent <"$baseline_output"
+	run_sharded_topology_for_threads "$threads" >"$sharded_output"
+	IFS=$'\t' read -r shard0_total shard1_total sharded_total sharded_client_max_sent scaling_epoch_id scaling_accepted_requests scaling_duration_secs request_density scaling_action scaling_reason <"$sharded_output"
 
 	baseline_req_per_sec="$(python3 - "$baseline_total" "$BENCH_DURATION" <<'PY'
 import sys
