@@ -866,6 +866,13 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	reply.EndUnix = epoch.EndTime.Unix()
 	reply.DurationSecs = epoch.DurationSeconds
 	reply.Accepting = acceptingFromControlStore(controlStore, epoch)
+	scaling := defaultCoordinatorScalingRecommendation(len(shards))
+	reply.CurrentShardCount = scaling.CurrentShardCount
+	reply.RecommendedNextShardCount = scaling.RecommendedShardCount
+	reply.TargetRowsPerShard = scaling.TargetRowsPerShard
+	reply.ScalingAction = scaling.Action
+	reply.ScalingReason = scaling.Reason
+	reply.RequestDensity = scaling.RequestDensity
 	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
 
 	for i, shard := range shards {

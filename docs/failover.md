@@ -15,6 +15,23 @@ This is the Phase 4 direction after parking the Raft coordinator spike on
 The committed Phase 3.5 health/status RPCs remain useful for observability, but
 they do not decide failover by themselves.
 
+## Coordinator Authority Tradeoff
+
+Raft would also solve coordinator authority. A Raft-backed coordinator group
+would elect one leader, replicate control-plane updates through a committed log,
+and let follower coordinators stay warm with the same epoch and shard-map state.
+That model can support coordinator scaling for read-only/status paths because
+followers can serve replicated state locally, while writes still go through the
+Raft leader or through a leader-forwarding path.
+
+This branch uses DynamoDB instead for simplicity. DynamoDB conditional writes
+give us the main property we need first: exactly one active coordinator lease
+holder with a fencing token. That avoids implementing and operating a Raft
+cluster while we are still changing ingestion, shard failover, and result
+bookkeeping semantics. The tradeoff is that DynamoDB centralizes coordinator
+authority in an AWS service; horizontally scaled write routers and durable
+ingestion still need SQS-style queueing and later routing work.
+
 ## Local Slices
 
 The first AWS-native implementation slices are intentionally SDK-free:

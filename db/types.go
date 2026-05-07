@@ -263,16 +263,22 @@ type CoordinatorShardStatus struct {
 }
 
 type CoordinatorStatusReply struct {
-	Healthy      bool                     `json:"healthy"`
-	Role         string                   `json:"role"`
-	LeaderAddr   string                   `json:"leader_addr"`
-	EpochID      int64                    `json:"epoch_id"`
-	State        string                   `json:"state"`
-	StartUnix    int64                    `json:"start_unix"`
-	EndUnix      int64                    `json:"end_unix"`
-	DurationSecs int64                    `json:"duration_secs"`
-	Accepting    bool                     `json:"accepting"`
-	Shards       []CoordinatorShardStatus `json:"shards"`
+	Healthy                   bool                     `json:"healthy"`
+	Role                      string                   `json:"role"`
+	LeaderAddr                string                   `json:"leader_addr"`
+	EpochID                   int64                    `json:"epoch_id"`
+	State                     string                   `json:"state"`
+	StartUnix                 int64                    `json:"start_unix"`
+	EndUnix                   int64                    `json:"end_unix"`
+	DurationSecs              int64                    `json:"duration_secs"`
+	Accepting                 bool                     `json:"accepting"`
+	CurrentShardCount         int                      `json:"current_shard_count"`
+	RecommendedNextShardCount int                      `json:"recommended_next_shard_count"`
+	TargetRowsPerShard        int                      `json:"target_rows_per_shard"`
+	ScalingAction             string                   `json:"scaling_action"`
+	ScalingReason             string                   `json:"scaling_reason"`
+	RequestDensity            float64                  `json:"request_density"`
+	Shards                    []CoordinatorShardStatus `json:"shards"`
 }
 
 type AbortEpochArgs struct {
