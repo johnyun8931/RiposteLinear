@@ -973,6 +973,13 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	now := time.Now().UTC()
 	populateCoordinatorLeaseStatus(reply, lease, now)
 	reply.ActiveHolder = activeHolderFromControlStore(controlStore, now)
+	scaling := defaultCoordinatorScalingRecommendation(len(shards))
+	reply.CurrentShardCount = scaling.CurrentShardCount
+	reply.RecommendedNextShardCount = scaling.RecommendedShardCount
+	reply.TargetRowsPerShard = scaling.TargetRowsPerShard
+	reply.ScalingAction = scaling.Action
+	reply.ScalingReason = scaling.Reason
+	reply.RequestDensity = scaling.RequestDensity
 	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
 
 	for i, shard := range shards {

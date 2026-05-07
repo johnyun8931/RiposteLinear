@@ -263,21 +263,27 @@ type CoordinatorShardStatus struct {
 }
 
 type CoordinatorStatusReply struct {
-	Healthy            bool                     `json:"healthy"`
-	Role               string                   `json:"role"`
-	LeaderAddr         string                   `json:"leader_addr"`
-	EpochID            int64                    `json:"epoch_id"`
-	State              string                   `json:"state"`
-	StartUnix          int64                    `json:"start_unix"`
-	EndUnix            int64                    `json:"end_unix"`
-	DurationSecs       int64                    `json:"duration_secs"`
-	Accepting          bool                     `json:"accepting"`
-	LeaseHolder        string                   `json:"lease_holder"`
-	LeaseFencingToken  int64                    `json:"lease_fencing_token"`
-	LeaseExpiresUnixMs int64                    `json:"lease_expires_unix_ms"`
-	LeaseActive        bool                     `json:"lease_active"`
-	ActiveHolder       string                   `json:"active_holder"`
-	Shards             []CoordinatorShardStatus `json:"shards"`
+	Healthy                   bool                     `json:"healthy"`
+	Role                      string                   `json:"role"`
+	LeaderAddr                string                   `json:"leader_addr"`
+	EpochID                   int64                    `json:"epoch_id"`
+	State                     string                   `json:"state"`
+	StartUnix                 int64                    `json:"start_unix"`
+	EndUnix                   int64                    `json:"end_unix"`
+	DurationSecs              int64                    `json:"duration_secs"`
+	Accepting                 bool                     `json:"accepting"`
+	LeaseHolder               string                   `json:"lease_holder"`
+	LeaseFencingToken         int64                    `json:"lease_fencing_token"`
+	LeaseExpiresUnixMs        int64                    `json:"lease_expires_unix_ms"`
+	LeaseActive               bool                     `json:"lease_active"`
+	ActiveHolder              string                   `json:"active_holder"`
+	CurrentShardCount         int                      `json:"current_shard_count"`
+	RecommendedNextShardCount int                      `json:"recommended_next_shard_count"`
+	TargetRowsPerShard        int                      `json:"target_rows_per_shard"`
+	ScalingAction             string                   `json:"scaling_action"`
+	ScalingReason             string                   `json:"scaling_reason"`
+	RequestDensity            float64                  `json:"request_density"`
+	Shards                    []CoordinatorShardStatus `json:"shards"`
 }
 
 type AbortEpochArgs struct {

@@ -729,6 +729,15 @@ func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 	if reply.ActiveHolder != defaultCoordinatorLeaseHolder {
 		t.Fatalf("expected active holder %q, got %+v", defaultCoordinatorLeaseHolder, reply)
 	}
+	if reply.CurrentShardCount != 2 || reply.RecommendedNextShardCount != 2 {
+		t.Fatalf("unexpected default scaling shard counts: current=%d recommended=%d", reply.CurrentShardCount, reply.RecommendedNextShardCount)
+	}
+	if reply.TargetRowsPerShard != db.TABLE_HEIGHT {
+		t.Fatalf("unexpected target rows per shard: %d", reply.TargetRowsPerShard)
+	}
+	if reply.ScalingAction != scalingActionKeep || reply.RequestDensity != 2 {
+		t.Fatalf("unexpected default scaling recommendation: action=%q density=%.2f reason=%q", reply.ScalingAction, reply.RequestDensity, reply.ScalingReason)
+	}
 	if len(reply.Shards) != 2 {
 		t.Fatalf("expected two shard statuses, got %d", len(reply.Shards))
 	}
@@ -769,6 +778,42 @@ func TestCoordinatorStatusIncludesStandbyHealthWhenConfigured(t *testing.T) {
 	}
 	if standby.statusCalls != 1 || standby.closeCalls != 1 {
 		t.Fatalf("expected standby status and close calls, got status=%d close=%d", standby.statusCalls, standby.closeCalls)
+	}
+}
+
+func TestCoordinatorStatusScalingDoesNotMutateRoutingOrControlStore(t *testing.T) {
+	store := newMemoryControlStore(7)
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT/2),
+		activeOnlyShard(1, db.TABLE_HEIGHT/2, db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}},
+		1: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 1}},
+	}, store, defaultCoordinatorLeaseHolder, time.Minute, time.Minute)
+
+	beforeVersion := store.ShardConfigVersion()
+	beforeShard, err := coord.routeShard(db.TABLE_HEIGHT / 2)
+	if err != nil {
+		t.Fatalf("routeShard failed before status: %v", err)
+	}
+
+	var reply db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &reply); err != nil {
+		t.Fatalf("Coordinator.Status failed: %v", err)
+	}
+
+	afterShard, err := coord.routeShard(db.TABLE_HEIGHT / 2)
+	if err != nil {
+		t.Fatalf("routeShard failed after status: %v", err)
+	}
+	if beforeShard.ID != afterShard.ID {
+		t.Fatalf("status changed routing: before shard %d after shard %d", beforeShard.ID, afterShard.ID)
+	}
+	if version := store.ShardConfigVersion(); version != beforeVersion {
+		t.Fatalf("status changed shard config version: before %d after %d", beforeVersion, version)
+	}
+	if reply.ScalingAction != scalingActionKeep {
+		t.Fatalf("expected default scaling status to keep, got %+v", reply)
 	}
 }
 
