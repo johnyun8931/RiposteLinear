@@ -28,6 +28,10 @@ load_state
 [[ -n "$USER_POST_EPOCH_FLUSH_SECONDS" ]] && POST_EPOCH_FLUSH_SECONDS="$USER_POST_EPOCH_FLUSH_SECONDS"
 [[ -n "$USER_CLIENT_EXIT_GRACE_SECONDS" ]] && CLIENT_EXIT_GRACE_SECONDS="$USER_CLIENT_EXIT_GRACE_SECONDS"
 
+if [[ -n "${RESULT_ID:-}" ]]; then
+  RESULTS_S3_PREFIX="${RESULTS_S3_PREFIX%/}/$RESULT_ID"
+fi
+
 require_cmd ssh
 
 cleanup() {
@@ -47,6 +51,9 @@ WARMUP_EPOCH_SECONDS=$(quote "$WARMUP_EPOCH_SECONDS")
 MEASURED_EPOCH_SECONDS=$(quote "$MEASURED_EPOCH_SECONDS")
 POST_EPOCH_FLUSH_SECONDS=$(quote "$POST_EPOCH_FLUSH_SECONDS")
 CLIENT_EXIT_GRACE_SECONDS=$(quote "$CLIENT_EXIT_GRACE_SECONDS")
+RESULTS_S3_BUCKET=$(quote "$RESULTS_S3_BUCKET")
+RESULTS_S3_PREFIX=$(quote "$RESULTS_S3_PREFIX")
+RESULTS_S3_REGION=$(quote "$RESULTS_S3_REGION")
 EOF_STATE
 }
 
@@ -110,15 +117,17 @@ run_baseline_phase() {
   local duration="$2"
   local phase_logs
   local phase_results
+  local phase_s3_prefix
   local client_pid_path
   phase_logs="$(phase_log_dir "$phase")"
   phase_results="$(phase_results_dir "$phase")"
+  phase_s3_prefix="$(results_s3_phase_prefix "$phase")"
   client_pid_path="$(phase_dir "$phase")/client.pid"
 
   info "starting baseline topology for $phase (${duration}s)"
   kill_all_remote_processes
-  start_remote_server "$SHARD0_FOLLOWER_PUBLIC_IP" 1 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$phase_results/shard0" "$phase_logs/shard0-follower.log"
-  start_remote_server "$SHARD0_LEADER_PUBLIC_IP" 0 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$phase_results/shard0" "$phase_logs/shard0-leader.log"
+  start_remote_server "$SHARD0_FOLLOWER_PUBLIC_IP" 1 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$phase_results/shard0" "$phase_logs/shard0-follower.log" "$phase_s3_prefix"
+  start_remote_server "$SHARD0_LEADER_PUBLIC_IP" 0 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$phase_results/shard0" "$phase_logs/shard0-leader.log" "$phase_s3_prefix"
   remote_wait_for_port "$SHARD0_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD0_LEADER_PORT"
 
   retry_start_epoch server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$duration" >/dev/null
@@ -137,21 +146,23 @@ run_sharded_phase() {
   local duration="$2"
   local phase_logs
   local phase_results
+  local phase_s3_prefix
   local client_pid_path
   phase_logs="$(phase_log_dir "$phase")"
   phase_results="$(phase_results_dir "$phase")"
+  phase_s3_prefix="$(results_s3_phase_prefix "$phase")"
   client_pid_path="$(phase_dir "$phase")/client.pid"
 
   info "starting sharded topology for $phase (${duration}s)"
   kill_all_remote_processes
-  start_remote_server "$SHARD0_FOLLOWER_PUBLIC_IP" 1 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$phase_results/shard0" "$phase_logs/shard0-follower.log"
-  start_remote_server "$SHARD0_LEADER_PUBLIC_IP" 0 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$phase_results/shard0" "$phase_logs/shard0-leader.log"
-  start_remote_server "$SHARD1_FOLLOWER_PUBLIC_IP" 1 1 "$(server_pair_csv "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_LEADER_PORT" "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_FOLLOWER_PORT")" "$phase_results/shard1" "$phase_logs/shard1-follower.log"
-  start_remote_server "$SHARD1_LEADER_PUBLIC_IP" 0 1 "$(server_pair_csv "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_LEADER_PORT" "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_FOLLOWER_PORT")" "$phase_results/shard1" "$phase_logs/shard1-leader.log"
+  start_remote_server "$SHARD0_FOLLOWER_PUBLIC_IP" 1 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$phase_results/shard0" "$phase_logs/shard0-follower.log" "$phase_s3_prefix"
+  start_remote_server "$SHARD0_LEADER_PUBLIC_IP" 0 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$phase_results/shard0" "$phase_logs/shard0-leader.log" "$phase_s3_prefix"
+  start_remote_server "$SHARD1_FOLLOWER_PUBLIC_IP" 1 1 "$(server_pair_csv "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_LEADER_PORT" "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_FOLLOWER_PORT")" "$phase_results/shard1" "$phase_logs/shard1-follower.log" "$phase_s3_prefix"
+  start_remote_server "$SHARD1_LEADER_PUBLIC_IP" 0 1 "$(server_pair_csv "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_LEADER_PORT" "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_FOLLOWER_PORT")" "$phase_results/shard1" "$phase_logs/shard1-leader.log" "$phase_s3_prefix"
   remote_wait_for_port "$SHARD0_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD0_LEADER_PORT"
   remote_wait_for_port "$SHARD1_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD1_LEADER_PORT"
 
-  start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$phase_logs/coordinator.log"
+  start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$phase_logs/coordinator.log" "$phase_s3_prefix"
   remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_PORT"
 
   retry_start_epoch coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$duration" >/dev/null
@@ -182,4 +193,5 @@ AWS benchmark run complete.
   client exit grace: ${CLIENT_EXIT_GRACE_SECONDS}s
   client concurrency: ${CLIENT_CONCURRENCY}
   client retry overload: ${CLIENT_RETRY_OVERLOAD}
+  s3 results: s3://$RESULTS_S3_BUCKET/$RESULTS_S3_PREFIX
 EOF

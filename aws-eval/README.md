@@ -136,6 +136,9 @@ Creates:
 - one security group
   - SSH from current public IP only
   - all TCP within the security group
+- one run-scoped S3 results bucket
+- one temporary IAM role / instance profile granting the EC2 instances access to
+  that bucket
 - six tagged EC2 instances
 
 State is written to:
@@ -167,6 +170,8 @@ leaders are ready, sends deterministic writes for row `0` and row `128`,
 waits for completion, and verifies:
 
 - each shard leader wrote its own result file
+- each shard leader can publish `result.json`, `result.bin`, and `latest.json`
+  to the run S3 bucket
 - the payload bytes landed in the expected shard
 
 ### 5. Benchmark
@@ -223,6 +228,7 @@ Outputs:
 - `comparison-summary.md`
 - raw logs per node
 - copied result JSON files under `leader-results/`
+- S3 result bucket/prefix metadata in `metadata.json`
 
 ### 7. Teardown
 
@@ -232,8 +238,9 @@ Run teardown even if earlier steps fail:
 ./aws-eval/06-teardown.sh
 ```
 
-This terminates the six instances, deletes the temporary key pair, and deletes
-the security group after attachments drain.
+This terminates the six instances, empties/deletes the run S3 bucket, deletes
+the temporary IAM role/profile, deletes the temporary key pair, and deletes the
+security group after attachments drain.
 
 ## Useful Overrides
 
@@ -258,6 +265,9 @@ START_EPOCH_RETRY_TIMEOUT=90
 START_EPOCH_RETRY_INTERVAL=2
 POST_EPOCH_FLUSH_SECONDS=12
 CLIENT_EXIT_GRACE_SECONDS=30
+RESULTS_S3_BUCKET=<auto: project-run-results>
+RESULTS_S3_PREFIX=<auto: runs/run-id>
+RESULTS_S3_REGION=<auto: AWS_REGION>
 ```
 
 Use explicit subnet/AZ overrides only when the default-network auto-selection

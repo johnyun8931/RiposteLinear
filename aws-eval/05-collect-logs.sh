@@ -82,6 +82,9 @@ START_EPOCH_RETRY_TIMEOUT="$START_EPOCH_RETRY_TIMEOUT" \
 START_EPOCH_RETRY_INTERVAL="$START_EPOCH_RETRY_INTERVAL" \
 POST_EPOCH_FLUSH_SECONDS="$POST_EPOCH_FLUSH_SECONDS" \
 CLIENT_EXIT_GRACE_SECONDS="$CLIENT_EXIT_GRACE_SECONDS" \
+RESULTS_S3_BUCKET="$RESULTS_S3_BUCKET" \
+RESULTS_S3_PREFIX="$RESULTS_S3_PREFIX" \
+RESULTS_S3_REGION="$RESULTS_S3_REGION" \
 COORDINATOR_ID="$COORDINATOR_ID" \
 COORDINATOR_PUBLIC_IP="$COORDINATOR_PUBLIC_IP" \
 COORDINATOR_PRIVATE_IP="$COORDINATOR_PRIVATE_IP" \
@@ -145,6 +148,11 @@ payload = {
         "start_epoch_retry_interval": int(os.environ["START_EPOCH_RETRY_INTERVAL"]),
         "post_epoch_flush_seconds": int(os.environ["POST_EPOCH_FLUSH_SECONDS"]),
         "client_exit_grace_seconds": int(os.environ["CLIENT_EXIT_GRACE_SECONDS"]),
+    },
+    "s3_results": {
+        "bucket": os.environ["RESULTS_S3_BUCKET"],
+        "prefix": os.environ["RESULTS_S3_PREFIX"],
+        "region": os.environ["RESULTS_S3_REGION"],
     },
     "instances": {
         "coordinator": {

@@ -26,6 +26,10 @@ START_EPOCH_RETRY_INTERVAL="${START_EPOCH_RETRY_INTERVAL:-2}"
 POST_EPOCH_FLUSH_SECONDS="${POST_EPOCH_FLUSH_SECONDS:-12}"
 CLIENT_EXIT_GRACE_SECONDS="${CLIENT_EXIT_GRACE_SECONDS:-30}"
 
+RESULTS_S3_BUCKET="${RESULTS_S3_BUCKET:-}"
+RESULTS_S3_PREFIX="${RESULTS_S3_PREFIX:-}"
+RESULTS_S3_REGION="${RESULTS_S3_REGION:-$AWS_REGION}"
+
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
 SHARD0_LEADER_PORT="${SHARD0_LEADER_PORT:-8610}"
 SHARD0_FOLLOWER_PORT="${SHARD0_FOLLOWER_PORT:-8611}"
@@ -40,7 +44,12 @@ REMOTE_SMOKE_DIR="$REMOTE_ROOT/smoke"
 STATE_DIR="$SCRIPT_DIR/.state"
 STATE_FILE="$STATE_DIR/env.sh"
 BENCHMARK_STATE_FILE="$STATE_DIR/benchmark-env.sh"
-KEY_DIR="$SCRIPT_DIR/keys"
+if [[ -z "${KEY_DIR:-}" ]]; then
+  case "$SCRIPT_DIR" in
+    /mnt/*) KEY_DIR="${TMPDIR:-/tmp}/${PROJECT_TAG}-keys" ;;
+    *) KEY_DIR="$SCRIPT_DIR/keys" ;;
+  esac
+fi
 BIN_DIR="$SCRIPT_DIR/bin"
 RESULTS_DIR="$SCRIPT_DIR/results"
 
@@ -73,37 +82,48 @@ quote() {
   printf "%q" "$1"
 }
 
+default_results_s3_bucket() {
+  local raw
+  raw="$(printf '%s-%s-results' "$PROJECT_TAG" "$RUN_ID" | tr '[:upper:]' '[:lower:]')"
+  printf '%s\n' "$raw" | sed 's/[^a-z0-9.-]/-/g; s/^[^a-z0-9]*//; s/[^a-z0-9]*$//; s/--*/-/g' | cut -c1-63 | sed 's/[^a-z0-9]*$//'
+}
+
+results_s3_phase_prefix() {
+  local phase="$1"
+  if [[ -z "${RESULTS_S3_PREFIX:-}" ]]; then
+    printf '%s\n' "$phase"
+    return 0
+  fi
+  printf '%s/%s\n' "${RESULTS_S3_PREFIX%/}" "$phase"
+}
+
 load_state() {
   [[ -f "$STATE_FILE" ]] || die "state file not found: $STATE_FILE. Run 01-launch.sh first."
   # shellcheck disable=SC1090
   source "$STATE_FILE"
 }
 
-ssh_opts() {
-  echo -i "$KEY_FILE" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
-}
-
 remote_cmd() {
   local host="$1"
   local cmd="$2"
-  # shellcheck disable=SC2046
-  ssh $(ssh_opts) "${SSH_USER}@${host}" "$cmd"
+  local ssh_opts=(-i "$KEY_FILE" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+  ssh "${ssh_opts[@]}" "${SSH_USER}@${host}" "$cmd"
 }
 
 copy_to_remote() {
   local src="$1"
   local host="$2"
   local dst="$3"
-  # shellcheck disable=SC2046
-  scp $(ssh_opts) "$src" "${SSH_USER}@${host}:${dst}"
+  local ssh_opts=(-i "$KEY_FILE" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+  scp "${ssh_opts[@]}" "$src" "${SSH_USER}@${host}:${dst}"
 }
 
 copy_from_remote() {
   local host="$1"
   local src="$2"
   local dst="$3"
-  # shellcheck disable=SC2046
-  scp -r $(ssh_opts) "${SSH_USER}@${host}:${src}" "$dst"
+  local ssh_opts=(-i "$KEY_FILE" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+  scp -r "${ssh_opts[@]}" "${SSH_USER}@${host}:${src}" "$dst"
 }
 
 wait_for_ssh() {
@@ -369,14 +389,24 @@ start_remote_server() {
   local servers_csv="$4"
   local results_dir="$5"
   local log_path="$6"
-  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv' > '${log_path}.nohup' 2>&1 &"
+  local s3_prefix="${7:-}"
+  local s3_args=""
+  if [[ -n "${RESULTS_S3_BUCKET:-}" && -n "$s3_prefix" ]]; then
+    s3_args="-results-s3-bucket '$RESULTS_S3_BUCKET' -results-s3-prefix '$s3_prefix' -results-s3-region '$RESULTS_S3_REGION'"
+  fi
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -results-dir '$results_dir' $s3_args -log '$log_path' -servers '$servers_csv' > '${log_path}.nohup' 2>&1 &"
 }
 
 start_remote_coordinator() {
   local host="$1"
   local listen_addr="$2"
   local log_path="$3"
-  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")'; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)' > '${log_path}.nohup' 2>&1 &"
+  local s3_prefix="${4:-}"
+  local s3_args=""
+  if [[ -n "${RESULTS_S3_BUCKET:-}" && -n "$s3_prefix" ]]; then
+    s3_args="-results-s3-bucket '$RESULTS_S3_BUCKET' -results-s3-prefix '$s3_prefix' -results-s3-region '$RESULTS_S3_REGION'"
+  fi
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")'; nohup ~/coordinator -listen '$listen_addr' $s3_args -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)' > '${log_path}.nohup' 2>&1 &"
 }
 
 start_remote_hammer_client() {

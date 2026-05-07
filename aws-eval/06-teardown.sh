@@ -16,7 +16,11 @@ for id in \
   "${SHARD0_FOLLOWER_ID:-}" \
   "${SHARD1_LEADER_ID:-}" \
   "${SHARD1_FOLLOWER_ID:-}" \
-  "${CLIENT_ID:-}"; do
+  "${CLIENT_ID:-}" \
+  "${SERVER0_ID:-}" \
+  "${SERVER1_ID:-}" \
+  "${CLIENT0_ID:-}" \
+  "${CLIENT1_ID:-}"; do
   if [[ -n "$id" ]]; then
     INSTANCE_IDS+=("$id")
   fi
@@ -43,6 +47,35 @@ if [[ -n "${SG_ID:-}" ]]; then
     fi
     sleep 10
   done
+fi
+
+if [[ -n "${RESULTS_S3_BUCKET:-}" && "${RESULTS_S3_BUCKET_CREATED:-}" == "1" ]]; then
+  info "emptying and deleting S3 results bucket: s3://$RESULTS_S3_BUCKET"
+  aws_region s3 rm "s3://${RESULTS_S3_BUCKET}" --recursive >/dev/null 2>&1 || true
+  aws_region s3api delete-bucket --bucket "$RESULTS_S3_BUCKET" >/dev/null 2>&1 || true
+fi
+
+if [[ -n "${INSTANCE_PROFILE_NAME:-}" && -n "${IAM_ROLE_NAME:-}" ]]; then
+  info "deleting IAM instance profile: $INSTANCE_PROFILE_NAME"
+  aws_base iam remove-role-from-instance-profile \
+    --instance-profile-name "$INSTANCE_PROFILE_NAME" \
+    --role-name "$IAM_ROLE_NAME" >/dev/null 2>&1 || true
+  aws_base iam delete-instance-profile \
+    --instance-profile-name "$INSTANCE_PROFILE_NAME" >/dev/null 2>&1 || true
+fi
+
+if [[ -n "${IAM_ROLE_NAME:-}" && -n "${IAM_POLICY_ARN:-}" ]]; then
+  info "detaching and deleting IAM policy: $IAM_POLICY_ARN"
+  aws_base iam detach-role-policy \
+    --role-name "$IAM_ROLE_NAME" \
+    --policy-arn "$IAM_POLICY_ARN" >/dev/null 2>&1 || true
+  aws_base iam delete-policy \
+    --policy-arn "$IAM_POLICY_ARN" >/dev/null 2>&1 || true
+fi
+
+if [[ -n "${IAM_ROLE_NAME:-}" ]]; then
+  info "deleting IAM role: $IAM_ROLE_NAME"
+  aws_base iam delete-role --role-name "$IAM_ROLE_NAME" >/dev/null 2>&1 || true
 fi
 
 remaining_instances="$(aws_region ec2 describe-instances \

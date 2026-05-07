@@ -17,10 +17,15 @@ fi
 mkdir -p "$STATE_DIR" "$KEY_DIR"
 
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+RESULTS_S3_BUCKET="${RESULTS_S3_BUCKET:-$(default_results_s3_bucket)}"
+RESULTS_S3_PREFIX="${RESULTS_S3_PREFIX:-runs/$RUN_ID}"
 KEY_NAME="${KEY_NAME:-${PROJECT_TAG}-${RUN_ID}}"
 KEY_FILE="${KEY_FILE:-$KEY_DIR/${KEY_NAME}.pem}"
 SG_NAME="${SG_NAME:-${PROJECT_TAG}-${RUN_ID}}"
 SSH_CIDR="${SSH_CIDR:-$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')/32}"
+IAM_ROLE_NAME="${IAM_ROLE_NAME:-${PROJECT_TAG}-${RUN_ID}-role}"
+IAM_POLICY_NAME="${IAM_POLICY_NAME:-${PROJECT_TAG}-${RUN_ID}-s3-results}"
+INSTANCE_PROFILE_NAME="${INSTANCE_PROFILE_NAME:-${PROJECT_TAG}-${RUN_ID}-profile}"
 
 IFS=$'\t' read -r SELECTED_VPC_ID SELECTED_SUBNET_ID SELECTED_AZ <<<"$(resolve_network_selection)"
 AMI_ID="${AMI_ID:-$(aws_region ssm get-parameter --name "$AMI_SSM_PARAM" --query 'Parameter.Value' --output text)}"
@@ -32,6 +37,8 @@ SHARD0_FOLLOWER_ID=""
 SHARD1_LEADER_ID=""
 SHARD1_FOLLOWER_ID=""
 CLIENT_ID=""
+IAM_POLICY_ARN=""
+RESULTS_S3_BUCKET_CREATED=""
 
 COORDINATOR_PRIVATE_IP=""
 SHARD0_LEADER_PRIVATE_IP=""
@@ -62,6 +69,14 @@ KEY_FILE=$(quote "$KEY_FILE")
 SG_ID=$(quote "$SG_ID")
 SG_NAME=$(quote "$SG_NAME")
 SSH_CIDR=$(quote "$SSH_CIDR")
+RESULTS_S3_BUCKET=$(quote "$RESULTS_S3_BUCKET")
+RESULTS_S3_PREFIX=$(quote "$RESULTS_S3_PREFIX")
+RESULTS_S3_REGION=$(quote "$RESULTS_S3_REGION")
+IAM_ROLE_NAME=$(quote "$IAM_ROLE_NAME")
+IAM_POLICY_NAME=$(quote "$IAM_POLICY_NAME")
+IAM_POLICY_ARN=$(quote "$IAM_POLICY_ARN")
+INSTANCE_PROFILE_NAME=$(quote "$INSTANCE_PROFILE_NAME")
+RESULTS_S3_BUCKET_CREATED=$(quote "$RESULTS_S3_BUCKET_CREATED")
 COORDINATOR_INSTANCE_TYPE=$(quote "$COORDINATOR_INSTANCE_TYPE")
 SERVER_INSTANCE_TYPE=$(quote "$SERVER_INSTANCE_TYPE")
 CLIENT_INSTANCE_TYPE=$(quote "$CLIENT_INSTANCE_TYPE")
@@ -108,8 +123,105 @@ REMOTE_SMOKE_DIR=$(quote "$REMOTE_SMOKE_DIR")
 EOF_STATE
 }
 
+create_results_bucket() {
+  info "creating S3 results bucket: s3://$RESULTS_S3_BUCKET"
+  if [[ "$AWS_REGION" == "us-east-1" ]]; then
+    aws_region s3api create-bucket --bucket "$RESULTS_S3_BUCKET" >/dev/null
+  else
+    aws_region s3api create-bucket \
+      --bucket "$RESULTS_S3_BUCKET" \
+      --create-bucket-configuration "LocationConstraint=${AWS_REGION}" >/dev/null
+  fi
+
+  aws_region s3api put-public-access-block \
+    --bucket "$RESULTS_S3_BUCKET" \
+    --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+  aws_region s3api put-bucket-tagging \
+    --bucket "$RESULTS_S3_BUCKET" \
+    --tagging "TagSet=[{Key=Project,Value=${PROJECT_TAG}},{Key=RunId,Value=${RUN_ID}}]"
+  RESULTS_S3_BUCKET_CREATED=1
+}
+
+create_results_instance_profile() {
+  local assume_doc policy_doc
+  assume_doc="$(mktemp)"
+  policy_doc="$(mktemp)"
+
+  cat >"$assume_doc" <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+JSON
+
+  cat >"$policy_doc" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::${RESULTS_S3_BUCKET}/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::${RESULTS_S3_BUCKET}"
+    }
+  ]
+}
+JSON
+
+  info "creating IAM role/profile for S3 result access"
+  aws_base iam create-role \
+    --role-name "$IAM_ROLE_NAME" \
+    --assume-role-policy-document "file://${assume_doc}" \
+    --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" >/dev/null
+
+  IAM_POLICY_ARN="$(aws_base iam create-policy \
+    --policy-name "$IAM_POLICY_NAME" \
+    --policy-document "file://${policy_doc}" \
+    --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" \
+    --query 'Policy.Arn' \
+    --output text)"
+  write_launch_state
+
+  aws_base iam attach-role-policy \
+    --role-name "$IAM_ROLE_NAME" \
+    --policy-arn "$IAM_POLICY_ARN"
+
+  aws_base iam create-instance-profile \
+    --instance-profile-name "$INSTANCE_PROFILE_NAME" \
+    --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" >/dev/null
+  write_launch_state
+
+  aws_base iam add-role-to-instance-profile \
+    --instance-profile-name "$INSTANCE_PROFILE_NAME" \
+    --role-name "$IAM_ROLE_NAME"
+
+  rm -f "$assume_doc" "$policy_doc"
+
+  # IAM instance profiles are eventually consistent; give EC2 a moment to see it.
+  sleep 10
+}
+
 info "launch run id: $RUN_ID"
 info "selected network: vpc=$SELECTED_VPC_ID subnet=$SELECTED_SUBNET_ID az=$SELECTED_AZ"
+create_results_bucket
+write_launch_state
+create_results_instance_profile
+write_launch_state
 info "creating key pair: $KEY_NAME"
 aws_region ec2 create-key-pair \
   --key-name "$KEY_NAME" \
@@ -155,6 +267,7 @@ launch_instance() {
     --key-name "$KEY_NAME" \
     --security-group-ids "$SG_ID" \
     --subnet-id "$SELECTED_SUBNET_ID" \
+    --iam-instance-profile "Name=${INSTANCE_PROFILE_NAME}" \
     --instance-initiated-shutdown-behavior terminate \
     --tag-specifications \
       "ResourceType=instance,Tags=[{Key=Project,Value=${PROJECT_TAG}},{Key=RunId,Value=${RUN_ID}},{Key=Name,Value=${name}},{Key=Role,Value=${role}}]" \
