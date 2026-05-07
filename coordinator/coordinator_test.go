@@ -83,6 +83,14 @@ func mustCoordinator(t *testing.T, shards []ShardConfig, clients map[int]shardCl
 	return coord
 }
 
+func setCoordinatorActiveEpoch(t *testing.T, coord *Coordinator, epoch db.EpochMeta) {
+	t.Helper()
+	coord.epoch = epoch
+	if err := coord.controlStore.StartEpoch(epoch, coord.controlStore.ShardConfigVersion()); err != nil {
+		t.Fatalf("control store StartEpoch failed: %v", err)
+	}
+}
+
 func activeOnlyShard(id, start, end int) ShardConfig {
 	return ShardConfig{
 		ID:       id,
@@ -167,7 +175,7 @@ func TestCoordinatorRoutesBoundaryRowsAndPreservesSessionMapping(t *testing.T) {
 		0: left,
 		1: right,
 	})
-	coord.epoch = db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60}
+	setCoordinatorActiveEpoch(t, coord, db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60})
 
 	var up1Left db.UploadReply1
 	if err := coord.Upload1(&db.UploadArgs1{RouteRow: db.TABLE_HEIGHT/2 - 1}, &up1Left); err != nil {
@@ -240,7 +248,7 @@ func TestCoordinatorStartEpochRequiresAllShardsAndAbortsStartedShardOnFailure(t 
 }
 
 func TestCoordinatorStartEpochProducesSharedMetadata(t *testing.T) {
-	startTime := time.Unix(1200, 0).UTC()
+	startTime := time.Now().UTC().Truncate(time.Second)
 	reply := db.StartEpochReply{
 		EpochID:      1,
 		State:        db.EpochStateActive.String(),
@@ -268,6 +276,62 @@ func TestCoordinatorStartEpochProducesSharedMetadata(t *testing.T) {
 	}
 	if status.EpochID != reply.EpochID || status.State != db.EpochStateActive.String() || !status.Accepting {
 		t.Fatalf("unexpected coordinator status: %+v", status)
+	}
+	epoch, ok := coord.controlStore.CurrentEpoch()
+	if !ok || epoch.ID != reply.EpochID || epoch.State != db.EpochStateActive {
+		t.Fatalf("expected active control-store epoch, ok=%t epoch=%+v", ok, epoch)
+	}
+	accepting, err := coord.controlStore.Accepting(reply.EpochID)
+	if err != nil || !accepting {
+		t.Fatalf("expected control store accepting epoch, accepting=%t err=%v", accepting, err)
+	}
+}
+
+func TestCoordinatorCompleteEpochMirrorsControlStore(t *testing.T) {
+	startTime := time.Now().UTC().Truncate(time.Second)
+	reply := db.StartEpochReply{
+		EpochID:      1,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+	}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{startReply: reply}})
+
+	if err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{}); err != nil {
+		t.Fatalf("StartEpoch failed: %v", err)
+	}
+	coord.completeEpoch()
+
+	epoch, ok := coord.controlStore.CurrentEpoch()
+	if !ok || epoch.ID != reply.EpochID || epoch.State != db.EpochStateCompleted {
+		t.Fatalf("expected completed control-store epoch, ok=%t epoch=%+v", ok, epoch)
+	}
+	accepting, err := coord.controlStore.Accepting(reply.EpochID)
+	if err != nil || accepting {
+		t.Fatalf("expected completed control-store epoch not accepting, accepting=%t err=%v", accepting, err)
+	}
+}
+
+func TestCoordinatorUpload1RejectsWhenControlStoreNotAccepting(t *testing.T) {
+	fakeClient := &fakeShardClient{}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: fakeClient})
+	epoch := db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60}
+	setCoordinatorActiveEpoch(t, coord, epoch)
+	if err := coord.controlStore.SetAccepting(epoch.ID, false); err != nil {
+		t.Fatalf("SetAccepting failed: %v", err)
+	}
+
+	err := coord.Upload1(&db.UploadArgs1{RouteRow: 0}, &db.UploadReply1{})
+	if err == nil || err.Error() != "No active epoch" {
+		t.Fatalf("expected no active epoch error, got %v", err)
+	}
+	if fakeClient.upload1Calls != 0 {
+		t.Fatalf("expected Upload1 not to reach shard when control store is not accepting, got %d calls", fakeClient.upload1Calls)
 	}
 }
 

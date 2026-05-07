@@ -91,14 +91,15 @@ type routedSession struct {
 const defaultShardStatusTimeout = 2 * time.Second
 
 type Coordinator struct {
-	mu         sync.Mutex
-	shards     []ShardConfig
-	shardByID  map[int]ShardConfig
-	clients    map[int]shardClient
-	sessions   map[int64]routedSession
-	nextUUID   int64
-	epoch      db.EpochMeta
-	epochTimer *time.Timer
+	mu           sync.Mutex
+	shards       []ShardConfig
+	shardByID    map[int]ShardConfig
+	clients      map[int]shardClient
+	sessions     map[int64]routedSession
+	nextUUID     int64
+	epoch        db.EpochMeta
+	epochTimer   *time.Timer
+	controlStore ControlStore
 }
 
 func parseShardConfig(value string) (ShardConfig, error) {
@@ -227,15 +228,23 @@ func validateShardMap(shards []ShardConfig) ([]ShardConfig, error) {
 }
 
 func NewCoordinator(shards []ShardConfig, clients map[int]shardClient) (*Coordinator, error) {
+	return newCoordinatorWithControlStore(shards, clients, newMemoryControlStore(1))
+}
+
+func newCoordinatorWithControlStore(shards []ShardConfig, clients map[int]shardClient, controlStore ControlStore) (*Coordinator, error) {
+	if controlStore == nil {
+		return nil, errors.New("control store is required")
+	}
 	validated, err := validateShardMap(shards)
 	if err != nil {
 		return nil, err
 	}
 	coord := &Coordinator{
-		shards:    validated,
-		shardByID: make(map[int]ShardConfig, len(validated)),
-		clients:   make(map[int]shardClient, len(validated)),
-		sessions:  make(map[int64]routedSession),
+		shards:       validated,
+		shardByID:    make(map[int]ShardConfig, len(validated)),
+		clients:      make(map[int]shardClient, len(validated)),
+		sessions:     make(map[int64]routedSession),
+		controlStore: controlStore,
 	}
 	for _, shard := range validated {
 		coord.shardByID[shard.ID] = shard
@@ -287,9 +296,15 @@ func (c *Coordinator) nextGlobalUUIDLocked() (int64, error) {
 
 func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
 	c.mu.Lock()
-	active := c.epoch.State == db.EpochStateActive
+	epoch := c.epoch
+	active := epoch.State == db.EpochStateActive
+	controlStore := c.controlStore
 	c.mu.Unlock()
 	if !active {
+		return errors.New("No active epoch")
+	}
+	accepting, err := controlStore.Accepting(epoch.ID)
+	if err != nil || !accepting {
 		return errors.New("No active epoch")
 	}
 
@@ -425,13 +440,24 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 	if c.epochTimer != nil {
 		c.epochTimer.Stop()
 	}
-	c.epoch = db.EpochMeta{
+	epoch := db.EpochMeta{
 		ID:              expected.EpochID,
 		State:           db.EpochStateActive,
 		StartTime:       time.Unix(expected.StartUnix, 0).UTC(),
 		EndTime:         time.Unix(expected.EndUnix, 0).UTC(),
 		DurationSeconds: expected.DurationSecs,
 	}
+	controlStore := c.controlStore
+	shardConfigVersion := controlStore.ShardConfigVersion()
+	c.mu.Unlock()
+
+	if err := controlStore.StartEpoch(epoch, shardConfigVersion); err != nil {
+		c.abortStarted(started, nextEpochID)
+		return fmt.Errorf("start epoch in control store: %w", err)
+	}
+
+	c.mu.Lock()
+	c.epoch = epoch
 	c.epochTimer = time.AfterFunc(time.Until(c.epoch.EndTime), func() {
 		c.completeEpoch()
 	})
@@ -456,24 +482,48 @@ func (c *Coordinator) abortStarted(started []int, epochID int64) {
 
 func (c *Coordinator) completeEpoch() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.epoch.State != db.EpochStateActive {
+		c.mu.Unlock()
 		return
 	}
+	epochID := c.epoch.ID
 	c.epoch.State = db.EpochStateCompleted
 	c.epochTimer = nil
+	controlStore := c.controlStore
+	c.mu.Unlock()
+
+	if _, err := controlStore.CompleteEpoch(epochID); err != nil {
+		log.Printf("Complete epoch %d in control store failed: %v", epochID, err)
+	}
 }
 
 func (c *Coordinator) EpochStatus(_ *db.EpochStatusArgs, reply *db.EpochStatusReply) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	reply.EpochID = c.epoch.ID
-	reply.State = c.epoch.State.String()
-	reply.StartUnix = c.epoch.StartTime.Unix()
-	reply.EndUnix = c.epoch.EndTime.Unix()
-	reply.DurationSecs = c.epoch.DurationSeconds
-	reply.Accepting = c.epoch.State == db.EpochStateActive
+	epoch := c.epoch
+	controlStore := c.controlStore
+	c.mu.Unlock()
+
+	reply.EpochID = epoch.ID
+	reply.State = epoch.State.String()
+	reply.StartUnix = epoch.StartTime.Unix()
+	reply.EndUnix = epoch.EndTime.Unix()
+	reply.DurationSecs = epoch.DurationSeconds
+	reply.Accepting = acceptingFromControlStore(controlStore, epoch)
 	return nil
+}
+
+func acceptingFromControlStore(controlStore ControlStore, epoch db.EpochMeta) bool {
+	if epoch.ID <= 0 {
+		return epoch.State == db.EpochStateActive
+	}
+	if _, ok := controlStore.CurrentEpoch(); !ok {
+		return epoch.State == db.EpochStateActive
+	}
+	accepting, err := controlStore.Accepting(epoch.ID)
+	if err != nil {
+		return false
+	}
+	return accepting
 }
 
 func shardStatusWithTimeout(client shardClient, timeout time.Duration) (db.StatusReply, error) {
@@ -506,6 +556,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 
 	c.mu.Lock()
 	epoch := c.epoch
+	controlStore := c.controlStore
 	shards := append([]ShardConfig(nil), c.shards...)
 	clients := make(map[int]shardClient, len(c.clients))
 	for shardID, client := range c.clients {
@@ -521,7 +572,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	reply.StartUnix = epoch.StartTime.Unix()
 	reply.EndUnix = epoch.EndTime.Unix()
 	reply.DurationSecs = epoch.DurationSeconds
-	reply.Accepting = epoch.State == db.EpochStateActive
+	reply.Accepting = acceptingFromControlStore(controlStore, epoch)
 	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
 
 	for i, shard := range shards {
