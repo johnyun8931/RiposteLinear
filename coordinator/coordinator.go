@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"net/rpc"
 	"sort"
@@ -50,6 +51,15 @@ type shardClient interface {
 	AbortEpoch(args *db.AbortEpochArgs, reply *db.AbortEpochReply) error
 }
 
+type statusClient interface {
+	Status(args *db.StatusArgs, reply *db.StatusReply) error
+}
+
+type closeableStatusClient interface {
+	statusClient
+	Close() error
+}
+
 type rpcShardClient struct {
 	client *rpc.Client
 }
@@ -82,14 +92,31 @@ func (r *rpcShardClient) AbortEpoch(args *db.AbortEpochArgs, reply *db.AbortEpoc
 	return r.client.Call("Server.AbortEpoch", args, reply)
 }
 
+func (r *rpcShardClient) Close() error {
+	return r.client.Close()
+}
+
 type routedSession struct {
 	shardID   int
 	localUUID int64
 	hashKey   [32]byte
 }
 
+type pairHealthSnapshot struct {
+	Reachable bool
+	Status    db.StatusReply
+	Error     string
+	CheckedAt time.Time
+}
+
+type shardHealthSnapshot struct {
+	Active  pairHealthSnapshot
+	Standby pairHealthSnapshot
+}
+
 const (
 	defaultShardStatusTimeout            = 2 * time.Second
+	defaultShardHealthInterval           = 5 * time.Second
 	defaultCoordinatorLeaseHolder        = "standalone"
 	defaultCoordinatorLeaseTTL           = 30 * time.Second
 	defaultCoordinatorLeaseRenewInterval = 10 * time.Second
@@ -110,6 +137,13 @@ type Coordinator struct {
 	lease        CoordinatorLease
 	leaseStopCh  chan struct{}
 	leaseDoneCh  chan struct{}
+
+	health              map[int]shardHealthSnapshot
+	healthInterval      time.Duration
+	healthTimeout       time.Duration
+	healthStopCh        chan struct{}
+	healthDoneCh        chan struct{}
+	standbyLeaderDialer func(addr string, timeout time.Duration) (closeableStatusClient, error)
 }
 
 func parseShardConfig(value string) (ShardConfig, error) {
@@ -281,16 +315,22 @@ func newCoordinatorWithLeaseConfig(
 		return nil, fmt.Errorf("acquire coordinator lease: %w", err)
 	}
 	coord := &Coordinator{
-		shards:       validated,
-		shardByID:    make(map[int]ShardConfig, len(validated)),
-		clients:      make(map[int]shardClient, len(validated)),
-		sessions:     make(map[int64]routedSession),
-		controlStore: controlStore,
-		leaseHolder:  leaseHolder,
-		leaseTTL:     leaseTTL,
-		lease:        lease,
-		leaseStopCh:  make(chan struct{}),
-		leaseDoneCh:  make(chan struct{}),
+		shards:              validated,
+		shardByID:           make(map[int]ShardConfig, len(validated)),
+		clients:             make(map[int]shardClient, len(validated)),
+		sessions:            make(map[int64]routedSession),
+		controlStore:        controlStore,
+		leaseHolder:         leaseHolder,
+		leaseTTL:            leaseTTL,
+		lease:               lease,
+		leaseStopCh:         make(chan struct{}),
+		leaseDoneCh:         make(chan struct{}),
+		health:              make(map[int]shardHealthSnapshot, len(validated)),
+		healthInterval:      defaultShardHealthInterval,
+		healthTimeout:       defaultShardStatusTimeout,
+		healthStopCh:        make(chan struct{}),
+		healthDoneCh:        make(chan struct{}),
+		standbyLeaderDialer: dialStandbyShardLeader,
 	}
 	for _, shard := range validated {
 		coord.shardByID[shard.ID] = shard
@@ -299,6 +339,7 @@ func newCoordinatorWithLeaseConfig(
 		}
 	}
 	coord.startLeaseRenewal(leaseRenewInterval)
+	coord.startShardHealthMonitor()
 	return coord, nil
 }
 
@@ -322,23 +363,49 @@ func (c *Coordinator) startLeaseRenewal(interval time.Duration) {
 	}()
 }
 
+func (c *Coordinator) startShardHealthMonitor() {
+	stopCh := c.healthStopCh
+	doneCh := c.healthDoneCh
+	interval := c.healthInterval
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer close(doneCh)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				c.refreshShardHealth(c.healthTimeout)
+			case <-stopCh:
+				return
+			}
+		}
+	}()
+}
+
 func (c *Coordinator) Close() {
 	c.mu.Lock()
 	stopCh := c.leaseStopCh
 	doneCh := c.leaseDoneCh
+	healthStopCh := c.healthStopCh
+	healthDoneCh := c.healthDoneCh
 	c.leaseStopCh = nil
 	c.leaseDoneCh = nil
+	c.healthStopCh = nil
+	c.healthDoneCh = nil
 	if c.epochTimer != nil {
 		c.epochTimer.Stop()
 		c.epochTimer = nil
 	}
 	c.mu.Unlock()
 
-	if stopCh == nil {
-		return
+	if stopCh != nil {
+		close(stopCh)
+		<-doneCh
 	}
-	close(stopCh)
-	<-doneCh
+	if healthStopCh != nil {
+		close(healthStopCh)
+		<-healthDoneCh
+	}
 }
 
 func (c *Coordinator) renewCoordinatorLease() error {
@@ -371,6 +438,14 @@ func (c *Coordinator) requireCoordinatorLease() error {
 
 func dialShardLeader(leaderAddr string) (shardClient, error) {
 	client, err := utils.DialHTTPWithTLS("tcp", leaderAddr, -1, []tls.Certificate{utils.LeaderCertificate})
+	if err != nil {
+		return nil, err
+	}
+	return &rpcShardClient{client: client}, nil
+}
+
+func dialStandbyShardLeader(leaderAddr string, timeout time.Duration) (closeableStatusClient, error) {
+	client, err := utils.DialHTTPWithTLSWithTimeout("tcp", leaderAddr, -1, []tls.Certificate{utils.LeaderCertificate}, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -663,7 +738,7 @@ func acceptingFromControlStore(controlStore ControlStore, epoch db.EpochMeta) bo
 	return accepting
 }
 
-func shardStatusWithTimeout(client shardClient, timeout time.Duration) (db.StatusReply, error) {
+func shardStatusWithTimeout(client statusClient, timeout time.Duration) (db.StatusReply, error) {
 	type statusResult struct {
 		reply db.StatusReply
 		err   error
@@ -685,20 +760,101 @@ func shardStatusWithTimeout(client shardClient, timeout time.Duration) (db.Statu
 	}
 }
 
+func pairHealthFromStatus(status db.StatusReply, err error, checkedAt time.Time) pairHealthSnapshot {
+	if err != nil {
+		return pairHealthSnapshot{Error: err.Error(), CheckedAt: checkedAt}
+	}
+	return pairHealthSnapshot{
+		Reachable: true,
+		Status:    status,
+		CheckedAt: checkedAt,
+	}
+}
+
+func (c *Coordinator) refreshShardHealth(timeout time.Duration) {
+	c.mu.Lock()
+	shards := append([]ShardConfig(nil), c.shards...)
+	clients := make(map[int]shardClient, len(c.clients))
+	maps.Copy(clients, c.clients)
+	dialStandby := c.standbyLeaderDialer
+	c.mu.Unlock()
+
+	results := make(map[int]shardHealthSnapshot, len(shards))
+	for _, shard := range shards {
+		checkedAt := time.Now().UTC()
+		var result shardHealthSnapshot
+		if client := clients[shard.ID]; client != nil {
+			status, err := shardStatusWithTimeout(client, timeout)
+			result.Active = pairHealthFromStatus(status, err, checkedAt)
+		} else {
+			result.Active = pairHealthSnapshot{
+				Error:     fmt.Sprintf("missing shard client for shard %d", shard.ID),
+				CheckedAt: checkedAt,
+			}
+		}
+
+		if shard.Standby != nil {
+			standbyCheckedAt := time.Now().UTC()
+			standbyClient, err := dialStandby(shard.Standby.LeaderAddr, timeout)
+			if err != nil {
+				result.Standby = pairHealthSnapshot{Error: err.Error(), CheckedAt: standbyCheckedAt}
+			} else {
+				status, statusErr := shardStatusWithTimeout(standbyClient, timeout)
+				result.Standby = pairHealthFromStatus(status, statusErr, standbyCheckedAt)
+				if closeErr := standbyClient.Close(); closeErr != nil && result.Standby.Error == "" {
+					result.Standby.Reachable = false
+					result.Standby.Error = closeErr.Error()
+				}
+			}
+		}
+
+		results[shard.ID] = result
+	}
+
+	c.mu.Lock()
+	for shardID, health := range results {
+		c.health[shardID] = health
+	}
+	c.mu.Unlock()
+}
+
+func (c *Coordinator) needsShardHealthRefresh() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, shard := range c.shards {
+		health := c.health[shard.ID]
+		if health.Active.CheckedAt.IsZero() {
+			return true
+		}
+		if shard.Standby != nil && health.Standby.CheckedAt.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+func lastCheckedUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
 func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.CoordinatorStatusReply) error {
 	timeout := defaultShardStatusTimeout
 	if args != nil && args.ShardTimeoutMs > 0 {
 		timeout = time.Duration(args.ShardTimeoutMs) * time.Millisecond
+	}
+	if c.needsShardHealthRefresh() {
+		c.refreshShardHealth(timeout)
 	}
 
 	c.mu.Lock()
 	epoch := c.epoch
 	controlStore := c.controlStore
 	shards := append([]ShardConfig(nil), c.shards...)
-	clients := make(map[int]shardClient, len(c.clients))
-	for shardID, client := range c.clients {
-		clients[shardID] = client
-	}
+	health := make(map[int]shardHealthSnapshot, len(c.health))
+	maps.Copy(health, c.health)
 	c.mu.Unlock()
 
 	reply.Healthy = true
@@ -726,20 +882,18 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 			entry.StandbyFollowerAddr = shard.Standby.FollowerAddr
 		}
 
-		client := clients[shard.ID]
-		if client == nil {
-			entry.StatusError = fmt.Sprintf("missing shard client for shard %d", shard.ID)
-			reply.Shards[i] = entry
-			continue
-		}
-		status, err := shardStatusWithTimeout(client, timeout)
-		if err != nil {
-			entry.StatusError = err.Error()
-			reply.Shards[i] = entry
-			continue
-		}
-		entry.Reachable = true
-		entry.Status = status
+		shardHealth := health[shard.ID]
+		entry.ActiveReachable = shardHealth.Active.Reachable
+		entry.ActiveStatus = shardHealth.Active.Status
+		entry.ActiveStatusError = shardHealth.Active.Error
+		entry.ActiveLastChecked = lastCheckedUnix(shardHealth.Active.CheckedAt)
+		entry.StandbyReachable = shardHealth.Standby.Reachable
+		entry.StandbyStatus = shardHealth.Standby.Status
+		entry.StandbyStatusError = shardHealth.Standby.Error
+		entry.StandbyLastChecked = lastCheckedUnix(shardHealth.Standby.CheckedAt)
+		entry.Reachable = entry.ActiveReachable
+		entry.Status = entry.ActiveStatus
+		entry.StatusError = entry.ActiveStatusError
 		reply.Shards[i] = entry
 	}
 

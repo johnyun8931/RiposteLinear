@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/rpc"
+	"time"
 )
 
 type countSocket struct {
@@ -93,6 +94,11 @@ func handleOneClient(conn net.Conn) {
 
 func DialHTTPWithTLS(network, address string,
 	client_idx int, acceptCerts []tls.Certificate) (*rpc.Client, error) {
+	return DialHTTPWithTLSWithTimeout(network, address, client_idx, acceptCerts, 0)
+}
+
+func DialHTTPWithTLSWithTimeout(network, address string,
+	client_idx int, acceptCerts []tls.Certificate, timeout time.Duration) (*rpc.Client, error) {
 	var config tls.Config
 	config.InsecureSkipVerify = true
 
@@ -100,7 +106,14 @@ func DialHTTPWithTLS(network, address string,
 		config.Certificates = []tls.Certificate{ServerCertificates[client_idx]}
 	}
 
-	conn, err := tls.Dial(network, address, &config)
+	var conn *tls.Conn
+	var err error
+	if timeout > 0 {
+		dialer := net.Dialer{Timeout: timeout}
+		conn, err = tls.DialWithDialer(&dialer, network, address, &config)
+	} else {
+		conn, err = tls.Dial(network, address, &config)
+	}
 	if err != nil {
 		log.Printf("DialHTTP error: %v", err)
 		return nil, err
@@ -109,6 +122,7 @@ func DialHTTPWithTLS(network, address string,
 	state := conn.ConnectionState()
 	//log.Printf("State: %v", state.PeerCertificates)
 	if len(acceptCerts) > 0 && !validateCert(acceptCerts, state.PeerCertificates[0]) {
+		conn.Close()
 		return nil, errors.New("Invalid certificate")
 	}
 

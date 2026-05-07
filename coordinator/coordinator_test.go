@@ -23,9 +23,11 @@ type fakeShardClient struct {
 	startErr    error
 	abortCalls  int
 	abortErr    error
+	statusCalls int
 	statusReply db.StatusReply
 	statusErr   error
 	statusDelay time.Duration
+	closeCalls  int
 }
 
 func (f *fakeShardClient) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
@@ -62,6 +64,7 @@ func (f *fakeShardClient) EpochStatus(args *db.EpochStatusArgs, reply *db.EpochS
 }
 
 func (f *fakeShardClient) Status(args *db.StatusArgs, reply *db.StatusReply) error {
+	f.statusCalls++
 	if f.statusDelay > 0 {
 		time.Sleep(f.statusDelay)
 	}
@@ -75,6 +78,11 @@ func (f *fakeShardClient) Status(args *db.StatusArgs, reply *db.StatusReply) err
 func (f *fakeShardClient) AbortEpoch(args *db.AbortEpochArgs, reply *db.AbortEpochReply) error {
 	f.abortCalls++
 	return f.abortErr
+}
+
+func (f *fakeShardClient) Close() error {
+	f.closeCalls++
+	return nil
 }
 
 func mustCoordinator(t *testing.T, shards []ShardConfig, clients map[int]shardClient) *Coordinator {
@@ -115,6 +123,15 @@ func activeOnlyShard(id, start, end int) ShardConfig {
 			FollowerAddr: "127.0.0.1:8001",
 		},
 	}
+}
+
+func activeStandbyShard(id, start, end int) ShardConfig {
+	shard := activeOnlyShard(id, start, end)
+	shard.Standby = &PairConfig{
+		LeaderAddr:   "127.0.0.1:9000",
+		FollowerAddr: "127.0.0.1:9001",
+	}
+	return shard
 }
 
 func TestParseShardConfigRequiresActivePairAndAllowsMissingStandby(t *testing.T) {
@@ -336,6 +353,28 @@ func TestCoordinatorStartEpochRequiresAllShardsAndAbortsStartedShardOnFailure(t 
 	}
 }
 
+func TestCoordinatorStartEpochUsesOnlyActivePairWhenStandbyConfigured(t *testing.T) {
+	startTime := time.Unix(1000, 0).UTC()
+	active := &fakeShardClient{startReply: db.StartEpochReply{
+		EpochID:      1,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+	}}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+
+	var reply db.StartEpochReply
+	if err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &reply); err != nil {
+		t.Fatalf("StartEpoch failed: %v", err)
+	}
+	if active.startCalls != 1 {
+		t.Fatalf("expected active shard start call, got %d", active.startCalls)
+	}
+}
+
 func stealCoordinatorLease(t *testing.T, store *memoryControlStore, holder string) CoordinatorLease {
 	t.Helper()
 	lease, err := store.AcquireLease(time.Now().UTC().Add(time.Hour), holder, time.Minute)
@@ -466,6 +505,29 @@ func TestCoordinatorCompleteEpochSkipsStoreMutationWithStaleLease(t *testing.T) 
 	}
 }
 
+func TestCoordinatorUploadsUseOnlyActivePairWhenStandbyConfigured(t *testing.T) {
+	active := &fakeShardClient{}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	epoch := db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60}
+	setCoordinatorActiveEpoch(t, coord, epoch)
+
+	var up1 db.UploadReply1
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: 1}, &up1); err != nil {
+		t.Fatalf("Upload1 failed: %v", err)
+	}
+	if err := coord.Upload2(&db.UploadArgs2{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply2{}); err != nil {
+		t.Fatalf("Upload2 failed: %v", err)
+	}
+	if err := coord.Upload3(&db.UploadArgs3{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply3{}); err != nil {
+		t.Fatalf("Upload3 failed: %v", err)
+	}
+	if active.upload1Calls != 1 || active.upload2Calls != 1 || active.upload3Calls != 1 {
+		t.Fatalf("expected active-only uploads, got upload1=%d upload2=%d upload3=%d", active.upload1Calls, active.upload2Calls, active.upload3Calls)
+	}
+}
+
 func TestCoordinatorUpload1RejectsWhenControlStoreNotAccepting(t *testing.T) {
 	fakeClient := &fakeShardClient{}
 	coord := mustCoordinator(t, []ShardConfig{
@@ -551,8 +613,87 @@ func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 	if !reply.Shards[0].Reachable || reply.Shards[0].Status.ShardID != 0 {
 		t.Fatalf("unexpected shard 0 status: %+v", reply.Shards[0])
 	}
+	if !reply.Shards[0].ActiveReachable || reply.Shards[0].ActiveStatus.ShardID != 0 || reply.Shards[0].ActiveLastChecked == 0 {
+		t.Fatalf("unexpected shard 0 active health: %+v", reply.Shards[0])
+	}
 	if !reply.Shards[1].Reachable || reply.Shards[1].Status.ShardID != 1 {
 		t.Fatalf("unexpected shard 1 status: %+v", reply.Shards[1])
+	}
+}
+
+func TestCoordinatorStatusIncludesStandbyHealthWhenConfigured(t *testing.T) {
+	active := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, IsLeader: true, ShardID: 0}}
+	standby := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, IsLeader: true, ShardID: 0, PeerState: db.PeerConnectionsReady.String()}}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	coord.standbyLeaderDialer = func(addr string, timeout time.Duration) (closeableStatusClient, error) {
+		if addr != "127.0.0.1:9000" {
+			t.Fatalf("unexpected standby leader address: %s", addr)
+		}
+		return standby, nil
+	}
+
+	var reply db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &reply); err != nil {
+		t.Fatalf("Coordinator.Status failed: %v", err)
+	}
+	shard := reply.Shards[0]
+	if !shard.HasStandby || shard.StandbyLeaderAddr != "127.0.0.1:9000" || shard.StandbyFollowerAddr != "127.0.0.1:9001" {
+		t.Fatalf("unexpected standby assignment: %+v", shard)
+	}
+	if !shard.ActiveReachable || !shard.StandbyReachable || shard.StandbyLastChecked == 0 {
+		t.Fatalf("expected active and standby reachable health, got %+v", shard)
+	}
+	if standby.statusCalls != 1 || standby.closeCalls != 1 {
+		t.Fatalf("expected standby status and close calls, got status=%d close=%d", standby.statusCalls, standby.closeCalls)
+	}
+}
+
+func TestCoordinatorStatusRecordsUnreachableStandbyHealth(t *testing.T) {
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}},
+	})
+	coord.standbyLeaderDialer = func(addr string, timeout time.Duration) (closeableStatusClient, error) {
+		return nil, errors.New("standby dial failed")
+	}
+
+	var reply db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &reply); err != nil {
+		t.Fatalf("Coordinator.Status failed: %v", err)
+	}
+	shard := reply.Shards[0]
+	if !shard.ActiveReachable {
+		t.Fatalf("expected active reachable health, got %+v", shard)
+	}
+	if shard.StandbyReachable || shard.StandbyStatusError != "standby dial failed" || shard.StandbyLastChecked == 0 {
+		t.Fatalf("expected standby error health, got %+v", shard)
+	}
+}
+
+func TestCoordinatorCloseStopsHealthLoop(t *testing.T) {
+	coord, err := NewCoordinator([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}},
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator failed: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		coord.Close()
+		coord.Close()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Coordinator.Close did not stop background loops promptly")
 	}
 }
 
