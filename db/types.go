@@ -237,7 +237,7 @@ type StatusReply struct {
 }
 
 type CoordinatorStatusArgs struct {
-	ShardTimeoutMillis int64 `json:"shard_timeout_millis"`
+	ShardTimeoutMs int64 `json:"shard_timeout_ms"`
 }
 
 type CoordinatorShardStatus struct {

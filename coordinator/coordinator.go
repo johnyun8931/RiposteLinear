@@ -500,8 +500,8 @@ func shardStatusWithTimeout(client shardClient, timeout time.Duration) (db.Statu
 
 func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.CoordinatorStatusReply) error {
 	timeout := defaultShardStatusTimeout
-	if args != nil && args.ShardTimeoutMillis > 0 {
-		timeout = time.Duration(args.ShardTimeoutMillis) * time.Millisecond
+	if args != nil && args.ShardTimeoutMs > 0 {
+		timeout = time.Duration(args.ShardTimeoutMs) * time.Millisecond
 	}
 
 	c.mu.Lock()

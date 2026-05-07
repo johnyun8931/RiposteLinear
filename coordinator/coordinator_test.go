@@ -353,7 +353,7 @@ func TestCoordinatorStatusTimeoutDoesNotFailWholeCall(t *testing.T) {
 	})
 
 	var reply db.CoordinatorStatusReply
-	if err := coord.Status(&db.CoordinatorStatusArgs{ShardTimeoutMillis: 5}, &reply); err != nil {
+	if err := coord.Status(&db.CoordinatorStatusArgs{ShardTimeoutMs: 5}, &reply); err != nil {
 		t.Fatalf("Coordinator.Status failed: %v", err)
 	}
 	if !reply.Shards[0].Reachable {

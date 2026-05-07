@@ -30,7 +30,8 @@ Current rough edges / future work in the first Phase 3 cut:
 - `Standby` pair config exists to prepare for future failover work, but coordinator routing currently uses only the active shard leader
 - transport/auth still relies on the older certificate/index assumptions from the pre-coordinator architecture
 - partial pair-delivery / rollback correctness is still deferred work; if one Riposte server in a shard pair receives a write and the other does not, that failure path is not yet fully hardened
-- coordinator/shard health and richer status fanout are deferred to Phase 3.5 before active-passive coordinator failover
-- SQS or another durable ingestion queue is deferred because it changes epoch-admission semantics
+- coordinator/shard health and richer status fanout have been added for Phase 3.5; see `docs/failover.md`
+- Phase 4 is pivoting AWS-native: DynamoDB-style control state, SQS-style durable ingestion, and S3 result/artifact storage
+- in-flight coordinator-local sessions remain a failover limitation until ingestion is wired through the queue
 
 Keep this list temporary and remove it once the Phase 3.5/Phase 4 planning docs supersede it.
