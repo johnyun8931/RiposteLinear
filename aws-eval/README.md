@@ -195,6 +195,8 @@ waits for completion, and verifies:
 
 - each shard leader wrote its own result file
 - the payload bytes landed in the expected shard
+- completed coordinator status reports scaling metrics for the two accepted
+  smoke writes
 
 If `CONTROL_STORE_BACKEND=dynamodb`, smoke starts the coordinator with the
 DynamoDB control-store flags and captures the `lease`, `epoch`, and
@@ -231,6 +233,16 @@ the epoch duration plus `CLIENT_EXIT_GRACE_SECONDS`. The grace period is
 post-epoch slack for client shutdown and is not part of the measured throughput
 window.
 
+Sharded benchmark phases also capture coordinator status artifacts in the phase
+log directory:
+
+- `status-active-coordinator.json`
+- `status-completed-coordinator.json`
+
+The completed status includes `scaling_epoch_id`,
+`scaling_accepted_requests`, `scaling_duration_secs`, `request_density`,
+`scaling_action`, and `scaling_reason`.
+
 For AWS load calibration, run the short concurrency sweep after smoke:
 
 ```bash
@@ -263,7 +275,8 @@ Outputs:
 - `metadata.json`
 - `baseline-throughput.csv`
 - `sharded-throughput.csv`
-- `comparison-summary.md`
+- `comparison-summary.md`, including a scaling-status section when the
+  sharded measured coordinator status artifact is present
 - raw logs per node
 - copied result JSON files under `leader-results/`
 

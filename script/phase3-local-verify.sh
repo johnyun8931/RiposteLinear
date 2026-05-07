@@ -48,7 +48,9 @@ assert_equals "$(extract_field "$coord_complete" "epoch")" "$epoch_id" "complete
 status_json coordinator "$COORDINATOR_ADDR" >"$TMP_DIR/status-completed-coordinator.json"
 status_json server "$SHARD0_LEADER_ADDR" >"$TMP_DIR/status-completed-shard0-leader.json"
 status_json server "$SHARD1_LEADER_ADDR" >"$TMP_DIR/status-completed-shard1-leader.json"
+assert_scaling_status "$TMP_DIR/status-completed-coordinator.json" "$epoch_id" 2
 echo "PASS: verification epoch completed"
+echo "PASS: completed coordinator status reports scaling metrics"
 
 result_s0="$(latest_result_file "$RESULTS_S0_DIR" "$epoch_id" 0)"
 result_s1="$(latest_result_file "$RESULTS_S1_DIR" "$epoch_id" 1)"

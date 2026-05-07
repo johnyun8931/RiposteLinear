@@ -28,6 +28,19 @@ and incomplete sessions are not counted. At epoch completion, the coordinator
 computes and caches a recommendation from that completed epoch. Until metrics
 are persisted later, a coordinator restart loses this scaling history.
 
+Verification scripts capture the coordinator's status JSON after completed
+sharded epochs. The scaling fields to inspect are:
+
+- `scaling_epoch_id`
+- `scaling_accepted_requests`
+- `scaling_duration_secs`
+- `request_density`
+- `scaling_action`
+- `scaling_reason`
+
+AWS benchmark collection includes these fields in `comparison-summary.md` when
+`status-completed-coordinator.json` is available for the sharded measured phase.
+
 ## Initial Policy Shape
 
 Use hysteresis so shard count does not flap between epochs:

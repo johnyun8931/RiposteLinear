@@ -155,11 +155,13 @@ run_sharded_phase() {
   remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_PORT"
 
   retry_start_epoch coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$duration" >/dev/null
+  capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$phase_logs/status-active-coordinator.json"
   start_remote_hammer_client "$CLIENT_PUBLIC_IP" -coordinator "$(coordinator_addr)" "$phase_logs/client.log" "$client_pid_path"
   if ! wait_for_phase_client "$phase" "$duration" "$phase_logs" "$client_pid_path"; then
     kill_all_remote_processes
     return 1
   fi
+  capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$phase_logs/status-completed-coordinator.json"
   kill_all_remote_processes
 }
 

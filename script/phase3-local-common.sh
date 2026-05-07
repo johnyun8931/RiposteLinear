@@ -80,13 +80,6 @@ build_binaries() {
 	)
 }
 
-server_threads_args() {
-	local threads="$1"
-	if [[ -n "$threads" && "$threads" -gt 0 ]]; then
-		printf -- "-threads %s" "$threads"
-	fi
-}
-
 pid_file() {
 	echo "$PID_DIR/$1.pid"
 }
@@ -151,20 +144,18 @@ stop_all_phase3_processes() {
 
 start_sharded_topology() {
 	local threads="${1:-$RIPOSTE_BENCH_SERVER_THREADS_DEFAULT}"
-	local thread_args
-	thread_args="$(server_threads_args "$threads")"
+	local thread_args=()
+	if [[ -n "$threads" && "$threads" -gt 0 ]]; then
+		thread_args=(-threads "$threads")
+	fi
 
 	info "Starting shard 0 (server threads=$threads)"
-	# shellcheck disable=SC2086
-	start_process "shard0-follower" "$SERVER_BIN" -idx 1 -servers "$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_S0_DIR" -log "$(log_file shard0-follower)" $thread_args
-	# shellcheck disable=SC2086
-	start_process "shard0-leader" "$SERVER_BIN" -idx 0 -servers "$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_S0_DIR" -log "$(log_file shard0-leader)" $thread_args
+	start_process "shard0-follower" "$SERVER_BIN" -idx 1 -servers "$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_S0_DIR" -log "$(log_file shard0-follower)" "${thread_args[@]}"
+	start_process "shard0-leader" "$SERVER_BIN" -idx 0 -servers "$SHARD0_LEADER_ADDR,$SHARD0_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_S0_DIR" -log "$(log_file shard0-leader)" "${thread_args[@]}"
 
 	info "Starting shard 1 (server threads=$threads)"
-	# shellcheck disable=SC2086
-	start_process "shard1-follower" "$SERVER_BIN" -idx 1 -servers "$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR" -shard-id 1 -results-dir "$RESULTS_S1_DIR" -log "$(log_file shard1-follower)" $thread_args
-	# shellcheck disable=SC2086
-	start_process "shard1-leader" "$SERVER_BIN" -idx 0 -servers "$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR" -shard-id 1 -results-dir "$RESULTS_S1_DIR" -log "$(log_file shard1-leader)" $thread_args
+	start_process "shard1-follower" "$SERVER_BIN" -idx 1 -servers "$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR" -shard-id 1 -results-dir "$RESULTS_S1_DIR" -log "$(log_file shard1-follower)" "${thread_args[@]}"
+	start_process "shard1-leader" "$SERVER_BIN" -idx 0 -servers "$SHARD1_LEADER_ADDR,$SHARD1_FOLLOWER_ADDR" -shard-id 1 -results-dir "$RESULTS_S1_DIR" -log "$(log_file shard1-leader)" "${thread_args[@]}"
 
 	wait_for_port "$SHARD0_LEADER_ADDR" 50 || die "shard 0 leader did not start listening"
 	wait_for_port "$SHARD1_LEADER_ADDR" 50 || die "shard 1 leader did not start listening"
@@ -187,13 +178,13 @@ stop_sharded_topology() {
 
 start_baseline_pair() {
 	local threads="${1:-$RIPOSTE_BENCH_SERVER_THREADS_DEFAULT}"
-	local thread_args
-	thread_args="$(server_threads_args "$threads")"
+	local thread_args=()
+	if [[ -n "$threads" && "$threads" -gt 0 ]]; then
+		thread_args=(-threads "$threads")
+	fi
 	info "Starting single-shard baseline pair (server threads=$threads)"
-	# shellcheck disable=SC2086
-	start_process "baseline-follower" "$SERVER_BIN" -idx 1 -servers "$BASELINE_LEADER_ADDR,$BASELINE_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_SINGLE_DIR" -log "$(log_file baseline-follower)" $thread_args
-	# shellcheck disable=SC2086
-	start_process "baseline-leader" "$SERVER_BIN" -idx 0 -servers "$BASELINE_LEADER_ADDR,$BASELINE_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_SINGLE_DIR" -log "$(log_file baseline-leader)" $thread_args
+	start_process "baseline-follower" "$SERVER_BIN" -idx 1 -servers "$BASELINE_LEADER_ADDR,$BASELINE_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_SINGLE_DIR" -log "$(log_file baseline-follower)" "${thread_args[@]}"
+	start_process "baseline-leader" "$SERVER_BIN" -idx 0 -servers "$BASELINE_LEADER_ADDR,$BASELINE_FOLLOWER_ADDR" -shard-id 0 -results-dir "$RESULTS_SINGLE_DIR" -log "$(log_file baseline-leader)" "${thread_args[@]}"
 	wait_for_port "$BASELINE_LEADER_ADDR" 50 || die "baseline leader did not start listening"
 	sleep "$RIPOSTE_TOPOLOGY_SETTLE_DELAY"
 }
@@ -309,6 +300,58 @@ assert_equals() {
 	if [[ "$got" != "$want" ]]; then
 		die "$label mismatch: got '$got', want '$want'"
 	fi
+}
+
+assert_scaling_status() {
+	local file="$1"
+	local want_epoch="$2"
+	local want_accepted="$3"
+
+	python3 - "$file" "$want_epoch" "$want_accepted" <<'PY'
+import json
+import sys
+
+path, want_epoch, want_accepted = sys.argv[1:]
+data = json.load(open(path))
+
+checks = {
+    "scaling_epoch_id": int(want_epoch),
+    "scaling_accepted_requests": int(want_accepted),
+}
+for key, want in checks.items():
+    got = int(data.get(key, 0))
+    if got != want:
+        raise SystemExit(f"{path}: {key} mismatch: got {got}, want {want}")
+
+if int(data.get("scaling_duration_secs", 0)) <= 0:
+    raise SystemExit(f"{path}: scaling_duration_secs must be positive")
+if "request_density" not in data:
+    raise SystemExit(f"{path}: missing request_density")
+if not data.get("scaling_action"):
+    raise SystemExit(f"{path}: missing scaling_action")
+PY
+}
+
+scaling_status_tsv() {
+	local file="$1"
+	python3 - "$file" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+print(
+    "\t".join(
+        [
+            str(data.get("scaling_epoch_id", "")),
+            str(data.get("scaling_accepted_requests", "")),
+            str(data.get("scaling_duration_secs", "")),
+            str(data.get("request_density", "")),
+            str(data.get("scaling_action", "")),
+            str(data.get("scaling_reason", "")),
+        ]
+    )
+)
+PY
 }
 
 assert_file_exists() {

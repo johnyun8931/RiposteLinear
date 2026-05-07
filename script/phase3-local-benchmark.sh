@@ -45,6 +45,7 @@ sharded_run() {
 	local threads="$1"
 	local phase="$2"
 	local client_log="$LOG_DIR/sharded-${phase}-t${threads}.log"
+	local status_file="$TMP_DIR/status-sharded-${phase}-t${threads}.json"
 	local shard0_before shard1_before shard0_after shard1_after shard0_delta shard1_delta total max_sent
 
 	shard0_before="$(last_since_start "$(log_file shard0-leader)")"
@@ -53,6 +54,7 @@ sharded_run() {
 	sleep "$START_DELAY"
 	run_client -coordinator "$COORDINATOR_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" "${CLIENT_RETRY_ARGS[@]}" -log "$client_log"
 	wait_for_epoch_complete coordinator "$COORDINATOR_ADDR"
+	status_json coordinator "$COORDINATOR_ADDR" >"$status_file"
 	sleep "$POST_RUN_WAIT"
 	shard0_after="$(last_since_start "$(log_file shard0-leader)")"
 	shard1_after="$(last_since_start "$(log_file shard1-leader)")"
@@ -61,7 +63,7 @@ sharded_run() {
 	total="$((shard0_delta + shard1_delta))"
 	[[ "$total" -gt 0 ]] || die "sharded leaders did not advance for phase $phase threads=$threads"
 	max_sent="$(max_sent_from_client_log "$client_log")"
-	printf '%s\t%s\t%s\t%s\n' "$shard0_delta" "$shard1_delta" "$total" "$max_sent"
+	printf '%s\t%s\t%s\t%s\t%s\n' "$shard0_delta" "$shard1_delta" "$total" "$max_sent" "$(scaling_status_tsv "$status_file")"
 }
 
 run_baseline_pair_for_threads() {
@@ -120,13 +122,13 @@ build_binaries
 
 host_context_line | tee "$HOST_INFO_FILE"
 {
-	echo -e "server_threads\tclient_concurrency\tclient_retry_overload\tbaseline_total\tbaseline_req_per_sec\tbaseline_client_max_sent\tshard0_total\tshard1_total\tsharded_total\tsharded_req_per_sec\tsharded_client_max_sent\tdelta\twinner"
+	echo -e "server_threads\tclient_concurrency\tclient_retry_overload\tbaseline_total\tbaseline_req_per_sec\tbaseline_client_max_sent\tshard0_total\tshard1_total\tsharded_total\tsharded_req_per_sec\tsharded_client_max_sent\tscaling_epoch_id\tscaling_accepted_requests\tscaling_duration_secs\trequest_density\tscaling_action\tscaling_reason\tdelta\twinner"
 } >"$SUMMARY_TSV"
 
 for threads in $THREAD_SWEEP; do
 	info "Benchmark sweep for server threads=$threads"
-	read -r baseline_total baseline_client_max_sent <<<"$(run_baseline_pair_for_threads "$threads")"
-	read -r shard0_total shard1_total sharded_total sharded_client_max_sent <<<"$(run_sharded_topology_for_threads "$threads")"
+	IFS=$'\t' read -r baseline_total baseline_client_max_sent <<<"$(run_baseline_pair_for_threads "$threads")"
+	IFS=$'\t' read -r shard0_total shard1_total sharded_total sharded_client_max_sent scaling_epoch_id scaling_accepted_requests scaling_duration_secs request_density scaling_action scaling_reason <<<"$(run_sharded_topology_for_threads "$threads")"
 
 	baseline_req_per_sec="$(python3 - "$baseline_total" "$BENCH_DURATION" <<'PY'
 import sys
@@ -141,9 +143,10 @@ PY
 	delta="$((sharded_total - baseline_total))"
 	winner="$(winner_for_row "$baseline_total" "$sharded_total")"
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$threads" "$CLIENT_CONCURRENCY" "$CLIENT_RETRY_OVERLOAD" "$baseline_total" "$baseline_req_per_sec" "$baseline_client_max_sent" \
 		"$shard0_total" "$shard1_total" "$sharded_total" "$sharded_req_per_sec" "$sharded_client_max_sent" \
+		"$scaling_epoch_id" "$scaling_accepted_requests" "$scaling_duration_secs" "$request_density" "$scaling_action" "$scaling_reason" \
 		"$delta" "$winner" >>"$SUMMARY_TSV"
 done
 
@@ -163,13 +166,14 @@ print("# Phase 3 Local Throughput Sweep")
 print()
 print(f"- {host_info}")
 print()
-print("| server_threads | client_concurrency | client_retry_overload | baseline_total | baseline_req_per_sec | shard0_total | shard1_total | sharded_total | sharded_req_per_sec | delta | winner |")
-print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+print("| server_threads | client_concurrency | client_retry_overload | baseline_total | baseline_req_per_sec | shard0_total | shard1_total | sharded_total | sharded_req_per_sec | scaling_accepted_requests | request_density | scaling_action | delta | winner |")
+print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
 for row in rows:
     print(
         f"| {row['server_threads']} | {row['client_concurrency']} | {row['client_retry_overload']} | {row['baseline_total']} | {row['baseline_req_per_sec']} | "
         f"{row['shard0_total']} | {row['shard1_total']} | {row['sharded_total']} | "
-        f"{row['sharded_req_per_sec']} | {row['delta']} | {row['winner']} |"
+        f"{row['sharded_req_per_sec']} | {row['scaling_accepted_requests']} | {row['request_density']} | {row['scaling_action']} | "
+        f"{row['delta']} | {row['winner']} |"
     )
 PY
 

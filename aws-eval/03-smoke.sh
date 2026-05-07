@@ -80,6 +80,31 @@ if actual_shard_version != "1":
 PY
 }
 
+assert_remote_scaling_status() {
+  local path="$1"
+  local epoch_id="$2"
+  local accepted_requests="$3"
+
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "python3 - '$path' '$epoch_id' '$accepted_requests' <<'PY'
+import json
+import sys
+
+path, epoch_id, accepted_requests = sys.argv[1:]
+status = json.load(open(path))
+
+if int(status.get('scaling_epoch_id', 0)) != int(epoch_id):
+    raise SystemExit(f\"scaling_epoch_id mismatch: expected {epoch_id}, got {status.get('scaling_epoch_id')}\")
+if int(status.get('scaling_accepted_requests', 0)) != int(accepted_requests):
+    raise SystemExit(f\"scaling_accepted_requests mismatch: expected {accepted_requests}, got {status.get('scaling_accepted_requests')}\")
+if int(status.get('scaling_duration_secs', 0)) <= 0:
+    raise SystemExit('scaling_duration_secs must be positive')
+if 'request_density' not in status:
+    raise SystemExit('missing request_density')
+if not status.get('scaling_action'):
+    raise SystemExit('missing scaling_action')
+PY"
+}
+
 cleanup() {
   kill_all_remote_processes
 }
@@ -123,6 +148,7 @@ wait_for_epoch_complete coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
+assert_remote_scaling_status "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json" "$epoch_id" 2
 capture_dynamodb_smoke_state completed
 assert_dynamodb_smoke_state completed "$epoch_id" false
 

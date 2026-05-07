@@ -102,6 +102,11 @@ def load_phase_status(phase: str):
         return None
     return json.loads(status_path.read_text())
 
+def load_json_file(path: Path):
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
 def parse_time(value: str):
     return datetime.strptime(value, "%Y/%m/%d %H:%M:%S")
 
@@ -243,6 +248,17 @@ delta = sharded_total - baseline_total
 delta_pct = 0.0 if baseline_total == 0 else (delta / baseline_total) * 100.0
 baseline_eval = evaluate_phase("baseline-measured", baseline_rows, ["shard0-leader"])
 sharded_eval = evaluate_phase("sharded-measured", sharded_rows, ["shard0-leader", "shard1-leader"])
+sharded_scaling_status_path = (
+    result_dir
+    / "remotes"
+    / "coordinator"
+    / "riposte-eval"
+    / "phases"
+    / "sharded-measured"
+    / "logs"
+    / "status-completed-coordinator.json"
+)
+sharded_scaling_status = load_json_file(sharded_scaling_status_path)
 
 if sharded_total > 0:
     shard0_share = shard0_total / sharded_total
@@ -261,6 +277,26 @@ def format_reasons(items):
     if not items:
         return "`none`"
     return "; ".join(f"`{item}`" for item in items)
+
+def scaling_summary_lines(status):
+    if status is None:
+        return [
+            "## Scaling Status",
+            "",
+            f"- sharded measured completed coordinator status: `missing`",
+            f"- expected artifact: `{sharded_scaling_status_path}`",
+        ]
+    return [
+        "## Scaling Status",
+        "",
+        f"- scaling epoch id: `{status.get('scaling_epoch_id', '')}`",
+        f"- scaling accepted requests: `{status.get('scaling_accepted_requests', '')}`",
+        f"- scaling duration seconds: `{status.get('scaling_duration_secs', '')}`",
+        f"- request density: `{status.get('request_density', '')}`",
+        f"- scaling action: `{status.get('scaling_action', '')}`",
+        f"- scaling reason: `{status.get('scaling_reason', '')}`",
+        f"- artifact: `{sharded_scaling_status_path}`",
+    ]
 
 summary_md.write_text(
     "\n".join(
@@ -291,6 +327,8 @@ summary_md.write_text(
             f"- sharded overload retries: `{sharded_eval['client_log']['overload_retry_count']}`",
             f"- baseline warnings: {format_reasons(baseline_eval['warnings'])}",
             f"- sharded warnings: {format_reasons(sharded_eval['warnings'])}",
+            "",
+            *scaling_summary_lines(sharded_scaling_status),
             "",
             "## Artifacts",
             "",
