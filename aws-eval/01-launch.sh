@@ -10,6 +10,7 @@ require_cmd aws
 require_cmd curl
 require_cmd chmod
 require_cmd mktemp
+validate_public_entry_backend
 
 if [[ -f "$STATE_FILE" && "${FORCE:-0}" != "1" ]]; then
   die "state already exists at $STATE_FILE. Run 06-teardown.sh first, or set FORCE=1 to overwrite local state."
@@ -47,6 +48,13 @@ SHARD0_FOLLOWER_PUBLIC_IP=""
 SHARD1_LEADER_PUBLIC_IP=""
 SHARD1_FOLLOWER_PUBLIC_IP=""
 CLIENT_PUBLIC_IP=""
+
+NLB_NAME=""
+NLB_ARN=""
+NLB_DNS_NAME=""
+NLB_TARGET_GROUP_NAME=""
+NLB_TARGET_GROUP_ARN=""
+NLB_LISTENER_ARN=""
 
 write_launch_state() {
   cat >"$STATE_FILE" <<EOF_STATE
@@ -118,6 +126,13 @@ COORDINATOR_LEASE_RENEW_SECONDS=$(quote "$COORDINATOR_LEASE_RENEW_SECONDS")
 COORDINATOR_IAM_ROLE_NAME=$(quote "$(coordinator_iam_role_name)")
 COORDINATOR_IAM_INSTANCE_PROFILE_NAME=$(quote "$(coordinator_iam_instance_profile_name)")
 COORDINATOR_IAM_POLICY_NAME=$(quote "$COORDINATOR_IAM_POLICY_NAME")
+PUBLIC_ENTRY_BACKEND=$(quote "$PUBLIC_ENTRY_BACKEND")
+NLB_NAME=$(quote "$NLB_NAME")
+NLB_ARN=$(quote "$NLB_ARN")
+NLB_DNS_NAME=$(quote "$NLB_DNS_NAME")
+NLB_TARGET_GROUP_NAME=$(quote "$NLB_TARGET_GROUP_NAME")
+NLB_TARGET_GROUP_ARN=$(quote "$NLB_TARGET_GROUP_ARN")
+NLB_LISTENER_ARN=$(quote "$NLB_LISTENER_ARN")
 EOF_STATE
 }
 
@@ -245,6 +260,13 @@ aws_region ec2 authorize-security-group-ingress \
   --group-id "$SG_ID" \
   --ip-permissions "IpProtocol=tcp,FromPort=0,ToPort=65535,UserIdGroupPairs=[{GroupId=${SG_ID}}]"
 
+if public_entry_enabled; then
+  info "authorizing public coordinator RPC ingress for NLB entry on port $COORDINATOR_PORT"
+  aws_region ec2 authorize-security-group-ingress \
+    --group-id "$SG_ID" \
+    --ip-permissions "IpProtocol=tcp,FromPort=${COORDINATOR_PORT},ToPort=${COORDINATOR_PORT},IpRanges=[{CidrIp=0.0.0.0/0,Description='Riposte NLB public coordinator entry'}]"
+fi
+
 launch_instance() {
   local name="$1"
   local role="$2"
@@ -346,6 +368,62 @@ SHARD1_FOLLOWER_PUBLIC_IP="$(describe_field "$SHARD1_FOLLOWER_ID" PublicIpAddres
 CLIENT_PUBLIC_IP="$(describe_field "$CLIENT_ID" PublicIpAddress)"
 
 write_launch_state
+
+create_public_entry_nlb() {
+  local nlb_suffix
+  nlb_suffix="$(printf '%s' "$RUN_ID" | tr -cd '[:alnum:]' | tail -c 16)"
+  NLB_NAME="${NLB_NAME:-riposte-${nlb_suffix}}"
+  NLB_TARGET_GROUP_NAME="${NLB_TARGET_GROUP_NAME:-riposte-tg-${nlb_suffix}}"
+
+  info "creating public Network Load Balancer: $NLB_NAME"
+  NLB_ARN="$(aws_region elbv2 create-load-balancer \
+    --name "$NLB_NAME" \
+    --type network \
+    --scheme internet-facing \
+    --subnets "$SELECTED_SUBNET_ID" \
+    --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" \
+    --query 'LoadBalancers[0].LoadBalancerArn' \
+    --output text)"
+  NLB_DNS_NAME="$(aws_region elbv2 describe-load-balancers \
+    --load-balancer-arns "$NLB_ARN" \
+    --query 'LoadBalancers[0].DNSName' \
+    --output text)"
+  write_launch_state
+
+  aws_region elbv2 wait load-balancer-available --load-balancer-arns "$NLB_ARN"
+
+  info "creating NLB target group: $NLB_TARGET_GROUP_NAME"
+  NLB_TARGET_GROUP_ARN="$(aws_region elbv2 create-target-group \
+    --name "$NLB_TARGET_GROUP_NAME" \
+    --protocol TCP \
+    --port "$COORDINATOR_PORT" \
+    --vpc-id "$SELECTED_VPC_ID" \
+    --target-type instance \
+    --health-check-protocol TCP \
+    --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" \
+    --query 'TargetGroups[0].TargetGroupArn' \
+    --output text)"
+  write_launch_state
+
+  info "registering coordinator instance with NLB target group"
+  aws_region elbv2 register-targets \
+    --target-group-arn "$NLB_TARGET_GROUP_ARN" \
+    --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_PORT"
+
+  info "creating NLB listener on TCP port $COORDINATOR_PORT"
+  NLB_LISTENER_ARN="$(aws_region elbv2 create-listener \
+    --load-balancer-arn "$NLB_ARN" \
+    --protocol TCP \
+    --port "$COORDINATOR_PORT" \
+    --default-actions "Type=forward,TargetGroupArn=$NLB_TARGET_GROUP_ARN" \
+    --query 'Listeners[0].ListenerArn' \
+    --output text)"
+  write_launch_state
+}
+
+if public_entry_enabled; then
+  create_public_entry_nlb
+fi
 
 echo
 cat "$STATE_FILE"

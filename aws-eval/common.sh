@@ -34,6 +34,7 @@ DYNAMODB_SESSION_REGION="${DYNAMODB_SESSION_REGION:-}"
 COORDINATOR_IAM_POLICY_NAME="${COORDINATOR_IAM_POLICY_NAME:-RiposteDynamoDBControlStore}"
 COORDINATOR_LEASE_TTL_SECONDS="${COORDINATOR_LEASE_TTL_SECONDS:-30}"
 COORDINATOR_LEASE_RENEW_SECONDS="${COORDINATOR_LEASE_RENEW_SECONDS:-10}"
+PUBLIC_ENTRY_BACKEND="${PUBLIC_ENTRY_BACKEND:-none}"
 
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
 SHARD0_LEADER_PORT="${SHARD0_LEADER_PORT:-8610}"
@@ -258,6 +259,19 @@ coordinator_addr() {
   printf '%s:%s' "$COORDINATOR_PRIVATE_IP" "$COORDINATOR_PORT"
 }
 
+public_entry_enabled() {
+  [[ "$PUBLIC_ENTRY_BACKEND" == "nlb" ]]
+}
+
+public_coordinator_addr() {
+  if public_entry_enabled; then
+    [[ -n "${NLB_DNS_NAME:-}" ]] || die "PUBLIC_ENTRY_BACKEND=nlb but NLB_DNS_NAME is missing from state"
+    printf '%s:%s' "$NLB_DNS_NAME" "$COORDINATOR_PORT"
+  else
+    coordinator_addr
+  fi
+}
+
 coordinator_holder_id() {
   printf '%s' "${COORDINATOR_HOLDER_ID:-${PROJECT_TAG}-${RUN_ID:-local}-coordinator}"
 }
@@ -354,6 +368,69 @@ capture_dynamodb_control_item() {
     --consistent-read \
     --key "{\"pk\":{\"S\":\"$pk\"}}" \
     --output json >"$output_path"
+}
+
+validate_public_entry_backend() {
+  case "$PUBLIC_ENTRY_BACKEND" in
+    none|nlb)
+      return 0
+      ;;
+    *)
+      die "unknown PUBLIC_ENTRY_BACKEND: $PUBLIC_ENTRY_BACKEND"
+      ;;
+  esac
+}
+
+capture_nlb_artifacts() {
+  local output_dir="$1"
+  mkdir -p "$output_dir"
+  if ! public_entry_enabled; then
+    return 0
+  fi
+  [[ -n "${NLB_ARN:-}" && -n "${NLB_TARGET_GROUP_ARN:-}" && -n "${NLB_LISTENER_ARN:-}" ]] || return 0
+  aws_region elbv2 describe-load-balancers \
+    --load-balancer-arns "$NLB_ARN" \
+    --output json >"$output_dir/load-balancer.json" || true
+  aws_region elbv2 describe-target-groups \
+    --target-group-arns "$NLB_TARGET_GROUP_ARN" \
+    --output json >"$output_dir/target-group.json" || true
+  aws_region elbv2 describe-listeners \
+    --listener-arns "$NLB_LISTENER_ARN" \
+    --output json >"$output_dir/listener.json" || true
+  aws_region elbv2 describe-target-health \
+    --target-group-arn "$NLB_TARGET_GROUP_ARN" \
+    --output json >"$output_dir/target-health.json" || true
+}
+
+nlb_target_health_state() {
+  [[ -n "${NLB_TARGET_GROUP_ARN:-}" ]] || return 1
+  aws_region elbv2 describe-target-health \
+    --target-group-arn "$NLB_TARGET_GROUP_ARN" \
+    --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_PORT" \
+    --query 'TargetHealthDescriptions[0].TargetHealth.State' \
+    --output text
+}
+
+wait_for_nlb_target_healthy() {
+  local timeout="${1:-180}"
+  local deadline=$((SECONDS + timeout))
+  local state
+  if ! public_entry_enabled; then
+    return 0
+  fi
+  info "waiting for NLB target health on coordinator"
+  while true; do
+    state="$(nlb_target_health_state 2>/dev/null || true)"
+    if [[ "$state" == "healthy" ]]; then
+      info "NLB target is healthy"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      capture_nlb_artifacts "$STATE_DIR/nlb-timeout"
+      die "NLB target did not become healthy before timeout; last state=${state:-unknown}"
+    fi
+    sleep 5
+  done
 }
 
 shard0_leader_addr() {

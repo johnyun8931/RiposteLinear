@@ -136,6 +136,8 @@ Creates:
 - one security group
   - SSH from current public IP only
   - all TCP within the security group
+- optionally, an internet-facing Network Load Balancer for public coordinator
+  RPC ingress when `PUBLIC_ENTRY_BACKEND=nlb`
 - six tagged EC2 instances
 
 State is written to:
@@ -186,6 +188,31 @@ The launch script creates a temporary coordinator IAM role and instance profile
 for DynamoDB runtime access. Teardown removes that role/profile with the EC2
 resources.
 
+### Optional Public Entry NLB
+
+The harness defaults to private client-to-coordinator traffic inside the eval
+security group:
+
+```bash
+PUBLIC_ENTRY_BACKEND=none
+```
+
+To add a public entry layer, launch with:
+
+```bash
+PUBLIC_ENTRY_BACKEND=nlb ./aws-eval/01-launch.sh
+```
+
+This creates an internet-facing Network Load Balancer, a TCP target group for
+the coordinator RPC port, and a listener on that same port. Smoke and sharded
+benchmark client traffic use the NLB DNS name when enabled. Coordinator
+administration and coordinator-to-shard traffic still use private addresses.
+
+This is a public entry layer only. The current harness registers one coordinator
+target, so it does not yet load-balance across multiple coordinator/router
+instances. Multi-router NLB traffic remains a later slice after upload routing
+is separated from leased epoch control.
+
 ### 4. Smoke
 
 ```bash
@@ -202,6 +229,10 @@ waits for completion, and verifies:
   global row `256`
 - completed coordinator status reports scaling metrics for the two accepted
   smoke writes and `global_table_height=512`
+
+If `PUBLIC_ENTRY_BACKEND=nlb`, smoke waits for the coordinator target to become
+healthy and sends deterministic client writes through the NLB DNS name. NLB
+target-health artifacts are copied under the smoke log directory.
 
 If `CONTROL_STORE_BACKEND=dynamodb`, smoke starts the coordinator with the
 DynamoDB control-store flags and captures the `lease`, `epoch`, and
@@ -250,6 +281,9 @@ The completed status includes `scaling_epoch_id`,
 `scaling_accepted_requests`, `scaling_duration_secs`, `request_density`,
 `scaling_action`, and `scaling_reason`.
 
+If `PUBLIC_ENTRY_BACKEND=nlb`, sharded benchmark hammer clients target the NLB
+DNS name and each sharded phase captures NLB target-health snapshots.
+
 For AWS load calibration, run the short concurrency sweep after smoke:
 
 ```bash
@@ -296,7 +330,8 @@ Run teardown even if earlier steps fail:
 ```
 
 This terminates the six instances, deletes the temporary key pair, and deletes
-the security group after attachments drain.
+the security group after attachments drain. If an NLB was created, teardown
+deletes the listener, load balancer, and target group first.
 
 ## Useful Overrides
 
@@ -328,6 +363,7 @@ START_EPOCH_RETRY_TIMEOUT=90
 START_EPOCH_RETRY_INTERVAL=2
 POST_EPOCH_FLUSH_SECONDS=12
 CLIENT_EXIT_GRACE_SECONDS=30
+PUBLIC_ENTRY_BACKEND=none
 ```
 
 Use explicit subnet/AZ overrides only when the default-network auto-selection

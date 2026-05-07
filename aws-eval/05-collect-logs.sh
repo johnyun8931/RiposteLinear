@@ -19,6 +19,9 @@ require_cmd aws
 RESULT_ID="${RESULT_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_DIR="$RESULTS_DIR/$RESULT_ID"
 mkdir -p "$OUT_DIR/remotes" "$OUT_DIR/leader-results"
+if public_entry_enabled; then
+  capture_nlb_artifacts "$OUT_DIR/aws/nlb"
+fi
 
 copy_role_tree() {
   local label="$1"
@@ -91,6 +94,13 @@ START_EPOCH_RETRY_TIMEOUT="$START_EPOCH_RETRY_TIMEOUT" \
 START_EPOCH_RETRY_INTERVAL="$START_EPOCH_RETRY_INTERVAL" \
 POST_EPOCH_FLUSH_SECONDS="$POST_EPOCH_FLUSH_SECONDS" \
 CLIENT_EXIT_GRACE_SECONDS="$CLIENT_EXIT_GRACE_SECONDS" \
+PUBLIC_ENTRY_BACKEND="$PUBLIC_ENTRY_BACKEND" \
+NLB_NAME="${NLB_NAME:-}" \
+NLB_DNS_NAME="${NLB_DNS_NAME:-}" \
+NLB_ARN="${NLB_ARN:-}" \
+NLB_TARGET_GROUP_NAME="${NLB_TARGET_GROUP_NAME:-}" \
+NLB_TARGET_GROUP_ARN="${NLB_TARGET_GROUP_ARN:-}" \
+NLB_LISTENER_ARN="${NLB_LISTENER_ARN:-}" \
 COORDINATOR_ID="$COORDINATOR_ID" \
 COORDINATOR_PUBLIC_IP="$COORDINATOR_PUBLIC_IP" \
 COORDINATOR_PRIVATE_IP="$COORDINATOR_PRIVATE_IP" \
@@ -163,6 +173,15 @@ payload = {
         "start_epoch_retry_interval": int(os.environ["START_EPOCH_RETRY_INTERVAL"]),
         "post_epoch_flush_seconds": int(os.environ["POST_EPOCH_FLUSH_SECONDS"]),
         "client_exit_grace_seconds": int(os.environ["CLIENT_EXIT_GRACE_SECONDS"]),
+        "public_entry_backend": os.environ["PUBLIC_ENTRY_BACKEND"],
+        "nlb": {
+            "name": os.environ["NLB_NAME"],
+            "dns_name": os.environ["NLB_DNS_NAME"],
+            "arn": os.environ["NLB_ARN"],
+            "target_group_name": os.environ["NLB_TARGET_GROUP_NAME"],
+            "target_group_arn": os.environ["NLB_TARGET_GROUP_ARN"],
+            "listener_arn": os.environ["NLB_LISTENER_ARN"],
+        },
     },
     "instances": {
         "coordinator": {

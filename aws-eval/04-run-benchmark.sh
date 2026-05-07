@@ -29,6 +29,10 @@ load_state
 [[ -n "$USER_CLIENT_EXIT_GRACE_SECONDS" ]] && CLIENT_EXIT_GRACE_SECONDS="$USER_CLIENT_EXIT_GRACE_SECONDS"
 
 require_cmd ssh
+if public_entry_enabled; then
+  require_cmd aws
+  require_cmd scp
+fi
 
 cleanup() {
   kill_all_remote_processes
@@ -47,6 +51,7 @@ WARMUP_EPOCH_SECONDS=$(quote "$WARMUP_EPOCH_SECONDS")
 MEASURED_EPOCH_SECONDS=$(quote "$MEASURED_EPOCH_SECONDS")
 POST_EPOCH_FLUSH_SECONDS=$(quote "$POST_EPOCH_FLUSH_SECONDS")
 CLIENT_EXIT_GRACE_SECONDS=$(quote "$CLIENT_EXIT_GRACE_SECONDS")
+PUBLIC_ENTRY_BACKEND=$(quote "$PUBLIC_ENTRY_BACKEND")
 EOF_STATE
 }
 
@@ -153,15 +158,26 @@ run_sharded_phase() {
 
   start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$phase_logs/coordinator.log"
   remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_PORT"
+  wait_for_nlb_target_healthy 180
 
   retry_start_epoch coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$duration" >/dev/null
   capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$phase_logs/status-active-coordinator.json"
-  start_remote_hammer_client "$CLIENT_PUBLIC_IP" -coordinator "$(coordinator_addr)" "$phase_logs/client.log" "$client_pid_path"
+  if public_entry_enabled; then
+    capture_nlb_artifacts "$STATE_DIR/nlb-$phase-active"
+    remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$phase_logs/nlb-active'"
+    copy_to_remote "$STATE_DIR/nlb-$phase-active/target-health.json" "$COORDINATOR_PUBLIC_IP" "$phase_logs/nlb-active/target-health.json"
+  fi
+  start_remote_hammer_client "$CLIENT_PUBLIC_IP" -coordinator "$(public_coordinator_addr)" "$phase_logs/client.log" "$client_pid_path"
   if ! wait_for_phase_client "$phase" "$duration" "$phase_logs" "$client_pid_path"; then
     kill_all_remote_processes
     return 1
   fi
   capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$phase_logs/status-completed-coordinator.json"
+  if public_entry_enabled; then
+    capture_nlb_artifacts "$STATE_DIR/nlb-$phase-completed"
+    remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$phase_logs/nlb-completed'"
+    copy_to_remote "$STATE_DIR/nlb-$phase-completed/target-health.json" "$COORDINATOR_PUBLIC_IP" "$phase_logs/nlb-completed/target-health.json"
+  fi
   kill_all_remote_processes
 }
 

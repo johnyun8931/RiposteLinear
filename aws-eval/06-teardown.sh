@@ -9,6 +9,34 @@ load_state
 
 require_cmd aws
 
+if [[ -n "${NLB_LISTENER_ARN:-}" ]]; then
+  info "deleting NLB listener: $NLB_LISTENER_ARN"
+  aws_region elbv2 delete-listener --listener-arn "$NLB_LISTENER_ARN" >/dev/null 2>&1 || true
+fi
+
+if [[ -n "${NLB_TARGET_GROUP_ARN:-}" && -n "${COORDINATOR_ID:-}" ]]; then
+  info "deregistering coordinator from NLB target group"
+  aws_region elbv2 deregister-targets \
+    --target-group-arn "$NLB_TARGET_GROUP_ARN" \
+    --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_PORT" >/dev/null 2>&1 || true
+fi
+
+if [[ -n "${NLB_ARN:-}" ]]; then
+  info "deleting NLB: $NLB_ARN"
+  aws_region elbv2 delete-load-balancer --load-balancer-arn "$NLB_ARN" >/dev/null 2>&1 || true
+  aws_region elbv2 wait load-balancers-deleted --load-balancer-arns "$NLB_ARN" >/dev/null 2>&1 || true
+fi
+
+if [[ -n "${NLB_TARGET_GROUP_ARN:-}" ]]; then
+  info "deleting NLB target group: $NLB_TARGET_GROUP_ARN"
+  for _ in $(seq 1 20); do
+    if aws_region elbv2 delete-target-group --target-group-arn "$NLB_TARGET_GROUP_ARN" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5
+  done
+fi
+
 INSTANCE_IDS=()
 for id in \
   "${COORDINATOR_ID:-}" \

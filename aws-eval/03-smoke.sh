@@ -10,7 +10,7 @@ load_state
 require_cmd ssh
 require_cmd scp
 require_cmd python3
-if dynamodb_control_enabled; then
+if dynamodb_control_enabled || public_entry_enabled; then
   require_cmd aws
 fi
 
@@ -128,6 +128,12 @@ remote_wait_for_port "$SHARD1_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD1_LEADER_PORT
 
 start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/coordinator.log"
 remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_PORT"
+wait_for_nlb_target_healthy 180
+if public_entry_enabled; then
+  capture_nlb_artifacts "$SMOKE_LOCAL_DIR/nlb-active"
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE/nlb-active'"
+  copy_to_remote "$SMOKE_LOCAL_DIR/nlb-active/target-health.json" "$COORDINATOR_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/nlb-active/target-health.json"
+fi
 
 info "retrying coordinator StartEpoch until shard leaders are ready"
 start_line="$(retry_start_epoch coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_EPOCH_SECONDS")"
@@ -144,14 +150,19 @@ capture_dynamodb_smoke_state active
 assert_dynamodb_smoke_state active "$epoch_id" true true
 
 info "sending deterministic smoke writes through the coordinator"
-remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 1 -y 0 -payload shard0-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row0.log'"
-remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 2 -y 256 -payload shard1-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row256.log'"
+remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(public_coordinator_addr)' -x 1 -y 0 -payload shard0-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row0.log'"
+remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(public_coordinator_addr)' -x 2 -y 256 -payload shard1-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row256.log'"
 
 wait_for_epoch_complete coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" 120
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
 assert_remote_scaling_status "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json" "$epoch_id" 2 512
+if public_entry_enabled; then
+  capture_nlb_artifacts "$SMOKE_LOCAL_DIR/nlb-completed"
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE/nlb-completed'"
+  copy_to_remote "$SMOKE_LOCAL_DIR/nlb-completed/target-health.json" "$COORDINATOR_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/nlb-completed/target-health.json"
+fi
 capture_dynamodb_smoke_state completed
 assert_dynamodb_smoke_state completed "$epoch_id" false
 
