@@ -102,6 +102,16 @@ func mustCoordinatorWithLease(t *testing.T, shards []ShardConfig, clients map[in
 	return coord
 }
 
+func mustStandbyCoordinator(t *testing.T, shards []ShardConfig, clients map[int]shardClient, store ControlStore, holder string, ttl time.Duration, renewInterval time.Duration) *Coordinator {
+	t.Helper()
+	coord, err := newCoordinatorWithStandbyConfig(shards, clients, store, holder, ttl, renewInterval, true)
+	if err != nil {
+		t.Fatalf("newCoordinatorWithStandbyConfig failed: %v", err)
+	}
+	t.Cleanup(coord.Close)
+	return coord
+}
+
 func setCoordinatorActiveEpoch(t *testing.T, coord *Coordinator, epoch db.EpochMeta) {
 	t.Helper()
 	coord.epoch = epoch
@@ -271,6 +281,81 @@ func TestCoordinatorRejectsSecondHolderWithActiveLease(t *testing.T) {
 	}
 }
 
+func TestStandbyCoordinatorStartsPassiveWithActiveLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	standby := mustStandbyCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-b", testLeaseTTL, testLeaseRenewInterval)
+
+	if standby.role != coordinatorRolePassive {
+		t.Fatalf("expected passive standby, got %s", standby.role)
+	}
+	var status db.CoordinatorStatusReply
+	if err := standby.Status(&db.CoordinatorStatusArgs{}, &status); err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.Role != coordinatorRolePassive || status.ActiveHolder != "coord-a" {
+		t.Fatalf("expected passive status with coord-a active holder, got %+v", status)
+	}
+}
+
+func TestPassiveCoordinatorRejectsMutations(t *testing.T) {
+	store := newMemoryControlStore(1)
+	mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	fakeClient := &fakeShardClient{}
+	standby := mustStandbyCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: fakeClient}, store, "coord-b", testLeaseTTL, testLeaseRenewInterval)
+
+	err := standby.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60}, &db.StartEpochReply{})
+	if err == nil || !strings.Contains(err.Error(), "coordinator lease unavailable") {
+		t.Fatalf("expected coordinator lease error, got %v", err)
+	}
+	if fakeClient.startCalls != 0 {
+		t.Fatalf("expected passive coordinator not to contact shard, got %d calls", fakeClient.startCalls)
+	}
+
+	err = standby.Upload1(&db.UploadArgs1{RouteRow: 0}, &db.UploadReply1{})
+	if err == nil || err.Error() != "No active epoch" {
+		t.Fatalf("expected no active epoch error, got %v", err)
+	}
+	if fakeClient.upload1Calls != 0 {
+		t.Fatalf("expected passive Upload1 not to reach shard, got %d calls", fakeClient.upload1Calls)
+	}
+}
+
+func TestPassiveCoordinatorBecomesActiveAfterLeaseExpiry(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", 30*time.Millisecond, 10*time.Millisecond)
+	initialToken := active.lease.FencingToken
+	active.Close()
+
+	standby := mustStandbyCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-b", testLeaseTTL, time.Millisecond)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		standby.mu.Lock()
+		role := standby.role
+		token := standby.lease.FencingToken
+		standby.mu.Unlock()
+		if role == coordinatorRoleActive && token > initialToken {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("standby did not become active with newer token; role=%s lease=%+v", standby.role, standby.lease)
+}
+
 func TestCoordinatorDifferentHolderCanAcquireAfterLeaseExpiry(t *testing.T) {
 	store := newMemoryControlStore(1)
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
@@ -394,6 +479,9 @@ func TestCoordinatorStartEpochFailsWithStaleLease(t *testing.T) {
 	}
 	if client.startCalls != 0 {
 		t.Fatalf("expected stale coordinator not to contact shard, got %d StartEpoch calls", client.startCalls)
+	}
+	if coord.role != coordinatorRoleStale {
+		t.Fatalf("expected stale coordinator role, got %s", coord.role)
 	}
 }
 
@@ -570,11 +658,14 @@ func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 	if err := coord.Status(&db.CoordinatorStatusArgs{}, &reply); err != nil {
 		t.Fatalf("Coordinator.Status failed: %v", err)
 	}
-	if reply.Role != "standalone" || reply.EpochID != 3 || reply.State != db.EpochStateActive.String() || !reply.Accepting {
+	if reply.Role != coordinatorRoleActive || reply.EpochID != 3 || reply.State != db.EpochStateActive.String() || !reply.Accepting {
 		t.Fatalf("unexpected coordinator status: %+v", reply)
 	}
 	if reply.LeaseHolder != defaultCoordinatorLeaseHolder || reply.LeaseFencingToken == 0 || reply.LeaseExpiresUnixMs == 0 || !reply.LeaseActive {
 		t.Fatalf("expected active lease status, got %+v", reply)
+	}
+	if reply.ActiveHolder != defaultCoordinatorLeaseHolder {
+		t.Fatalf("expected active holder %q, got %+v", defaultCoordinatorLeaseHolder, reply)
 	}
 	if len(reply.Shards) != 2 {
 		t.Fatalf("expected two shard statuses, got %d", len(reply.Shards))

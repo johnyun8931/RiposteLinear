@@ -268,6 +268,7 @@ type CoordinatorStatusReply struct {
 	LeaseFencingToken  int64                    `json:"lease_fencing_token"`
 	LeaseExpiresUnixMs int64                    `json:"lease_expires_unix_ms"`
 	LeaseActive        bool                     `json:"lease_active"`
+	ActiveHolder       string                   `json:"active_holder"`
 	Shards             []CoordinatorShardStatus `json:"shards"`
 }
 

@@ -208,9 +208,9 @@ To validate coordinator lease/fencing behavior with two coordinator attempts:
 CONTROL_STORE_BACKEND=dynamodb ./aws-eval/08-validate-coordinator-lease.sh
 ```
 
-This starts coordinator A, verifies coordinator B exits while A holds the
-lease, stops A, waits for lease expiry, then verifies B can acquire a newer
-fencing token and start an epoch.
+This starts coordinator A, starts coordinator B in warm standby, verifies B
+stays passive while A holds the lease, stops A, then verifies B promotes with a
+newer fencing token and starts an epoch.
 
 ### 5. Benchmark
 

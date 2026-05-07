@@ -93,6 +93,9 @@ const (
 	defaultCoordinatorLeaseHolder        = "standalone"
 	defaultCoordinatorLeaseTTL           = 30 * time.Second
 	defaultCoordinatorLeaseRenewInterval = 10 * time.Second
+	coordinatorRoleActive                = "active"
+	coordinatorRolePassive               = "passive"
+	coordinatorRoleStale                 = "stale"
 )
 
 type Coordinator struct {
@@ -108,6 +111,7 @@ type Coordinator struct {
 	leaseHolder  string
 	leaseTTL     time.Duration
 	lease        CoordinatorLease
+	role         string
 	leaseStopCh  chan struct{}
 	leaseDoneCh  chan struct{}
 }
@@ -260,6 +264,18 @@ func newCoordinatorWithLeaseConfig(
 	leaseTTL time.Duration,
 	leaseRenewInterval time.Duration,
 ) (*Coordinator, error) {
+	return newCoordinatorWithStandbyConfig(shards, clients, controlStore, leaseHolder, leaseTTL, leaseRenewInterval, false)
+}
+
+func newCoordinatorWithStandbyConfig(
+	shards []ShardConfig,
+	clients map[int]shardClient,
+	controlStore ControlStore,
+	leaseHolder string,
+	leaseTTL time.Duration,
+	leaseRenewInterval time.Duration,
+	standby bool,
+) (*Coordinator, error) {
 	if controlStore == nil {
 		return nil, errors.New("control store is required")
 	}
@@ -272,7 +288,13 @@ func newCoordinatorWithLeaseConfig(
 	}
 	lease, err := controlStore.AcquireLease(time.Now().UTC(), leaseHolder, leaseTTL)
 	if err != nil {
-		return nil, fmt.Errorf("acquire coordinator lease: %w", err)
+		if !standby || !errors.Is(err, errLeaseHeld) {
+			return nil, fmt.Errorf("acquire coordinator lease: %w", err)
+		}
+	}
+	role := coordinatorRoleActive
+	if err != nil {
+		role = coordinatorRolePassive
 	}
 	coord := &Coordinator{
 		shards:       validated,
@@ -283,6 +305,7 @@ func newCoordinatorWithLeaseConfig(
 		leaseHolder:  leaseHolder,
 		leaseTTL:     leaseTTL,
 		lease:        lease,
+		role:         role,
 		leaseStopCh:  make(chan struct{}),
 		leaseDoneCh:  make(chan struct{}),
 	}
@@ -322,8 +345,8 @@ func (c *Coordinator) startLeaseRenewal(interval time.Duration) {
 		for {
 			select {
 			case <-ticker.C:
-				if err := c.renewCoordinatorLease(); err != nil {
-					log.Printf("Renew coordinator lease failed: %v", err)
+				if err := c.maintainCoordinatorLease(); err != nil {
+					log.Printf("Maintain coordinator lease failed: %v", err)
 				}
 			case <-stopCh:
 				return
@@ -367,13 +390,65 @@ func (c *Coordinator) renewCoordinatorLease() error {
 	c.mu.Lock()
 	if c.lease.FencingToken == token && c.leaseHolder == holder {
 		c.lease = lease
+		c.role = coordinatorRoleActive
 	}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Coordinator) maintainCoordinatorLease() error {
+	c.mu.Lock()
+	role := c.role
+	c.mu.Unlock()
+
+	if role == coordinatorRoleActive {
+		if err := c.renewCoordinatorLease(); err != nil {
+			c.markCoordinatorStale()
+			return err
+		}
+		return nil
+	}
+	return c.tryAcquireCoordinatorLease()
+}
+
+func (c *Coordinator) markCoordinatorStale() {
+	c.mu.Lock()
+	if c.role == coordinatorRoleActive {
+		c.role = coordinatorRoleStale
+	}
+	c.mu.Unlock()
+}
+
+func (c *Coordinator) tryAcquireCoordinatorLease() error {
+	c.mu.Lock()
+	controlStore := c.controlStore
+	holder := c.leaseHolder
+	ttl := c.leaseTTL
+	c.mu.Unlock()
+
+	lease, err := controlStore.AcquireLease(time.Now().UTC(), holder, ttl)
+	if err != nil {
+		if errors.Is(err, errLeaseHeld) {
+			c.mu.Lock()
+			if c.role != coordinatorRoleStale {
+				c.role = coordinatorRolePassive
+			}
+			c.mu.Unlock()
+			return nil
+		}
+		return err
+	}
+
+	c.mu.Lock()
+	c.lease = lease
+	c.role = coordinatorRoleActive
 	c.mu.Unlock()
 	return nil
 }
 
 func (c *Coordinator) requireCoordinatorLease() error {
 	if err := c.renewCoordinatorLease(); err != nil {
+		c.markCoordinatorStale()
 		return fmt.Errorf("coordinator lease unavailable: %w", err)
 	}
 	return nil
@@ -682,6 +757,14 @@ func populateCoordinatorLeaseStatus(reply *db.CoordinatorStatusReply, lease Coor
 	reply.LeaseActive = lease.Holder != "" && now.Before(lease.ExpiresAt)
 }
 
+func activeHolderFromControlStore(controlStore ControlStore, now time.Time) string {
+	lease, ok := controlStore.CurrentLease(now)
+	if !ok {
+		return ""
+	}
+	return lease.Holder
+}
+
 func shardStatusWithTimeout(client shardClient, timeout time.Duration) (db.StatusReply, error) {
 	type statusResult struct {
 		reply db.StatusReply
@@ -714,6 +797,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	epoch := c.epoch
 	controlStore := c.controlStore
 	lease := c.lease
+	role := c.role
 	shards := append([]ShardConfig(nil), c.shards...)
 	clients := make(map[int]shardClient, len(c.clients))
 	for shardID, client := range c.clients {
@@ -722,7 +806,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	c.mu.Unlock()
 
 	reply.Healthy = true
-	reply.Role = "standalone"
+	reply.Role = role
 	reply.LeaderAddr = ""
 	reply.EpochID = epoch.ID
 	reply.State = epoch.State.String()
@@ -730,7 +814,9 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	reply.EndUnix = epoch.EndTime.Unix()
 	reply.DurationSecs = epoch.DurationSeconds
 	reply.Accepting = acceptingFromControlStore(controlStore, epoch)
-	populateCoordinatorLeaseStatus(reply, lease, time.Now().UTC())
+	now := time.Now().UTC()
+	populateCoordinatorLeaseStatus(reply, lease, now)
+	reply.ActiveHolder = activeHolderFromControlStore(controlStore, now)
 	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
 
 	for i, shard := range shards {

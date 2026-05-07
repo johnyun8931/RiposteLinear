@@ -32,6 +32,7 @@ var flagAWSRegion = flag.String("aws-region", "", "AWS region override for Dynam
 var flagCoordinatorID = flag.String("coordinator-id", "", "Coordinator lease holder ID; defaults to hostname-pid")
 var flagLeaseTTLSeconds = flag.Int64("lease-ttl-seconds", int64(defaultCoordinatorLeaseTTL/time.Second), "Coordinator lease TTL in seconds")
 var flagLeaseRenewSeconds = flag.Int64("lease-renew-seconds", int64(defaultCoordinatorLeaseRenewInterval/time.Second), "Coordinator lease renewal interval in seconds")
+var flagStandby = flag.Bool("standby", false, "If set, stay alive as passive standby when another coordinator holds the lease")
 
 var shardFlags shardListType
 
@@ -80,13 +81,14 @@ func main() {
 	leaseTTL := time.Duration(*flagLeaseTTLSeconds) * time.Second
 	leaseRenewInterval := time.Duration(*flagLeaseRenewSeconds) * time.Second
 
-	coord, err := newCoordinatorWithLeaseConfig(
+	coord, err := newCoordinatorWithStandbyConfig(
 		shards,
 		nil,
 		controlStore,
 		holderID,
 		leaseTTL,
 		leaseRenewInterval,
+		*flagStandby,
 	)
 	if err != nil {
 		log.Fatal(err)

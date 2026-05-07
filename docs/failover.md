@@ -44,6 +44,8 @@ Coordinator flags:
 - `-coordinator-id <id>`, optional lease holder ID; defaults to `hostname-pid`
 - `-lease-ttl-seconds <seconds>`, optional lease TTL; defaults to `30`
 - `-lease-renew-seconds <seconds>`, optional renewal interval; defaults to `10`
+- `-standby`, optional warm standby mode; stay alive as passive when another
+  coordinator currently holds the lease
 
 The DynamoDB table uses a single string partition key named `pk`:
 
@@ -56,6 +58,27 @@ Use `aws-eval/07-create-control-table.sh` to create the minimal table when
 testing the DynamoDB backend. The helper records the selected table and region
 in `aws-eval/.state/env.sh`, but existing smoke and benchmark scripts continue
 to use the memory backend unless explicitly configured otherwise.
+
+## Coordinator Role Terms
+
+Warm standby distinguishes three coordinator roles:
+
+- `active`: this coordinator holds a live lease and can admit mutating
+  coordinator RPCs after renewing that lease.
+- `passive`: this coordinator is alive for read-only status and lease retry, but
+  does not currently hold authority.
+- `stale`: this coordinator used to hold authority, but lease renewal failed or
+  another coordinator acquired a newer fencing token.
+
+`stale` is a debugging signal for the split-brain-risk case. It should behave
+like `passive` for mutations: reject `StartEpoch`, reject `Upload1`, and avoid
+epoch completion. The fencing token is the safety mechanism; an old token cannot
+renew or mutate after a newer holder takes over.
+
+The warm-standby slice has local regression coverage and AWS validation, but it
+has not had a deep manual code review. Before merging broadly or building SQS
+ingestion on top, review coordinator role transitions, mutation lease gates,
+status semantics, and the AWS two-coordinator validation path.
 
 ## Go Toolchain Note
 

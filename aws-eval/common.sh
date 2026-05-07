@@ -451,8 +451,12 @@ start_remote_coordinator() {
   local lease_ttl="${5:-$COORDINATOR_LEASE_TTL_SECONDS}"
   local lease_renew="${6:-$COORDINATOR_LEASE_RENEW_SECONDS}"
   local pid_path="${7:-}"
+  local standby="${8:-0}"
   local control_args mkdir_cmd
   control_args="$(coordinator_control_store_args "$holder" "$lease_ttl" "$lease_renew")"
+  if [[ "$standby" == "1" || "$standby" == "true" ]]; then
+    control_args="$control_args -standby"
+  fi
   mkdir_cmd="mkdir -p '$(dirname "$log_path")'"
   if [[ -n "$pid_path" ]]; then
     mkdir_cmd="$mkdir_cmd '$(dirname "$pid_path")'"

@@ -242,6 +242,7 @@ launch_instance() {
   local role="$2"
   local instance_type="$3"
   local instance_profile_name=""
+  local attempt out status
 
   if [[ "$role" == "coordinator" ]] && dynamodb_control_enabled; then
     instance_profile_name="$(coordinator_iam_instance_profile_name)"
@@ -265,7 +266,26 @@ launch_instance() {
     args+=(--iam-instance-profile "Name=$instance_profile_name")
   fi
 
-  aws_region ec2 run-instances "${args[@]}"
+  for attempt in $(seq 1 12); do
+    set +e
+    out="$(aws_region ec2 run-instances "${args[@]}" 2>&1)"
+    status=$?
+    set -e
+    if [[ $status -eq 0 ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    if [[ -n "$instance_profile_name" ]] && printf '%s\n' "$out" | grep -qi "Invalid IAM Instance Profile name"; then
+      info "waiting for IAM instance profile propagation before launching $name (attempt $attempt/12)"
+      sleep 10
+      continue
+    fi
+    printf '%s\n' "$out" >&2
+    return "$status"
+  done
+
+  printf '%s\n' "$out" >&2
+  return "$status"
 }
 
 info "launching instances"

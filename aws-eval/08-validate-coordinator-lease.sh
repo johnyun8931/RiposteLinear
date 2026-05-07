@@ -55,6 +55,23 @@ if int(status.get("lease_expires_unix_ms", 0)) <= 0:
 PY
 }
 
+assert_status_role() {
+  local file="$1"
+  local role="$2"
+  local active_holder="$3"
+  python3 - "$file" "$role" "$active_holder" <<'PY'
+import json
+import sys
+
+path, role, active_holder = sys.argv[1:]
+status = json.load(open(path))
+if status.get("role") != role:
+    raise SystemExit(f"expected coordinator role {role}, got {status.get('role')}")
+if status.get("active_holder") != active_holder:
+    raise SystemExit(f"expected active holder {active_holder}, got {status.get('active_holder')}")
+PY
+}
+
 assert_dynamodb_lease() {
   local file="$1"
   local holder="$2"
@@ -112,25 +129,48 @@ start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$COORDINATOR_A_ADDR" "$LEASE_
 remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_PORT"
 capture_status_local_and_remote "$COORDINATOR_A_ADDR" "$LEASE_LOCAL_DIR/status-a-active.json" "$LEASE_LOGS_REMOTE/status-a-active.json"
 assert_status_lease "$LEASE_LOCAL_DIR/status-a-active.json" "$COORDINATOR_A_HOLDER"
+assert_status_role "$LEASE_LOCAL_DIR/status-a-active.json" active "$COORDINATOR_A_HOLDER"
 capture_dynamodb_lease_local_and_remote "$LEASE_LOCAL_DIR/dynamodb-lease-a.json" "$LEASE_LOGS_REMOTE/dynamodb-lease-a.json"
 token_a="$(assert_dynamodb_lease "$LEASE_LOCAL_DIR/dynamodb-lease-a.json" "$COORDINATOR_A_HOLDER")"
 
-info "verifying coordinator B exits while coordinator A holds the lease"
-start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$COORDINATOR_B_ADDR" "$LEASE_LOGS_REMOTE/coordinator-b-held.log" "$COORDINATOR_B_HOLDER" "$LEASE_VALIDATE_TTL_SECONDS" "$LEASE_VALIDATE_RENEW_SECONDS" "$LEASE_LOGS_REMOTE/coordinator-b-held.pid"
-if ! wait_remote_pid_exit "$COORDINATOR_PUBLIC_IP" "$LEASE_LOGS_REMOTE/coordinator-b-held.pid" 20; then
-  die "coordinator B did not exit while coordinator A held the lease"
-fi
-remote_cmd "$COORDINATOR_PUBLIC_IP" "grep -qi 'coordinator lease is held' '$LEASE_LOGS_REMOTE/coordinator-b-held.log'"
+info "starting coordinator B as passive standby while coordinator A holds the lease"
+start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$COORDINATOR_B_ADDR" "$LEASE_LOGS_REMOTE/coordinator-b-standby.log" "$COORDINATOR_B_HOLDER" "$LEASE_VALIDATE_TTL_SECONDS" "$LEASE_VALIDATE_RENEW_SECONDS" "$LEASE_LOGS_REMOTE/coordinator-b-standby.pid" 1
+remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_STANDBY_PORT"
+capture_status_local_and_remote "$COORDINATOR_B_ADDR" "$LEASE_LOCAL_DIR/status-b-passive.json" "$LEASE_LOGS_REMOTE/status-b-passive.json"
+assert_status_role "$LEASE_LOCAL_DIR/status-b-passive.json" passive "$COORDINATOR_A_HOLDER"
 
 info "stopping coordinator A and waiting for lease expiry"
 stop_remote_pid "$LEASE_LOGS_REMOTE/coordinator-a.pid"
-sleep "$((LEASE_VALIDATE_TTL_SECONDS + 2))"
 
-info "starting coordinator B after lease expiry"
-start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$COORDINATOR_B_ADDR" "$LEASE_LOGS_REMOTE/coordinator-b-active.log" "$COORDINATOR_B_HOLDER" "$LEASE_VALIDATE_TTL_SECONDS" "$LEASE_VALIDATE_RENEW_SECONDS" "$LEASE_LOGS_REMOTE/coordinator-b-active.pid"
-remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_STANDBY_PORT"
+info "waiting for coordinator B to acquire the expired lease"
+deadline=$((SECONDS + LEASE_VALIDATE_TTL_SECONDS + 20))
+while true; do
+  capture_status_local_and_remote "$COORDINATOR_B_ADDR" "$LEASE_LOCAL_DIR/status-b-active.json" "$LEASE_LOGS_REMOTE/status-b-active.json"
+  if python3 - "$LEASE_LOCAL_DIR/status-b-active.json" "$COORDINATOR_B_HOLDER" "$((token_a + 1))" <<'PY'
+import json
+import sys
+
+path, holder, min_token = sys.argv[1], sys.argv[2], int(sys.argv[3])
+status = json.load(open(path))
+ok = (
+    status.get("role") == "active"
+    and status.get("lease_holder") == holder
+    and int(status.get("lease_fencing_token", 0)) >= min_token
+    and status.get("lease_active")
+)
+raise SystemExit(0 if ok else 1)
+PY
+  then
+    break
+  fi
+  if (( SECONDS >= deadline )); then
+    die "coordinator B did not become active after coordinator A stopped"
+  fi
+  sleep 1
+done
 capture_status_local_and_remote "$COORDINATOR_B_ADDR" "$LEASE_LOCAL_DIR/status-b-active.json" "$LEASE_LOGS_REMOTE/status-b-active.json"
 assert_status_lease "$LEASE_LOCAL_DIR/status-b-active.json" "$COORDINATOR_B_HOLDER" "$((token_a + 1))"
+assert_status_role "$LEASE_LOCAL_DIR/status-b-active.json" active "$COORDINATOR_B_HOLDER"
 capture_dynamodb_lease_local_and_remote "$LEASE_LOCAL_DIR/dynamodb-lease-b.json" "$LEASE_LOGS_REMOTE/dynamodb-lease-b.json"
 token_b="$(assert_dynamodb_lease "$LEASE_LOCAL_DIR/dynamodb-lease-b.json" "$COORDINATOR_B_HOLDER" "$((token_a + 1))")"
 
@@ -148,6 +188,7 @@ cat <<EOF
 AWS coordinator lease validation passed.
   coordinator A holder: $COORDINATOR_A_HOLDER
   coordinator B holder: $COORDINATOR_B_HOLDER
+  coordinator B standby: stayed running and promoted
   token A: $token_a
   token B: $token_b
   epoch started through B: $epoch_id
