@@ -156,6 +156,22 @@ Builds Linux binaries locally and copies:
 - `~/coordinator` to the coordinator node
 - `~/client` to the client node
 
+### Optional DynamoDB Control Table
+
+The coordinator defaults to the in-memory control store. To create the minimal
+DynamoDB table for opt-in control-store testing, run:
+
+```bash
+./aws-eval/07-create-control-table.sh
+```
+
+The table has one string partition key, `pk`, and stores three control records:
+`lease`, `epoch`, and `shard-config`. The helper records
+`CONTROL_STORE_BACKEND=dynamodb`, `DYNAMODB_CONTROL_TABLE`, and
+`DYNAMODB_CONTROL_REGION` in `aws-eval/.state/env.sh`, but smoke and benchmark
+scripts do not use DynamoDB unless their coordinator commands are explicitly
+configured with `-control-store dynamodb`.
+
 ### 4. Smoke
 
 ```bash
@@ -252,6 +268,7 @@ CLIENT_CONCURRENCY=16
 CLIENT_RETRY_OVERLOAD=0
 CLIENT_OVERLOAD_BACKOFF_INITIAL_MS=10
 CLIENT_OVERLOAD_BACKOFF_MAX_MS=250
+DYNAMODB_CONTROL_TABLE=riposte-aws-eval-control
 WARMUP_EPOCH_SECONDS=60
 MEASURED_EPOCH_SECONDS=600
 START_EPOCH_RETRY_TIMEOUT=90

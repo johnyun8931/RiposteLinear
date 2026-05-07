@@ -437,9 +437,9 @@ func TestRunClientLoopStopsBetweenHammerUploads(t *testing.T) {
 }
 
 func TestRunHammerClientsIgnoresNoActiveEpochAndSignalsStop(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	err := runHammerClients(2, func(shouldStop func() bool, signalStop func()) error {
-		call := atomic.AddInt32(&calls, 1)
+		call := calls.Add(1)
 		if call == 1 {
 			return errors.New("No active epoch")
 		}
@@ -483,16 +483,16 @@ func TestRunHammerClientsReturnsOverloadError(t *testing.T) {
 }
 
 func TestRunHammerClientsUsesConfiguredConcurrency(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	err := runHammerClients(3, func(func() bool, func()) error {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("runHammerClients returned unexpected error: %v", err)
 	}
-	if calls != 3 {
-		t.Fatalf("expected 3 hammer workers, got %d", calls)
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("expected 3 hammer workers, got %d", got)
 	}
 }
 

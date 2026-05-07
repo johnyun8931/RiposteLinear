@@ -30,7 +30,36 @@ The first AWS-native implementation slices are intentionally SDK-free:
 - The coordinator acquires and renews a local fenced lease before admitting new
   `StartEpoch` or `Upload1` mutations.
 
-AWS SDK wiring is deferred until the local interfaces and semantics are reviewed.
+The current implementation adds an opt-in DynamoDB-backed `ControlStore`.
+The in-memory backend remains the default for local runs and existing smoke
+or benchmark scripts.
+
+## DynamoDB Control Store
+
+Coordinator flags:
+
+- `-control-store memory|dynamodb`, default `memory`
+- `-control-table <name>`, required when `-control-store dynamodb`
+- `-aws-region <region>`, optional AWS SDK region override
+- `-coordinator-id <id>`, optional lease holder ID; defaults to `hostname-pid`
+
+The DynamoDB table uses a single string partition key named `pk`:
+
+- `pk="lease"` stores the active coordinator holder, fencing token, and lease
+  expiry timestamp.
+- `pk="epoch"` stores epoch metadata and accepting state.
+- `pk="shard-config"` stores the shard config version.
+
+Use `aws-eval/07-create-control-table.sh` to create the minimal table when
+testing the DynamoDB backend. The helper records the selected table and region
+in `aws-eval/.state/env.sh`, but existing smoke and benchmark scripts continue
+to use the memory backend unless explicitly configured otherwise.
+
+## Go Toolchain Note
+
+This branch uses typed atomics such as `atomic.Bool` and `atomic.Int32`, and the
+module now targets Go 1.24. Keep the local and CI toolchains on the declared
+Go/toolchain version before running the DynamoDB-backed coordinator code.
 
 ## Intended Future Flow
 
@@ -45,9 +74,9 @@ remain a known failover limitation.
 
 ## Current Boundary
 
-No DynamoDB, SQS, or S3 SDK calls are implemented yet. The current code has
-local control-store wiring and lease/fencing enforcement, but no active-passive
-promotion.
+DynamoDB control-store wiring is opt-in. SQS and S3 SDK calls are not
+implemented yet. The current code has local and DynamoDB control-store wiring
+and lease/fencing enforcement, but no active-passive promotion.
 
 Shard active/passive promotion, pair partial-delivery hardening, and
 horizontally scaled stateless write routers remain later work.

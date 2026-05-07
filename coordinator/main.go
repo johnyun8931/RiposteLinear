@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,9 @@ import (
 	"net/rpc"
 	"os"
 	"strings"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 
 	"bitbucket.org/henrycg/riposte/db"
 	"bitbucket.org/henrycg/riposte/utils"
@@ -21,6 +25,10 @@ var flagAdminTarget = flag.String("admin-target", "", "Target coordinator addres
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
 var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query coordinator epoch status over admin RPC and exit")
 var flagStatus = flag.Bool("status", false, "If set, query coordinator status over admin RPC and exit")
+var flagControlStore = flag.String("control-store", "memory", "Control store backend: memory or dynamodb")
+var flagControlTable = flag.String("control-table", "", "DynamoDB table name for -control-store dynamodb")
+var flagAWSRegion = flag.String("aws-region", "", "AWS region override for DynamoDB control store")
+var flagCoordinatorID = flag.String("coordinator-id", "", "Coordinator lease holder ID; defaults to hostname-pid")
 
 var shardFlags shardListType
 
@@ -62,7 +70,19 @@ func main() {
 		shards = append(shards, shard)
 	}
 
-	coord, err := NewCoordinator(shards, nil)
+	controlStore, holderID, err := buildControlStore()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	coord, err := newCoordinatorWithLeaseConfig(
+		shards,
+		nil,
+		controlStore,
+		holderID,
+		defaultCoordinatorLeaseTTL,
+		defaultCoordinatorLeaseRenewInterval,
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -75,6 +95,48 @@ func main() {
 	}
 	var certs []tls.Certificate
 	utils.ListenAndServe(*flagListen, 0, certs)
+}
+
+func defaultCoordinatorID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "coordinator"
+	}
+	return fmt.Sprintf("%s-%d", host, os.Getpid())
+}
+
+func configuredCoordinatorID() string {
+	if *flagCoordinatorID != "" {
+		return *flagCoordinatorID
+	}
+	return defaultCoordinatorID()
+}
+
+func buildControlStore() (ControlStore, string, error) {
+	holderID := configuredCoordinatorID()
+	switch *flagControlStore {
+	case "memory":
+		return newMemoryControlStore(1), holderID, nil
+	case "dynamodb":
+		if *flagControlTable == "" {
+			return nil, "", dynamoDBControlStoreConfigError("-control-table")
+		}
+		options := []func(*awsconfig.LoadOptions) error{}
+		if *flagAWSRegion != "" {
+			options = append(options, awsconfig.WithRegion(*flagAWSRegion))
+		}
+		cfg, err := awsconfig.LoadDefaultConfig(context.Background(), options...)
+		if err != nil {
+			return nil, "", err
+		}
+		store, err := newDynamoDBControlStore(dynamodb.NewFromConfig(cfg), *flagControlTable)
+		if err != nil {
+			return nil, "", err
+		}
+		return store, holderID, nil
+	default:
+		return nil, "", fmt.Errorf("unknown -control-store %q", *flagControlStore)
+	}
 }
 
 func runAdminCommand() {

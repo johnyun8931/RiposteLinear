@@ -233,12 +233,12 @@ func runClientWorker(target string, shouldStop func() bool, signalStop func()) e
 }
 
 func runHammerClients(concurrent int, runOnce func(func() bool, func()) error) error {
-	var stop uint32
+	var stop atomic.Bool
 	shouldStop := func() bool {
-		return atomic.LoadUint32(&stop) != 0
+		return stop.Load()
 	}
 	signalStop := func() {
-		atomic.StoreUint32(&stop, 1)
+		stop.Store(true)
 	}
 
 	var wg sync.WaitGroup
