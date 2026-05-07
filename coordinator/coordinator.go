@@ -493,45 +493,59 @@ func (c *Coordinator) EpochStatus(_ *db.EpochStatusArgs, reply *db.EpochStatusRe
 }
 
 func (c *Coordinator) ReadLatest(args *db.ReadLatestArgs, reply *db.ReadLatestReply) error {
+	if args.X < 0 || args.X >= db.TABLE_WIDTH {
+		return fmt.Errorf("x %d outside [0,%d)", args.X, db.TABLE_WIDTH)
+	}
+	if args.Y < 0 || args.Y >= db.TABLE_HEIGHT {
+		return fmt.Errorf("y %d outside [0,%d)", args.Y, db.TABLE_HEIGHT)
+	}
+
+	shard, err := c.routeShard(args.Y)
+	if err != nil {
+		return err
+	}
+
 	c.mu.Lock()
-	_, shardOK := c.shardByID[args.ShardID]
 	bucket := c.resultBucket
 	prefix := c.resultPrefix
 	reader := c.resultReader
 	c.mu.Unlock()
 
-	if !shardOK {
-		return fmt.Errorf("unknown shard %d", args.ShardID)
-	}
 	if reader == nil || bucket == "" {
 		return errors.New("result object store is not configured")
 	}
 
-	manifestKey := coordinatorLatestManifestKey(prefix, args.ShardID)
+	manifestKey := coordinatorLatestManifestKey(prefix, shard.ID)
 	manifestData, err := reader.GetObject(bucket, manifestKey)
 	if err != nil {
-		return fmt.Errorf("read latest manifest for shard %d: %w", args.ShardID, err)
+		return fmt.Errorf("read latest manifest for row %d: %w", args.Y, err)
 	}
 
 	var manifest db.PublishedResultManifest
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		return fmt.Errorf("decode latest manifest for shard %d: %w", args.ShardID, err)
+		return fmt.Errorf("decode latest manifest for row %d: %w", args.Y, err)
 	}
-	if manifest.ShardID != args.ShardID {
-		return fmt.Errorf("latest manifest shard mismatch: got %d want %d", manifest.ShardID, args.ShardID)
+	if manifest.ShardID != shard.ID {
+		return fmt.Errorf("latest manifest shard mismatch: got %d want %d", manifest.ShardID, shard.ID)
 	}
-	if manifest.ResultKey == "" {
-		return fmt.Errorf("latest manifest for shard %d has empty result key", args.ShardID)
+	if manifest.BinaryResultKey == "" {
+		return fmt.Errorf("latest manifest for row %d has empty binary result key", args.Y)
 	}
 
-	content, err := reader.GetObject(bucket, manifest.ResultKey)
+	content, err := reader.GetObject(bucket, manifest.BinaryResultKey)
 	if err != nil {
-		return fmt.Errorf("read latest result for shard %d: %w", args.ShardID, err)
+		return fmt.Errorf("read latest binary result for row %d: %w", args.Y, err)
+	}
+
+	offset := (args.Y*db.TABLE_WIDTH + args.X) * db.SLOT_LENGTH
+	end := offset + db.SLOT_LENGTH
+	if end > len(content) {
+		return fmt.Errorf("latest binary result for row %d is too short: need %d bytes, got %d", args.Y, end, len(content))
 	}
 
 	reply.EpochID = manifest.EpochID
-	reply.ShardID = manifest.ShardID
-	reply.ResultKey = manifest.ResultKey
-	reply.Content = content
+	reply.X = args.X
+	reply.Y = args.Y
+	reply.Content = append(reply.Content[:0], content[offset:end]...)
 	return nil
 }

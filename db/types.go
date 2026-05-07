@@ -221,14 +221,15 @@ type EpochStatusReply struct {
 }
 
 type ReadLatestArgs struct {
-	ShardID int
+	X int
+	Y int
 }
 
 type ReadLatestReply struct {
-	EpochID   int64
-	ShardID   int
-	ResultKey string
-	Content   []byte
+	EpochID int64
+	X       int
+	Y       int
+	Content []byte
 }
 
 type AbortEpochArgs struct {
@@ -267,10 +268,11 @@ type PublishedResult struct {
 }
 
 type PublishedResultManifest struct {
-	EpochID     int64     `json:"epoch_id"`
-	ShardID     int       `json:"shard_id"`
-	ResultKey   string    `json:"result_key"`
-	CompletedAt time.Time `json:"completed_at"`
+	EpochID         int64     `json:"epoch_id"`
+	ShardID         int       `json:"shard_id"`
+	ResultKey       string    `json:"result_key"`
+	BinaryResultKey string    `json:"binary_result_key"`
+	CompletedAt     time.Time `json:"completed_at"`
 }
 
 type objectStore interface {
@@ -558,12 +560,32 @@ func marshalPublishedResult(result PublishedResult) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
+func marshalPublishedBinaryResult(plaintext *BitMatrix) []byte {
+	data := make([]byte, 0, TABLE_HEIGHT*TABLE_WIDTH*SLOT_LENGTH)
+	for row := 0; row < TABLE_HEIGHT; row++ {
+		data = append(data, plaintext[row][:]...)
+	}
+	return data
+}
+
 func publishedResultFilename(epoch EpochMeta, shardID, serverIdx int) string {
 	return fmt.Sprintf("epoch-%06d-shard-%d-server-%d.json", epoch.ID, shardID, serverIdx)
 }
 
+func publishedBinaryResultFilename(epoch EpochMeta, shardID, serverIdx int) string {
+	return fmt.Sprintf("epoch-%06d-shard-%d-server-%d.bin", epoch.ID, shardID, serverIdx)
+}
+
 func publishedResultObjectKey(prefix string, shardID int, epochID int64) string {
 	key := fmt.Sprintf("shards/%d/epochs/%06d/result.json", shardID, epochID)
+	if prefix == "" {
+		return key
+	}
+	return path.Join(strings.Trim(prefix, "/"), key)
+}
+
+func publishedBinaryResultObjectKey(prefix string, shardID int, epochID int64) string {
+	key := fmt.Sprintf("shards/%d/epochs/%06d/result.bin", shardID, epochID)
 	if prefix == "" {
 		return key
 	}
@@ -595,6 +617,7 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 	if err != nil {
 		return "", err
 	}
+	binaryData := marshalPublishedBinaryResult(plaintext)
 
 	locations := make([]string, 0, 2)
 	if t.resultsDir != "" {
@@ -606,6 +629,10 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 		if err := os.WriteFile(filePath, data, 0o644); err != nil {
 			return "", err
 		}
+		binaryPath := filepath.Join(t.resultsDir, publishedBinaryResultFilename(epoch, t.ShardID, t.ServerIdx))
+		if err := os.WriteFile(binaryPath, binaryData, 0o644); err != nil {
+			return "", err
+		}
 		locations = append(locations, filePath)
 	}
 
@@ -614,11 +641,16 @@ func (t *Server) writePublishedResult(plaintext *BitMatrix, epoch EpochMeta, com
 		if err := t.resultStore.PutObject(t.resultBucket, key, data, "application/json"); err != nil {
 			return "", err
 		}
+		binaryKey := publishedBinaryResultObjectKey(t.resultPrefix, t.ShardID, epoch.ID)
+		if err := t.resultStore.PutObject(t.resultBucket, binaryKey, binaryData, "application/octet-stream"); err != nil {
+			return "", err
+		}
 		manifest := PublishedResultManifest{
-			EpochID:     epoch.ID,
-			ShardID:     t.ShardID,
-			ResultKey:   key,
-			CompletedAt: completedAt.UTC(),
+			EpochID:         epoch.ID,
+			ShardID:         t.ShardID,
+			ResultKey:       key,
+			BinaryResultKey: binaryKey,
+			CompletedAt:     completedAt.UTC(),
 		}
 		manifestData, err := marshalPublishedResultManifest(manifest)
 		if err != nil {

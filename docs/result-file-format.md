@@ -1,6 +1,16 @@
 # Result File Format Notes
 
-Published result files currently include:
+Each shard leader publishes two epoch result artifacts:
+
+- `result.json`: sparse, human-readable verification output
+- `result.bin`: fixed-layout binary table for direct slot lookups
+
+The shard leader also updates `latest.json`, whose manifest includes both
+`result_key` and `binary_result_key`.
+
+## `result.json`
+
+Published JSON result files currently include:
 
 - epoch metadata:
   - `epoch_id`
@@ -36,3 +46,24 @@ Reasoning:
 - it has been serialized to lowercase hexadecimal text for publication
 
 Base64 would also work, but hex was chosen because it is more direct to inspect in crypto- and systems-oriented debugging.
+
+## `result.bin`
+
+`result.bin` contains the revealed `BitMatrix` in row-major order.
+
+Lookup formula:
+
+```text
+offset = (row * table_width + column) * slot_length
+length = slot_length
+```
+
+With the current constants, the binary file is:
+
+```text
+256 * 256 * 160 = 10,485,760 bytes
+```
+
+Coordinator reads use this file internally. Clients specify only `(x, y)`; the
+coordinator maps `y` to the correct shard, reads that shard's latest
+`result.bin`, and returns the slot bytes at `(x, y)`.

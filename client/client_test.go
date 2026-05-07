@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -8,6 +9,27 @@ import (
 
 	"bitbucket.org/henrycg/riposte/db"
 )
+
+type fakeRPCCaller struct {
+	method string
+	args   interface{}
+	reply  db.ReadLatestReply
+	err    error
+}
+
+func (f *fakeRPCCaller) Call(serviceMethod string, args interface{}, reply interface{}) error {
+	f.method = serviceMethod
+	f.args = args
+	if f.err != nil {
+		return f.err
+	}
+	readReply, ok := reply.(*db.ReadLatestReply)
+	if !ok {
+		return errors.New("unexpected reply type")
+	}
+	*readReply = f.reply
+	return nil
+}
 
 func TestResolveTargetAddress(t *testing.T) {
 	tests := []struct {
@@ -55,6 +77,42 @@ func TestResolveTargetAddress(t *testing.T) {
 				t.Fatalf("expected target %q, got %q", tc.want, got)
 			}
 		})
+	}
+}
+
+func TestReadLatestResultCallsCoordinatorAndWritesContent(t *testing.T) {
+	caller := &fakeRPCCaller{
+		reply: db.ReadLatestReply{
+			EpochID: 7,
+			X:       3,
+			Y:       2,
+			Content: []byte("slot bytes"),
+		},
+	}
+	var out bytes.Buffer
+
+	if err := readLatestResult(caller, 3, 2, &out); err != nil {
+		t.Fatalf("readLatestResult returned unexpected error: %v", err)
+	}
+	if caller.method != "Server.ReadLatest" {
+		t.Fatalf("expected Server.ReadLatest call, got %q", caller.method)
+	}
+	args, ok := caller.args.(*db.ReadLatestArgs)
+	if !ok {
+		t.Fatalf("expected *db.ReadLatestArgs, got %T", caller.args)
+	}
+	if args.X != 3 || args.Y != 2 {
+		t.Fatalf("expected coordinates (3,2), got (%d,%d)", args.X, args.Y)
+	}
+	if out.String() != string(caller.reply.Content) {
+		t.Fatalf("expected result content %q, got %q", string(caller.reply.Content), out.String())
+	}
+}
+
+func TestReadLatestResultRequiresCoordinates(t *testing.T) {
+	err := readLatestResult(&fakeRPCCaller{}, -1, 0, &bytes.Buffer{})
+	if err == nil || err.Error() != "-read-latest requires -x and -y" {
+		t.Fatalf("expected coordinate error, got %v", err)
 	}
 }
 

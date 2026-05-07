@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/rpc"
 	"os"
@@ -32,6 +33,7 @@ var coordinatorFlag = flag.String("coordinator", "", "Coordinator IP and port")
 var leaderFlag = flag.String("leader", "", "Riposte pair leader IP and port")
 var logFlag = flag.String("log", "", "Location of log file")
 var threadsFlag = flag.Uint("threads", 1, "Number of threads to use")
+var readLatestFlag = flag.Bool("read-latest", false, "If set, read the latest published slot at -x and -y from the coordinator and exit")
 var xFlag = flag.Int("x", -1, "Exact column to write for deterministic uploads")
 var yFlag = flag.Int("y", -1, "Exact row to write for deterministic uploads")
 var payloadFlag = flag.String("payload", "", "Exact payload to write for deterministic uploads")
@@ -47,6 +49,10 @@ type overloadRetryConfig struct {
 	enabled        bool
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
+}
+
+type rpcCaller interface {
+	Call(serviceMethod string, args interface{}, reply interface{}) error
 }
 
 func tryUpload(client *rpc.Client, msg *db.Plaintext) error {
@@ -232,6 +238,40 @@ func runClientWorker(target string, shouldStop func() bool, signalStop func()) e
 	return runClientWithStop(target, nextMessage, retryConfig, shouldStop, signalStop)
 }
 
+func readLatestResult(client rpcCaller, x, y int, out io.Writer) error {
+	if x < 0 || y < 0 {
+		return errors.New("-read-latest requires -x and -y")
+	}
+	if x >= db.TABLE_WIDTH {
+		return fmt.Errorf("-x must be in [0,%d)", db.TABLE_WIDTH)
+	}
+	if y >= db.TABLE_HEIGHT {
+		return fmt.Errorf("-y must be in [0,%d)", db.TABLE_HEIGHT)
+	}
+
+	var reply db.ReadLatestReply
+	if err := client.Call("Server.ReadLatest", &db.ReadLatestArgs{X: x, Y: y}, &reply); err != nil {
+		return err
+	}
+	log.Printf("read latest epoch=%d x=%d y=%d bytes=%d", reply.EpochID, reply.X, reply.Y, len(reply.Content))
+	if _, err := out.Write(reply.Content); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runReadLatest(target string, x, y int, out io.Writer) error {
+	certs := make([]tls.Certificate, 1)
+	certs[0] = utils.LeaderCertificate
+	client, err := utils.DialHTTPWithTLS("tcp", target, -1, certs)
+	if err != nil {
+		return fmt.Errorf("could not connect: %w", err)
+	}
+	defer client.Close()
+
+	return readLatestResult(client, x, y, out)
+}
+
 func runHammerClients(concurrent int, runOnce func(func() bool, func()) error) error {
 	var stop uint32
 	shouldStop := func() bool {
@@ -332,6 +372,16 @@ func main() {
 	runtime.GOMAXPROCS(int(*threadsFlag))
 
 	defer log.Printf("Client died.")
+
+	if *readLatestFlag {
+		if *coordinatorFlag == "" {
+			log.Fatal("-read-latest requires -coordinator")
+		}
+		if err := runReadLatest(target, *xFlag, *yFlag, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	// Make one request
 	if !*hammerFlag {

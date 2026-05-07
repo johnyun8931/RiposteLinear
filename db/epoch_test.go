@@ -650,6 +650,18 @@ func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read result file failed: %v", err)
 	}
+	binaryPath := filepath.Join(dir, "epoch-000007-shard-3-server-0.bin")
+	binaryData, err := os.ReadFile(binaryPath)
+	if err != nil {
+		t.Fatalf("read binary result file failed: %v", err)
+	}
+	if len(binaryData) != TABLE_HEIGHT*TABLE_WIDTH*SLOT_LENGTH {
+		t.Fatalf("expected binary result length %d, got %d", TABLE_HEIGHT*TABLE_WIDTH*SLOT_LENGTH, len(binaryData))
+	}
+	slotOffset := (2*TABLE_WIDTH + 3) * SLOT_LENGTH
+	if string(binaryData[slotOffset:slotOffset+len("hello")]) != "hello" {
+		t.Fatalf("binary result did not preserve slot payload at expected offset")
+	}
 
 	var result PublishedResult
 	if err := json.Unmarshal(data, &result); err != nil {
@@ -728,8 +740,8 @@ func TestWritePublishedResultPublishesImmutableS3Object(t *testing.T) {
 	if location != expectedLocation {
 		t.Fatalf("expected location %s, got %s", expectedLocation, location)
 	}
-	if len(store.puts) != 2 {
-		t.Fatalf("expected result and latest manifest PUTs, got %d", len(store.puts))
+	if len(store.puts) != 3 {
+		t.Fatalf("expected JSON result, binary result, and latest manifest PUTs, got %d", len(store.puts))
 	}
 	resultPut := store.puts[0]
 	if resultPut.bucket != "riposte-results" {
@@ -750,7 +762,22 @@ func TestWritePublishedResultPublishesImmutableS3Object(t *testing.T) {
 		t.Fatalf("unexpected S3 result metadata: %+v", result)
 	}
 
-	manifestPut := store.puts[1]
+	binaryPut := store.puts[1]
+	expectedBinaryKey := "eval/run-1/shards/3/epochs/000007/result.bin"
+	if binaryPut.bucket != "riposte-results" {
+		t.Fatalf("expected binary bucket riposte-results, got %s", binaryPut.bucket)
+	}
+	if binaryPut.key != expectedBinaryKey {
+		t.Fatalf("expected binary key %s, got %s", expectedBinaryKey, binaryPut.key)
+	}
+	if binaryPut.contentType != "application/octet-stream" {
+		t.Fatalf("expected binary application/octet-stream content type, got %s", binaryPut.contentType)
+	}
+	if len(binaryPut.body) != TABLE_HEIGHT*TABLE_WIDTH*SLOT_LENGTH {
+		t.Fatalf("expected binary body length %d, got %d", TABLE_HEIGHT*TABLE_WIDTH*SLOT_LENGTH, len(binaryPut.body))
+	}
+
+	manifestPut := store.puts[2]
 	expectedManifestKey := "eval/run-1/shards/3/latest.json"
 	if manifestPut.bucket != "riposte-results" {
 		t.Fatalf("expected manifest bucket riposte-results, got %s", manifestPut.bucket)
@@ -766,7 +793,7 @@ func TestWritePublishedResultPublishesImmutableS3Object(t *testing.T) {
 	if err := json.Unmarshal(manifestPut.body, &manifest); err != nil {
 		t.Fatalf("unmarshal S3 manifest failed: %v", err)
 	}
-	if manifest.EpochID != 7 || manifest.ShardID != 3 || manifest.ResultKey != expectedKey {
+	if manifest.EpochID != 7 || manifest.ShardID != 3 || manifest.ResultKey != expectedKey || manifest.BinaryResultKey != expectedBinaryKey {
 		t.Fatalf("unexpected S3 manifest: %+v", manifest)
 	}
 	if !manifest.CompletedAt.Equal(time.Unix(160, 0).UTC()) {
