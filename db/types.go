@@ -252,6 +252,14 @@ type CoordinatorShardStatus struct {
 	Reachable           bool        `json:"reachable"`
 	Status              StatusReply `json:"status"`
 	StatusError         string      `json:"status_error"`
+	ActiveReachable     bool        `json:"active_reachable"`
+	ActiveStatus        StatusReply `json:"active_status"`
+	ActiveStatusError   string      `json:"active_status_error"`
+	ActiveLastChecked   int64       `json:"active_last_checked_unix"`
+	StandbyReachable    bool        `json:"standby_reachable"`
+	StandbyStatus       StatusReply `json:"standby_status"`
+	StandbyStatusError  string      `json:"standby_status_error"`
+	StandbyLastChecked  int64       `json:"standby_last_checked_unix"`
 }
 
 type CoordinatorStatusReply struct {

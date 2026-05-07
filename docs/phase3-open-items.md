@@ -27,7 +27,7 @@ Current rough edges / future work in the first Phase 3 cut:
 - current sharding splits routed write traffic by row range, but each shard still allocates and processes the full global table shape (`256x256`); shard 1 stores global rows like `128`, not local row `0`
 - true row-local shards would require a later data-layout/protocol change so each shard stores only its assigned row range and maps global rows to shard-local rows
 - hammer random mode now generates a fresh random message per upload; deterministic `-x` / `-y` / `-payload` mode remains fixed for targeted verification writes
-- `Standby` pair config exists to prepare for future failover work, but coordinator routing currently uses only the active shard leader
+- `Standby` pair config exists to prepare for future failover work; coordinator status now monitors active/standby health, but routing still uses only the active shard leader
 - transport/auth still relies on the older certificate/index assumptions from the pre-coordinator architecture
 - partial pair-delivery / rollback correctness is still deferred work; if one Riposte server in a shard pair receives a write and the other does not, that failure path is not yet fully hardened
 - coordinator/shard health and richer status fanout have been added for Phase 3.5; see `docs/failover.md`

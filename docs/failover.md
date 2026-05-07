@@ -80,6 +80,27 @@ has not had a deep manual code review. Before merging broadly or building SQS
 ingestion on top, review coordinator role transitions, mutation lease gates,
 status semantics, and the AWS two-coordinator validation path.
 
+## Active-Passive Shard Health
+
+The coordinator now owns a read-only shard health monitor. It refreshes cached
+status for each configured shard pair on a fixed interval:
+
+- active pair health is read through the existing active leader client
+- standby pair health is read by dialing the configured standby leader with a
+  bounded timeout and calling `Server.Status`
+- standby status is reported only when a standby pair is configured
+- `Server.Status` includes the leader process state plus peer readiness/error,
+  so probing the standby leader is enough to see whether that standby pair is
+  basically reachable
+
+`Coordinator.Status` keeps the older `Reachable`, `Status`, and `StatusError`
+fields as active-leader compatibility fields. It also reports explicit
+`active_*` and `standby_*` health fields with last-checked timestamps.
+
+This loop only detects and reports active/standby health. It does not change
+routing, promote a standby, mutate shard assignment state, or write to the
+control store.
+
 ## Go Toolchain Note
 
 This branch uses typed atomics such as `atomic.Bool` and `atomic.Int32`, and the
@@ -100,8 +121,11 @@ remain a known failover limitation.
 ## Current Boundary
 
 DynamoDB control-store wiring is opt-in. SQS and S3 SDK calls are not
-implemented yet. The current code has local and DynamoDB control-store wiring
-and lease/fencing enforcement, but no active-passive promotion.
+implemented yet. The current code has local and DynamoDB control-store wiring,
+lease/fencing enforcement, and active-passive shard health monitoring, but no
+active-passive promotion.
 
-Shard active/passive promotion, pair partial-delivery hardening, and
-horizontally scaled stateless write routers remain later work.
+Shard health monitoring is a prerequisite for failover, not failover itself.
+Shard active/passive promotion still requires durable accepted-work/session
+replay, promotion fencing, routing updates, and pair partial-delivery
+hardening. Horizontally scaled stateless write routers also remain later work.
