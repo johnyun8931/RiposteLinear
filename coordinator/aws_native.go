@@ -188,7 +188,7 @@ type QueuedIngestionMessage struct {
 
 type IngestionQueue interface {
 	Enqueue(ctx context.Context, message IngestionMessage) (string, error)
-	Receive(ctx context.Context, max int) ([]QueuedIngestionMessage, error)
+	Receive(ctx context.Context, maxMessages int) ([]QueuedIngestionMessage, error)
 	Ack(ctx context.Context, receiptHandle string) error
 }
 
@@ -232,20 +232,20 @@ func (q *memoryIngestionQueue) Enqueue(ctx context.Context, message IngestionMes
 	return message.ID, nil
 }
 
-func (q *memoryIngestionQueue) Receive(ctx context.Context, max int) ([]QueuedIngestionMessage, error) {
+func (q *memoryIngestionQueue) Receive(ctx context.Context, maxMessages int) ([]QueuedIngestionMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if max <= 0 {
-		return nil, errors.New("receive max must be positive")
+	if maxMessages <= 0 {
+		return nil, errors.New("receive max messages must be positive")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if max > len(q.available) {
-		max = len(q.available)
+	if maxMessages > len(q.available) {
+		maxMessages = len(q.available)
 	}
-	out := make([]QueuedIngestionMessage, 0, max)
-	for i := 0; i < max; i++ {
+	out := make([]QueuedIngestionMessage, 0, maxMessages)
+	for i := 0; i < maxMessages; i++ {
 		messageID := q.available[0]
 		q.available = q.available[1:]
 		q.nextReceiptID++
