@@ -18,6 +18,9 @@ type fakeShardClient struct {
 	upload1Calls int
 	upload2Calls int
 	upload3Calls int
+	upload1Err   error
+	upload2Err   error
+	upload3Err   error
 
 	lastUpload1 db.UploadArgs1
 	lastUpload2 db.UploadArgs2
@@ -37,6 +40,9 @@ type fakeShardClient struct {
 
 func (f *fakeShardClient) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
 	f.upload1Calls++
+	if f.upload1Err != nil {
+		return f.upload1Err
+	}
 	f.lastUpload1 = *args
 	reply.Uuid = int64(100 + f.upload1Calls)
 	reply.HashKey[0] = byte(10 + f.upload1Calls)
@@ -45,12 +51,18 @@ func (f *fakeShardClient) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) 
 
 func (f *fakeShardClient) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) error {
 	f.upload2Calls++
+	if f.upload2Err != nil {
+		return f.upload2Err
+	}
 	f.lastUpload2 = *args
 	return nil
 }
 
 func (f *fakeShardClient) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error {
 	f.upload3Calls++
+	if f.upload3Err != nil {
+		return f.upload3Err
+	}
 	f.lastUpload3 = *args
 	return nil
 }
@@ -147,6 +159,34 @@ func activeStandbyShard(id, start, end int) ShardConfig {
 		FollowerAddr: "127.0.0.1:9001",
 	}
 	return shard
+}
+
+func startCoordinatorEpoch(t *testing.T, coord *Coordinator, client *fakeShardClient, epochID int64, startTime time.Time, durationSeconds int64) {
+	t.Helper()
+	client.startReply = db.StartEpochReply{
+		EpochID:      epochID,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Duration(durationSeconds) * time.Second).Unix(),
+		DurationSecs: durationSeconds,
+	}
+	if err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: durationSeconds, StartUnix: startTime.Unix()}, &db.StartEpochReply{}); err != nil {
+		t.Fatalf("StartEpoch failed: %v", err)
+	}
+}
+
+func completeCoordinatorUpload(t *testing.T, coord *Coordinator, routeRow int) {
+	t.Helper()
+	var up1 db.UploadReply1
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: routeRow}, &up1); err != nil {
+		t.Fatalf("Upload1 failed: %v", err)
+	}
+	if err := coord.Upload2(&db.UploadArgs2{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply2{}); err != nil {
+		t.Fatalf("Upload2 failed: %v", err)
+	}
+	if err := coord.Upload3(&db.UploadArgs3{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply3{}); err != nil {
+		t.Fatalf("Upload3 failed: %v", err)
+	}
 }
 
 func TestParseShardConfigRequiresActivePairAndAllowsMissingStandby(t *testing.T) {
@@ -592,6 +632,43 @@ func TestCoordinatorCompleteEpochMirrorsControlStore(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCompleteEpochCachesScalingRecommendation(t *testing.T) {
+	active := &fakeShardClient{}
+	startTime := time.Now().UTC().Truncate(time.Second)
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	coord.scalingConfig = ScalingPolicyConfig{
+		MinShards:                 1,
+		MaxShards:                 4,
+		TargetRowsPerShard:        2,
+		ScaleUpDensityThreshold:   4,
+		ScaleDownDensityThreshold: 1,
+		MaxShardMultiplier:        2,
+	}
+	startCoordinatorEpoch(t, coord, active, 1, startTime, 60)
+	for i := 0; i < 8; i++ {
+		completeCoordinatorUpload(t, coord, 1)
+	}
+
+	coord.completeEpoch()
+
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if !coord.hasLastScalingMetrics {
+		t.Fatal("expected last scaling metrics")
+	}
+	if coord.lastScalingMetrics.EpochID != 1 || coord.lastScalingMetrics.AcceptedRequestCount != 8 || coord.lastScalingMetrics.DurationSeconds != 60 {
+		t.Fatalf("unexpected last scaling metrics: %+v", coord.lastScalingMetrics)
+	}
+	if coord.lastScalingRecommendation.Action != scalingActionGrow || coord.lastScalingRecommendation.RecommendedShardCount != 2 {
+		t.Fatalf("expected grow recommendation, got %+v", coord.lastScalingRecommendation)
+	}
+	if coord.hasActiveScalingMetrics {
+		t.Fatalf("expected active scaling metrics to be cleared after completion, got %+v", coord.activeScalingMetrics)
+	}
+}
+
 func TestCoordinatorCompleteEpochSkipsStoreMutationWithStaleLease(t *testing.T) {
 	store := newMemoryControlStore(1)
 	startTime := time.Now().UTC().Truncate(time.Second)
@@ -641,6 +718,53 @@ func TestCoordinatorUploadsUseOnlyActivePairWhenStandbyConfigured(t *testing.T) 
 	}
 	if active.upload1Calls != 1 || active.upload2Calls != 1 || active.upload3Calls != 1 {
 		t.Fatalf("expected active-only uploads, got upload1=%d upload2=%d upload3=%d", active.upload1Calls, active.upload2Calls, active.upload3Calls)
+	}
+}
+
+func TestCoordinatorScalingMetricsIncrementAfterSuccessfulUpload3(t *testing.T) {
+	active := &fakeShardClient{}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	startCoordinatorEpoch(t, coord, active, 1, time.Now().UTC(), 60)
+
+	completeCoordinatorUpload(t, coord, 1)
+
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if !coord.hasActiveScalingMetrics {
+		t.Fatal("expected active scaling metrics")
+	}
+	if coord.activeScalingMetrics.EpochID != 1 || coord.activeScalingMetrics.AcceptedRequestCount != 1 {
+		t.Fatalf("unexpected active scaling metrics: %+v", coord.activeScalingMetrics)
+	}
+}
+
+func TestCoordinatorScalingMetricsSkipFailedAndRejectedUploads(t *testing.T) {
+	active := &fakeShardClient{upload3Err: errors.New("upload3 failed")}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	startCoordinatorEpoch(t, coord, active, 1, time.Now().UTC(), 60)
+
+	var up1 db.UploadReply1
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: 1}, &up1); err != nil {
+		t.Fatalf("Upload1 failed: %v", err)
+	}
+	if err := coord.Upload2(&db.UploadArgs2{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply2{}); err != nil {
+		t.Fatalf("Upload2 failed: %v", err)
+	}
+	if err := coord.Upload3(&db.UploadArgs3{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply3{}); err == nil {
+		t.Fatal("expected Upload3 failure")
+	}
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: db.TABLE_HEIGHT}, &db.UploadReply1{}); err == nil {
+		t.Fatal("expected rejected Upload1 for out-of-range row")
+	}
+
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if coord.activeScalingMetrics.AcceptedRequestCount != 0 {
+		t.Fatalf("expected failed/rejected uploads not to increment metrics, got %+v", coord.activeScalingMetrics)
 	}
 }
 
@@ -738,6 +862,9 @@ func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 	if reply.ScalingAction != scalingActionKeep || reply.RequestDensity != 2 {
 		t.Fatalf("unexpected default scaling recommendation: action=%q density=%.2f reason=%q", reply.ScalingAction, reply.RequestDensity, reply.ScalingReason)
 	}
+	if reply.ScalingEpochID != 0 || reply.ScalingAcceptedRequests != int64(2*db.TABLE_HEIGHT*2) || reply.ScalingDurationSecs != 1 {
+		t.Fatalf("unexpected default scaling metrics: epoch=%d accepted=%d duration=%d", reply.ScalingEpochID, reply.ScalingAcceptedRequests, reply.ScalingDurationSecs)
+	}
 	if len(reply.Shards) != 2 {
 		t.Fatalf("expected two shard statuses, got %d", len(reply.Shards))
 	}
@@ -789,7 +916,7 @@ func TestCoordinatorStatusScalingDoesNotMutateRoutingOrControlStore(t *testing.T
 	}, map[int]shardClient{
 		0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}},
 		1: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 1}},
-	}, store, defaultCoordinatorLeaseHolder, time.Minute, time.Minute)
+	}, store, defaultCoordinatorLeaseHolder, testLeaseTTL, testLeaseRenewInterval)
 
 	beforeVersion := store.ShardConfigVersion()
 	beforeShard, err := coord.routeShard(db.TABLE_HEIGHT / 2)
@@ -814,6 +941,69 @@ func TestCoordinatorStatusScalingDoesNotMutateRoutingOrControlStore(t *testing.T
 	}
 	if reply.ScalingAction != scalingActionKeep {
 		t.Fatalf("expected default scaling status to keep, got %+v", reply)
+	}
+}
+
+func TestCoordinatorStatusReportsCompletedScalingMetrics(t *testing.T) {
+	active := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 0}}
+	startTime := time.Now().UTC().Truncate(time.Second)
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	coord.scalingConfig = ScalingPolicyConfig{
+		MinShards:                 1,
+		MaxShards:                 4,
+		TargetRowsPerShard:        2,
+		ScaleUpDensityThreshold:   4,
+		ScaleDownDensityThreshold: 1,
+		MaxShardMultiplier:        2,
+	}
+	startCoordinatorEpoch(t, coord, active, 1, startTime, 60)
+	for i := 0; i < 8; i++ {
+		completeCoordinatorUpload(t, coord, 1)
+	}
+	coord.completeEpoch()
+
+	var reply db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &reply); err != nil {
+		t.Fatalf("Coordinator.Status failed: %v", err)
+	}
+	if reply.ScalingEpochID != 1 || reply.ScalingAcceptedRequests != 8 || reply.ScalingDurationSecs != 60 {
+		t.Fatalf("unexpected status scaling metrics: %+v", reply)
+	}
+	if reply.ScalingAction != scalingActionGrow || reply.RecommendedNextShardCount != 2 || reply.RequestDensity != 4 {
+		t.Fatalf("unexpected status scaling recommendation: %+v", reply)
+	}
+}
+
+func TestCoordinatorStartEpochResetsActiveScalingMetricsAndKeepsLastRecommendation(t *testing.T) {
+	active := &fakeShardClient{}
+	startTime := time.Now().UTC().Truncate(time.Second)
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	coord.scalingConfig = ScalingPolicyConfig{
+		MinShards:                 1,
+		MaxShards:                 4,
+		TargetRowsPerShard:        2,
+		ScaleUpDensityThreshold:   4,
+		ScaleDownDensityThreshold: 1,
+		MaxShardMultiplier:        2,
+	}
+	startCoordinatorEpoch(t, coord, active, 1, startTime, 60)
+	completeCoordinatorUpload(t, coord, 1)
+	coord.completeEpoch()
+	lastRecommendation := coord.lastScalingRecommendation
+
+	startCoordinatorEpoch(t, coord, active, 2, startTime.Add(2*time.Minute), 60)
+
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if !coord.hasActiveScalingMetrics || coord.activeScalingMetrics.EpochID != 2 || coord.activeScalingMetrics.AcceptedRequestCount != 0 {
+		t.Fatalf("unexpected active metrics after second epoch start: %+v", coord.activeScalingMetrics)
+	}
+	if !coord.hasLastScalingMetrics || coord.lastScalingRecommendation != lastRecommendation {
+		t.Fatalf("expected last recommendation to remain cached, got %+v", coord.lastScalingRecommendation)
 	}
 }
 

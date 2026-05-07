@@ -100,6 +100,7 @@ type routedSession struct {
 	shardID   int
 	localUUID int64
 	hashKey   [32]byte
+	epochID   int64
 }
 
 type pairHealthSnapshot struct {
@@ -148,6 +149,13 @@ type Coordinator struct {
 	healthStopCh        chan struct{}
 	healthDoneCh        chan struct{}
 	standbyLeaderDialer func(addr string, timeout time.Duration) (closeableStatusClient, error)
+
+	scalingConfig             ScalingPolicyConfig
+	activeScalingMetrics      EpochScalingMetrics
+	hasActiveScalingMetrics   bool
+	lastScalingMetrics        EpochScalingMetrics
+	lastScalingRecommendation ScalingRecommendation
+	hasLastScalingMetrics     bool
 }
 
 func parseShardConfig(value string) (ShardConfig, error) {
@@ -348,6 +356,7 @@ func newCoordinatorWithStandbyConfig(
 		healthStopCh:        make(chan struct{}),
 		healthDoneCh:        make(chan struct{}),
 		standbyLeaderDialer: dialStandbyShardLeader,
+		scalingConfig:       defaultScalingPolicyConfig(len(validated)),
 	}
 	for _, shard := range validated {
 		coord.shardByID[shard.ID] = shard
@@ -609,6 +618,7 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 		shardID:   shard.ID,
 		localUUID: shardReply.Uuid,
 		hashKey:   shardReply.HashKey,
+		epochID:   epoch.ID,
 	}
 	reply.Uuid = globalUUID
 	reply.HashKey = shardReply.HashKey
@@ -653,6 +663,9 @@ func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) erro
 
 	c.mu.Lock()
 	delete(c.sessions, args.Uuid)
+	if c.hasActiveScalingMetrics && c.activeScalingMetrics.EpochID == session.epochID {
+		c.activeScalingMetrics.AcceptedRequestCount++
+	}
 	c.mu.Unlock()
 	return nil
 }
@@ -743,6 +756,12 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 
 	c.mu.Lock()
 	c.epoch = epoch
+	c.activeScalingMetrics = EpochScalingMetrics{
+		EpochID:           epoch.ID,
+		CurrentShardCount: len(c.shards),
+		DurationSeconds:   epoch.DurationSeconds,
+	}
+	c.hasActiveScalingMetrics = true
 	c.epochTimer = time.AfterFunc(time.Until(c.epoch.EndTime), func() {
 		c.completeEpoch()
 	})
@@ -787,6 +806,12 @@ func (c *Coordinator) completeEpoch() {
 	c.epoch.State = db.EpochStateCompleted
 	c.epochTimer = nil
 	controlStore := c.controlStore
+	if c.hasActiveScalingMetrics && c.activeScalingMetrics.EpochID == epochID {
+		c.lastScalingMetrics = c.activeScalingMetrics
+		c.lastScalingRecommendation = ComputeNextDatasetScale(c.lastScalingMetrics, c.scalingConfig)
+		c.hasLastScalingMetrics = true
+		c.hasActiveScalingMetrics = false
+	}
 	c.mu.Unlock()
 
 	if _, err := controlStore.CompleteEpoch(epochID); err != nil {
@@ -942,6 +967,18 @@ func lastCheckedUnix(t time.Time) int64 {
 	return t.Unix()
 }
 
+func (c *Coordinator) scalingStatusSnapshotLocked(currentShardCount int) (EpochScalingMetrics, ScalingRecommendation) {
+	if c.hasLastScalingMetrics {
+		return c.lastScalingMetrics, c.lastScalingRecommendation
+	}
+	rec := defaultCoordinatorScalingRecommendation(currentShardCount)
+	return EpochScalingMetrics{
+		CurrentShardCount:    rec.CurrentShardCount,
+		AcceptedRequestCount: int64(rec.CurrentShardCount * rec.TargetRowsPerShard * 2),
+		DurationSeconds:      1,
+	}, rec
+}
+
 func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.CoordinatorStatusReply) error {
 	timeout := defaultShardStatusTimeout
 	if args != nil && args.ShardTimeoutMs > 0 {
@@ -959,6 +996,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	shards := append([]ShardConfig(nil), c.shards...)
 	health := make(map[int]shardHealthSnapshot, len(c.health))
 	maps.Copy(health, c.health)
+	scalingMetrics, scaling := c.scalingStatusSnapshotLocked(len(shards))
 	c.mu.Unlock()
 
 	reply.Healthy = true
@@ -973,13 +1011,15 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	now := time.Now().UTC()
 	populateCoordinatorLeaseStatus(reply, lease, now)
 	reply.ActiveHolder = activeHolderFromControlStore(controlStore, now)
-	scaling := defaultCoordinatorScalingRecommendation(len(shards))
 	reply.CurrentShardCount = scaling.CurrentShardCount
 	reply.RecommendedNextShardCount = scaling.RecommendedShardCount
 	reply.TargetRowsPerShard = scaling.TargetRowsPerShard
 	reply.ScalingAction = scaling.Action
 	reply.ScalingReason = scaling.Reason
 	reply.RequestDensity = scaling.RequestDensity
+	reply.ScalingEpochID = scalingMetrics.EpochID
+	reply.ScalingAcceptedRequests = scalingMetrics.AcceptedRequestCount
+	reply.ScalingDurationSecs = scalingMetrics.DurationSeconds
 	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
 
 	for i, shard := range shards {
