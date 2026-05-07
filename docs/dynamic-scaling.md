@@ -21,6 +21,13 @@ request_density = accepted_requests / current_logical_rows
 logical dataset size is implicit: each shard contributes the same fixed number
 of rows.
 
+The current coordinator metrics are local and in-memory. During an active epoch,
+the coordinator counts an upload only after `Upload3` succeeds and the routed
+session is removed. Rejected uploads, failed uploads, attempted client requests,
+and incomplete sessions are not counted. At epoch completion, the coordinator
+computes and caches a recommendation from that completed epoch. Until metrics
+are persisted later, a coordinator restart loses this scaling history.
+
 ## Initial Policy Shape
 
 Use hysteresis so shard count does not flap between epochs:

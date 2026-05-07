@@ -278,6 +278,9 @@ type CoordinatorStatusReply struct {
 	ScalingAction             string                   `json:"scaling_action"`
 	ScalingReason             string                   `json:"scaling_reason"`
 	RequestDensity            float64                  `json:"request_density"`
+	ScalingEpochID            int64                    `json:"scaling_epoch_id"`
+	ScalingAcceptedRequests   int64                    `json:"scaling_accepted_requests"`
+	ScalingDurationSecs       int64                    `json:"scaling_duration_secs"`
 	Shards                    []CoordinatorShardStatus `json:"shards"`
 }
 
