@@ -80,6 +80,8 @@ CONTROL_STORE_BACKEND="$CONTROL_STORE_BACKEND" \
 DYNAMODB_CONTROL_TABLE="$DYNAMODB_CONTROL_TABLE" \
 DYNAMODB_CONTROL_REGION="$(dynamodb_control_region)" \
 COORDINATOR_HOLDER_ID="$(coordinator_holder_id)" \
+COORDINATOR_LEASE_TTL_SECONDS="$COORDINATOR_LEASE_TTL_SECONDS" \
+COORDINATOR_LEASE_RENEW_SECONDS="$COORDINATOR_LEASE_RENEW_SECONDS" \
 WARMUP_EPOCH_SECONDS="$WARMUP_EPOCH_SECONDS" \
 MEASURED_EPOCH_SECONDS="$MEASURED_EPOCH_SECONDS" \
 START_EPOCH_RETRY_TIMEOUT="$START_EPOCH_RETRY_TIMEOUT" \
@@ -147,6 +149,8 @@ payload = {
         "dynamodb_control_table": os.environ["DYNAMODB_CONTROL_TABLE"],
         "dynamodb_control_region": os.environ["DYNAMODB_CONTROL_REGION"],
         "coordinator_holder_id": os.environ["COORDINATOR_HOLDER_ID"],
+        "coordinator_lease_ttl_seconds": int(os.environ["COORDINATOR_LEASE_TTL_SECONDS"]),
+        "coordinator_lease_renew_seconds": int(os.environ["COORDINATOR_LEASE_RENEW_SECONDS"]),
         "warmup_epoch_seconds": int(os.environ["WARMUP_EPOCH_SECONDS"]),
         "measured_epoch_seconds": int(os.environ["MEASURED_EPOCH_SECONDS"]),
         "start_epoch_retry_timeout": int(os.environ["START_EPOCH_RETRY_TIMEOUT"]),

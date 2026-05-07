@@ -29,6 +29,8 @@ CONTROL_STORE_BACKEND="${CONTROL_STORE_BACKEND:-memory}"
 DYNAMODB_CONTROL_TABLE="${DYNAMODB_CONTROL_TABLE:-${PROJECT_TAG}-control}"
 DYNAMODB_CONTROL_REGION="${DYNAMODB_CONTROL_REGION:-}"
 COORDINATOR_IAM_POLICY_NAME="${COORDINATOR_IAM_POLICY_NAME:-RiposteDynamoDBControlStore}"
+COORDINATOR_LEASE_TTL_SECONDS="${COORDINATOR_LEASE_TTL_SECONDS:-30}"
+COORDINATOR_LEASE_RENEW_SECONDS="${COORDINATOR_LEASE_RENEW_SECONDS:-10}"
 
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
 SHARD0_LEADER_PORT="${SHARD0_LEADER_PORT:-8610}"
@@ -278,15 +280,24 @@ dynamodb_control_region() {
 }
 
 coordinator_control_store_args() {
+  local holder="${1:-$(coordinator_holder_id)}"
+  local lease_ttl="${2:-$COORDINATOR_LEASE_TTL_SECONDS}"
+  local lease_renew="${3:-$COORDINATOR_LEASE_RENEW_SECONDS}"
+  local lease_args
+  lease_args="$(printf -- " -coordinator-id %s -lease-ttl-seconds %s -lease-renew-seconds %s" \
+    "$(quote "$holder")" \
+    "$(quote "$lease_ttl")" \
+    "$(quote "$lease_renew")")"
   case "$CONTROL_STORE_BACKEND" in
     memory)
+      printf '%s' "$lease_args"
       return 0
       ;;
     dynamodb)
-      printf -- " -control-store dynamodb -control-table %s -aws-region %s -coordinator-id %s" \
+      printf -- " -control-store dynamodb -control-table %s -aws-region %s%s" \
         "$(quote "$(dynamodb_control_table)")" \
         "$(quote "$(dynamodb_control_region)")" \
-        "$(quote "$(coordinator_holder_id)")"
+        "$lease_args"
       ;;
     *)
       die "unknown CONTROL_STORE_BACKEND: $CONTROL_STORE_BACKEND"
@@ -436,9 +447,19 @@ start_remote_coordinator() {
   local host="$1"
   local listen_addr="$2"
   local log_path="$3"
-  local control_args
-  control_args="$(coordinator_control_store_args)"
-  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")'; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 &"
+  local holder="${4:-$(coordinator_holder_id)}"
+  local lease_ttl="${5:-$COORDINATOR_LEASE_TTL_SECONDS}"
+  local lease_renew="${6:-$COORDINATOR_LEASE_RENEW_SECONDS}"
+  local pid_path="${7:-}"
+  local control_args mkdir_cmd
+  control_args="$(coordinator_control_store_args "$holder" "$lease_ttl" "$lease_renew")"
+  mkdir_cmd="mkdir -p '$(dirname "$log_path")'"
+  if [[ -n "$pid_path" ]]; then
+    mkdir_cmd="$mkdir_cmd '$(dirname "$pid_path")'"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
+  else
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,128,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,128,256,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args > '${log_path}.nohup' 2>&1 &"
+  fi
 }
 
 start_remote_hammer_client() {

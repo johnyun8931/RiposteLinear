@@ -202,6 +202,16 @@ DynamoDB control-store flags and captures the `lease`, `epoch`, and
 also verifies that the DynamoDB epoch ID and accepting flag match the observed
 coordinator lifecycle.
 
+To validate coordinator lease/fencing behavior with two coordinator attempts:
+
+```bash
+CONTROL_STORE_BACKEND=dynamodb ./aws-eval/08-validate-coordinator-lease.sh
+```
+
+This starts coordinator A, verifies coordinator B exits while A holds the
+lease, stops A, waits for lease expiry, then verifies B can acquire a newer
+fencing token and start an epoch.
+
 ### 5. Benchmark
 
 ```bash

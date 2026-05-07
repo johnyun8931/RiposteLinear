@@ -42,6 +42,8 @@ Coordinator flags:
 - `-control-table <name>`, required when `-control-store dynamodb`
 - `-aws-region <region>`, optional AWS SDK region override
 - `-coordinator-id <id>`, optional lease holder ID; defaults to `hostname-pid`
+- `-lease-ttl-seconds <seconds>`, optional lease TTL; defaults to `30`
+- `-lease-renew-seconds <seconds>`, optional renewal interval; defaults to `10`
 
 The DynamoDB table uses a single string partition key named `pk`:
 

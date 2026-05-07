@@ -263,14 +263,8 @@ func newCoordinatorWithLeaseConfig(
 	if controlStore == nil {
 		return nil, errors.New("control store is required")
 	}
-	if leaseHolder == "" {
-		return nil, errors.New("coordinator lease holder is required")
-	}
-	if leaseTTL <= 0 {
-		return nil, errors.New("coordinator lease ttl must be positive")
-	}
-	if leaseRenewInterval <= 0 {
-		return nil, errors.New("coordinator lease renew interval must be positive")
+	if err := validateCoordinatorLeaseConfig(leaseHolder, leaseTTL, leaseRenewInterval); err != nil {
+		return nil, err
 	}
 	validated, err := validateShardMap(shards)
 	if err != nil {
@@ -300,6 +294,22 @@ func newCoordinatorWithLeaseConfig(
 	}
 	coord.startLeaseRenewal(leaseRenewInterval)
 	return coord, nil
+}
+
+func validateCoordinatorLeaseConfig(leaseHolder string, leaseTTL time.Duration, leaseRenewInterval time.Duration) error {
+	if leaseHolder == "" {
+		return errors.New("coordinator lease holder is required")
+	}
+	if leaseTTL <= 0 {
+		return errors.New("coordinator lease ttl must be positive")
+	}
+	if leaseRenewInterval <= 0 {
+		return errors.New("coordinator lease renew interval must be positive")
+	}
+	if leaseRenewInterval >= leaseTTL {
+		return errors.New("coordinator lease renew interval must be less than coordinator lease ttl")
+	}
+	return nil
 }
 
 func (c *Coordinator) startLeaseRenewal(interval time.Duration) {
@@ -663,6 +673,15 @@ func acceptingFromControlStore(controlStore ControlStore, epoch db.EpochMeta) bo
 	return accepting
 }
 
+func populateCoordinatorLeaseStatus(reply *db.CoordinatorStatusReply, lease CoordinatorLease, now time.Time) {
+	reply.LeaseHolder = lease.Holder
+	reply.LeaseFencingToken = lease.FencingToken
+	if !lease.ExpiresAt.IsZero() {
+		reply.LeaseExpiresUnixMs = lease.ExpiresAt.UnixMilli()
+	}
+	reply.LeaseActive = lease.Holder != "" && now.Before(lease.ExpiresAt)
+}
+
 func shardStatusWithTimeout(client shardClient, timeout time.Duration) (db.StatusReply, error) {
 	type statusResult struct {
 		reply db.StatusReply
@@ -694,6 +713,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	c.mu.Lock()
 	epoch := c.epoch
 	controlStore := c.controlStore
+	lease := c.lease
 	shards := append([]ShardConfig(nil), c.shards...)
 	clients := make(map[int]shardClient, len(c.clients))
 	for shardID, client := range c.clients {
@@ -710,6 +730,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	reply.EndUnix = epoch.EndTime.Unix()
 	reply.DurationSecs = epoch.DurationSeconds
 	reply.Accepting = acceptingFromControlStore(controlStore, epoch)
+	populateCoordinatorLeaseStatus(reply, lease, time.Now().UTC())
 	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
 
 	for i, shard := range shards {

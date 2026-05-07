@@ -11,6 +11,7 @@ import (
 	"net/rpc"
 	"os"
 	"strings"
+	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -29,6 +30,8 @@ var flagControlStore = flag.String("control-store", "memory", "Control store bac
 var flagControlTable = flag.String("control-table", "", "DynamoDB table name for -control-store dynamodb")
 var flagAWSRegion = flag.String("aws-region", "", "AWS region override for DynamoDB control store")
 var flagCoordinatorID = flag.String("coordinator-id", "", "Coordinator lease holder ID; defaults to hostname-pid")
+var flagLeaseTTLSeconds = flag.Int64("lease-ttl-seconds", int64(defaultCoordinatorLeaseTTL/time.Second), "Coordinator lease TTL in seconds")
+var flagLeaseRenewSeconds = flag.Int64("lease-renew-seconds", int64(defaultCoordinatorLeaseRenewInterval/time.Second), "Coordinator lease renewal interval in seconds")
 
 var shardFlags shardListType
 
@@ -74,14 +77,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	leaseTTL := time.Duration(*flagLeaseTTLSeconds) * time.Second
+	leaseRenewInterval := time.Duration(*flagLeaseRenewSeconds) * time.Second
 
 	coord, err := newCoordinatorWithLeaseConfig(
 		shards,
 		nil,
 		controlStore,
 		holderID,
-		defaultCoordinatorLeaseTTL,
-		defaultCoordinatorLeaseRenewInterval,
+		leaseTTL,
+		leaseRenewInterval,
 	)
 	if err != nil {
 		log.Fatal(err)

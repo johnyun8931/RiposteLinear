@@ -9,6 +9,11 @@ import (
 	"bitbucket.org/henrycg/riposte/db"
 )
 
+const (
+	testLeaseTTL           = time.Minute
+	testLeaseRenewInterval = 30 * time.Second
+)
+
 type fakeShardClient struct {
 	upload1Calls int
 	upload2Calls int
@@ -238,7 +243,7 @@ func TestCoordinatorAcquiresStandaloneLease(t *testing.T) {
 	store := newMemoryControlStore(1)
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: &fakeShardClient{}}, store, defaultCoordinatorLeaseHolder, defaultCoordinatorLeaseTTL, time.Hour)
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, defaultCoordinatorLeaseHolder, defaultCoordinatorLeaseTTL, defaultCoordinatorLeaseRenewInterval)
 
 	lease, ok := store.CurrentLease(time.Now().UTC())
 	if !ok {
@@ -256,11 +261,11 @@ func TestCoordinatorRejectsSecondHolderWithActiveLease(t *testing.T) {
 	store := newMemoryControlStore(1)
 	mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", time.Minute, time.Hour)
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
 
 	_, err := newCoordinatorWithLeaseConfig([]ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-b", time.Minute, time.Hour)
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-b", testLeaseTTL, testLeaseRenewInterval)
 	if !errors.Is(err, errLeaseHeld) {
 		t.Fatalf("expected held lease error, got %v", err)
 	}
@@ -270,7 +275,7 @@ func TestCoordinatorDifferentHolderCanAcquireAfterLeaseExpiry(t *testing.T) {
 	store := newMemoryControlStore(1)
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", time.Minute, time.Hour)
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
 	initialToken := coord.lease.FencingToken
 	coord.Close()
 
@@ -287,7 +292,7 @@ func TestCoordinatorRenewLeaseExtendsExpiry(t *testing.T) {
 	store := newMemoryControlStore(1)
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", time.Minute, time.Hour)
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
 	initialExpiry := coord.lease.ExpiresAt
 	time.Sleep(time.Millisecond)
 
@@ -303,10 +308,33 @@ func TestCoordinatorCloseStopsRenewal(t *testing.T) {
 	store := newMemoryControlStore(1)
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", time.Minute, time.Millisecond)
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, time.Millisecond)
 
 	coord.Close()
 	coord.Close()
+}
+
+func TestValidateCoordinatorLeaseConfigRejectsInvalidTiming(t *testing.T) {
+	tests := []struct {
+		name          string
+		holder        string
+		ttl           time.Duration
+		renewInterval time.Duration
+	}{
+		{name: "missing holder", holder: "", ttl: testLeaseTTL, renewInterval: testLeaseRenewInterval},
+		{name: "zero ttl", holder: "coord-a", ttl: 0, renewInterval: testLeaseRenewInterval},
+		{name: "zero renew", holder: "coord-a", ttl: testLeaseTTL, renewInterval: 0},
+		{name: "renew equal ttl", holder: "coord-a", ttl: testLeaseTTL, renewInterval: testLeaseTTL},
+		{name: "renew greater than ttl", holder: "coord-a", ttl: testLeaseTTL, renewInterval: testLeaseTTL + time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateCoordinatorLeaseConfig(tt.holder, tt.ttl, tt.renewInterval); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
 }
 
 func TestCoordinatorStartEpochRequiresAllShardsAndAbortsStartedShardOnFailure(t *testing.T) {
@@ -357,7 +385,7 @@ func TestCoordinatorStartEpochFailsWithStaleLease(t *testing.T) {
 	}}
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: client}, store, "coord-a", time.Minute, time.Hour)
+	}, map[int]shardClient{0: client}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
 	stealCoordinatorLease(t, store, "coord-b")
 
 	err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{})
@@ -449,7 +477,7 @@ func TestCoordinatorCompleteEpochSkipsStoreMutationWithStaleLease(t *testing.T) 
 	}
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: &fakeShardClient{startReply: reply}}, store, "coord-a", time.Minute, time.Hour)
+	}, map[int]shardClient{0: &fakeShardClient{startReply: reply}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
 	if err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{}); err != nil {
 		t.Fatalf("StartEpoch failed: %v", err)
 	}
@@ -491,7 +519,7 @@ func TestCoordinatorUpload1RejectsWithStaleLease(t *testing.T) {
 	fakeClient := &fakeShardClient{}
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
-	}, map[int]shardClient{0: fakeClient}, store, "coord-a", time.Minute, time.Hour)
+	}, map[int]shardClient{0: fakeClient}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
 	epoch := db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60}
 	setCoordinatorActiveEpoch(t, coord, epoch)
 	stealCoordinatorLease(t, store, "coord-b")
@@ -544,6 +572,9 @@ func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 	}
 	if reply.Role != "standalone" || reply.EpochID != 3 || reply.State != db.EpochStateActive.String() || !reply.Accepting {
 		t.Fatalf("unexpected coordinator status: %+v", reply)
+	}
+	if reply.LeaseHolder != defaultCoordinatorLeaseHolder || reply.LeaseFencingToken == 0 || reply.LeaseExpiresUnixMs == 0 || !reply.LeaseActive {
+		t.Fatalf("expected active lease status, got %+v", reply)
 	}
 	if len(reply.Shards) != 2 {
 		t.Fatalf("expected two shard statuses, got %d", len(reply.Shards))

@@ -255,16 +255,20 @@ type CoordinatorShardStatus struct {
 }
 
 type CoordinatorStatusReply struct {
-	Healthy      bool                     `json:"healthy"`
-	Role         string                   `json:"role"`
-	LeaderAddr   string                   `json:"leader_addr"`
-	EpochID      int64                    `json:"epoch_id"`
-	State        string                   `json:"state"`
-	StartUnix    int64                    `json:"start_unix"`
-	EndUnix      int64                    `json:"end_unix"`
-	DurationSecs int64                    `json:"duration_secs"`
-	Accepting    bool                     `json:"accepting"`
-	Shards       []CoordinatorShardStatus `json:"shards"`
+	Healthy            bool                     `json:"healthy"`
+	Role               string                   `json:"role"`
+	LeaderAddr         string                   `json:"leader_addr"`
+	EpochID            int64                    `json:"epoch_id"`
+	State              string                   `json:"state"`
+	StartUnix          int64                    `json:"start_unix"`
+	EndUnix            int64                    `json:"end_unix"`
+	DurationSecs       int64                    `json:"duration_secs"`
+	Accepting          bool                     `json:"accepting"`
+	LeaseHolder        string                   `json:"lease_holder"`
+	LeaseFencingToken  int64                    `json:"lease_fencing_token"`
+	LeaseExpiresUnixMs int64                    `json:"lease_expires_unix_ms"`
+	LeaseActive        bool                     `json:"lease_active"`
+	Shards             []CoordinatorShardStatus `json:"shards"`
 }
 
 type AbortEpochArgs struct {
