@@ -1571,7 +1571,7 @@ func TestCoordinatorUpload1RejectsWhenControlStoreNotAccepting(t *testing.T) {
 	}
 }
 
-func TestCoordinatorUpload2AndUpload3RejectWhenControlStoreNotAccepting(t *testing.T) {
+func TestCoordinatorUpload2AndUpload3FinishAdmittedSessionWhenControlStoreNotAccepting(t *testing.T) {
 	fakeClient := &fakeShardClient{}
 	coord := mustCoordinator(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
@@ -1586,13 +1586,14 @@ func TestCoordinatorUpload2AndUpload3RejectWhenControlStoreNotAccepting(t *testi
 		t.Fatalf("SetAccepting failed: %v", err)
 	}
 
-	err := coord.Upload2(&db.UploadArgs2{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply2{})
-	if err == nil || err.Error() != coordinatorWireNoActiveEpoch {
-		t.Fatalf("expected no active epoch from Upload2, got %v", err)
+	if err := coord.Upload2(&db.UploadArgs2{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply2{}); err != nil {
+		t.Fatalf("expected Upload2 to finish admitted session after accepting closed, got %v", err)
 	}
-	err = coord.Upload3(&db.UploadArgs3{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply3{})
-	if err == nil || err.Error() != coordinatorWireNoActiveEpoch {
-		t.Fatalf("expected no active epoch from Upload3, got %v", err)
+	if err := coord.Upload3(&db.UploadArgs3{Uuid: up1.Uuid, HashKey: up1.HashKey}, &db.UploadReply3{}); err != nil {
+		t.Fatalf("expected Upload3 to finish admitted session after accepting closed, got %v", err)
+	}
+	if fakeClient.upload2Calls != 1 || fakeClient.upload3Calls != 1 {
+		t.Fatalf("expected shard Upload2/3 to be called once, got upload2=%d upload3=%d", fakeClient.upload2Calls, fakeClient.upload3Calls)
 	}
 }
 

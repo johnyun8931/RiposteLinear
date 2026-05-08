@@ -6,7 +6,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/phase3-local-common.sh"
 THREAD_SWEEP="${RIPOSTE_BENCH_SERVER_THREADS:-1 2 4 8}"
 BENCH_DURATION="${RIPOSTE_BENCH_DURATION}"
 WARMUP_DURATION="${RIPOSTE_BENCH_WARMUP_DURATION}"
-POST_RUN_WAIT="${RIPOSTE_BENCH_POST_RUN_WAIT}"
+DRAIN_TIMEOUT="${RIPOSTE_BENCH_DRAIN_TIMEOUT}"
 START_DELAY="${RIPOSTE_BENCH_START_DELAY}"
 CLIENT_THREADS="${RIPOSTE_BENCH_CLIENT_THREADS}"
 CLIENT_CONCURRENCY="${RIPOSTE_BENCH_CLIENT_CONCURRENCY}"
@@ -37,9 +37,8 @@ baseline_run() {
 		run_client -leader "$BASELINE_LEADER_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" -log "$client_log"
 	fi
 	wait_for_epoch_complete server "$BASELINE_LEADER_ADDR"
-	sleep "$POST_RUN_WAIT"
-	after="$(last_since_start "$(log_file baseline-leader)")"
-	[[ "$after" -gt "$before" ]] || die "baseline leader stats did not advance for phase $phase threads=$threads"
+	wait_for_ingestion_drain server "$BASELINE_LEADER_ADDR" "$DRAIN_TIMEOUT" || die "baseline leader did not drain ingestion work for phase $phase threads=$threads"
+	after="$(wait_for_count_advance "$(log_file baseline-leader)" "$before" "$DRAIN_TIMEOUT")" || die "baseline leader stats did not advance for phase $phase threads=$threads"
 	delta="$((after - before))"
 	max_sent="$(max_sent_from_client_log "$client_log")"
 	printf '%s\t%s\n' "$delta" "$max_sent"
@@ -62,8 +61,12 @@ sharded_run() {
 		run_client -coordinator "$COORDINATOR_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" -log "$client_log"
 	fi
 	wait_for_epoch_complete coordinator "$COORDINATOR_ADDR"
+	wait_for_epoch_complete server "$SHARD0_LEADER_ADDR"
+	wait_for_epoch_complete server "$SHARD1_LEADER_ADDR"
+	wait_for_ingestion_drain server "$SHARD0_LEADER_ADDR" "$DRAIN_TIMEOUT" || die "shard 0 did not drain ingestion work for phase $phase threads=$threads"
+	wait_for_ingestion_drain server "$SHARD1_LEADER_ADDR" "$DRAIN_TIMEOUT" || die "shard 1 did not drain ingestion work for phase $phase threads=$threads"
 	status_json coordinator "$COORDINATOR_ADDR" >"$status_file"
-	sleep "$POST_RUN_WAIT"
+	wait_for_total_count_advance "$((shard0_before + shard1_before))" "$DRAIN_TIMEOUT" "$(log_file shard0-leader)" "$(log_file shard1-leader)" >/dev/null || die "sharded leaders stats did not advance for phase $phase threads=$threads"
 	shard0_after="$(last_since_start "$(log_file shard0-leader)")"
 	shard1_after="$(last_since_start "$(log_file shard1-leader)")"
 	shard0_delta="$((shard0_after - shard0_before))"
@@ -84,7 +87,7 @@ run_baseline_pair_for_threads() {
 		info "Baseline warm-up (threads=$threads, duration=${WARMUP_DURATION}s)"
 		start_epoch server "$BASELINE_LEADER_ADDR" "$WARMUP_DURATION" >/dev/null
 		wait_for_epoch_complete server "$BASELINE_LEADER_ADDR"
-		sleep "$POST_RUN_WAIT"
+		wait_for_ingestion_drain server "$BASELINE_LEADER_ADDR" "$DRAIN_TIMEOUT" || die "baseline leader did not drain ingestion work after warm-up threads=$threads"
 	fi
 	baseline_run "$threads" "measured"
 	stop_baseline_pair
@@ -100,7 +103,10 @@ run_sharded_topology_for_threads() {
 		info "Sharded warm-up (threads=$threads, duration=${WARMUP_DURATION}s)"
 		start_epoch coordinator "$COORDINATOR_ADDR" "$WARMUP_DURATION" >/dev/null
 		wait_for_epoch_complete coordinator "$COORDINATOR_ADDR"
-		sleep "$POST_RUN_WAIT"
+		wait_for_epoch_complete server "$SHARD0_LEADER_ADDR"
+		wait_for_epoch_complete server "$SHARD1_LEADER_ADDR"
+		wait_for_ingestion_drain server "$SHARD0_LEADER_ADDR" "$DRAIN_TIMEOUT" || die "shard 0 did not drain ingestion work after warm-up threads=$threads"
+		wait_for_ingestion_drain server "$SHARD1_LEADER_ADDR" "$DRAIN_TIMEOUT" || die "shard 1 did not drain ingestion work after warm-up threads=$threads"
 	fi
 	sharded_run "$threads" "measured"
 	stop_sharded_topology

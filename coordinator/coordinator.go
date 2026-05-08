@@ -506,6 +506,14 @@ func acceptingEpochFromControlStore(controlStore ControlStore) (db.EpochMeta, er
 	return epoch, nil
 }
 
+func currentEpochFromControlStore(controlStore ControlStore) (db.EpochMeta, error) {
+	epoch, ok := controlStore.CurrentEpoch()
+	if !ok || epoch.ID <= 0 {
+		return db.EpochMeta{}, errCoordinatorNoActiveEpoch
+	}
+	return epoch, nil
+}
+
 func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
 	decision := c.upload1Decision()
 	if decision.err != nil {
@@ -599,7 +607,7 @@ func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) erro
 	if err != nil || session.HashKey != args.HashKey {
 		return coordinatorWireError(errCoordinatorBogusUUID)
 	}
-	epoch, err := acceptingEpochFromControlStore(c.controlStore)
+	epoch, err := currentEpochFromControlStore(c.controlStore)
 	if err != nil || epoch.ID != session.EpochID {
 		return coordinatorWireError(errCoordinatorNoActiveEpoch)
 	}
@@ -618,7 +626,7 @@ func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) erro
 	if err != nil || session.HashKey != args.HashKey {
 		return coordinatorWireError(errCoordinatorBogusUUID)
 	}
-	epoch, err := acceptingEpochFromControlStore(c.controlStore)
+	epoch, err := currentEpochFromControlStore(c.controlStore)
 	if err != nil || epoch.ID != session.EpochID {
 		return coordinatorWireError(errCoordinatorNoActiveEpoch)
 	}

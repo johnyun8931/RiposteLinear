@@ -37,6 +37,7 @@ export RIPOSTE_BENCH_CLIENT_OVERLOAD_BACKOFF_MAX_MS="${CLIENT_OVERLOAD_BACKOFF_M
 export RIPOSTE_BENCH_DURATION="${RIPOSTE_BENCH_DURATION:-8}"
 export RIPOSTE_BENCH_WARMUP_DURATION="${RIPOSTE_BENCH_WARMUP_DURATION:-4}"
 export RIPOSTE_BENCH_POST_RUN_WAIT="${RIPOSTE_BENCH_POST_RUN_WAIT:-12}"
+export RIPOSTE_BENCH_DRAIN_TIMEOUT="${RIPOSTE_BENCH_DRAIN_TIMEOUT:-30}"
 export RIPOSTE_BENCH_START_DELAY="${RIPOSTE_BENCH_START_DELAY:-1}"
 # Server-side startup readiness is now enforced; this delay is only a small
 # convenience so the local scripts avoid immediate retry loops right after ports
@@ -473,6 +474,26 @@ wait_for_count_advance() {
 	return 1
 }
 
+wait_for_total_count_advance() {
+	local before="$1"
+	local timeout="$2"
+	shift 2
+	for _ in $(seq 1 "$timeout"); do
+		local total=0
+		local file now
+		for file in "$@"; do
+			now="$(last_since_start "$file")"
+			total="$((total + now))"
+		done
+		if [[ "$total" -gt "$before" ]]; then
+			echo "$total"
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
 max_sent_from_client_log() {
 	local file="$1"
 	if [[ ! -f "$file" ]]; then
@@ -507,4 +528,34 @@ wait_for_epoch_complete() {
 	local kind="$1"
 	local addr="$2"
 	wait_for_status_state "$kind" "$addr" completed 30 >/dev/null || die "$kind at $addr did not complete epoch"
+}
+
+wait_for_ingestion_drain() {
+	local kind="$1"
+	local addr="$2"
+	local timeout="${3:-30}"
+	local status
+	for _ in $(seq 1 "$timeout"); do
+		status="$(status_json "$kind" "$addr" 2>/dev/null || true)"
+		if python3 -c '
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    raise SystemExit(1)
+
+if data.get("state") != "completed":
+    raise SystemExit(1)
+if int(data.get("ingestion_queue_depth", 0)) != 0:
+    raise SystemExit(1)
+if int(data.get("ingestion_inflight_count", 0)) != 0:
+    raise SystemExit(1)
+' <<<"$status"; then
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
 }
