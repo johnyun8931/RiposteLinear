@@ -278,7 +278,14 @@ leader writes one S3 payload and sends pointer messages to both queues. Standby
 server processes are started with `-replica-id standby` by smoke validation, and
 both active and standby replicas commit the same completed upload under separate
 ledger keys. This does not promote shard routing; it only keeps standby completed
-upload processing caught up enough for a later promotion slice.
+upload processing caught up enough for manual promotion. Manual hot promotion
+uses `coordinator -admin-target <addr> -promote-shard-standby
+-promote-shard-id <id> [-force-promote-shard]` to swap a shard's active and
+standby pairs in the control-store shard config. The first hot promotion path
+may drop shard-side `Upload1`/`Upload2` sessions that were in flight on the old
+active shard; coordinator-mode clients retry from `Upload1` when they receive
+`Shard session lost`. Completed uploads that reached `Upload3` are the durable
+handoff covered by SQS/S3 fanout and the replica-aware ledger.
 
 Operational knobs default to conservative smoke-safe values:
 
@@ -380,6 +387,19 @@ endpoints configured, generates a real `grow` recommendation, validates it with
 `-apply-scaling-recommendation`, and verifies the next epoch routes global row
 `256` to shard 1. Dry-run, apply, status, and DynamoDB artifacts are written under
 `aws-eval/.state/scaling-apply/`.
+
+To validate manual hot standby shard promotion:
+
+```bash
+CONTROL_STORE_BACKEND=dynamodb SESSION_STORE_BACKEND=dynamodb \
+INGESTION_QUEUE_BACKEND=sqs COMPLETED_UPLOAD_LEDGER_BACKEND=dynamodb \
+HOT_STANDBY_INGESTION=1 ./aws-eval/11-validate-hot-standby-promotion.sh
+```
+
+This starts active and standby shard processes, waits for hot standby ingestion
+to become promotable, stops the active shard 0 leader, force-promotes shard 0's
+standby pair, starts a second epoch, and verifies row `0` lands in the promoted
+standby result path.
 
 To validate the in-cloud autoscaler-driven apply path instead of direct local
 admin apply:

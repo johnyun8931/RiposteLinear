@@ -408,6 +408,15 @@ func TestIsCoordinatorNotActiveError(t *testing.T) {
 	}
 }
 
+func TestIsShardSessionLostError(t *testing.T) {
+	if !isShardSessionLostError(errors.New("Shard session lost")) {
+		t.Fatal("expected Shard session lost to be classified")
+	}
+	if isShardSessionLostError(errors.New("Bogus UUID")) {
+		t.Fatal("Bogus UUID must not be classified as shard-session-lost")
+	}
+}
+
 func TestUploadWithCoordinatorRetryRetriesSamePlaintext(t *testing.T) {
 	msg := &db.Plaintext{X: 5, Y: 6}
 	req := uploadRequest{msg: msg, routeRow: msg.Y}
@@ -452,6 +461,38 @@ func TestUploadWithCoordinatorRetryRetriesSamePlaintext(t *testing.T) {
 	}
 }
 
+func TestUploadWithCoordinatorRetryRetriesShardSessionLostFromUpload1(t *testing.T) {
+	msg := &db.Plaintext{X: 5, Y: 6}
+	req := uploadRequest{msg: msg, routeRow: msg.Y}
+	config := coordinatorRetryConfig{
+		enabled:        true,
+		initialBackoff: 10 * time.Millisecond,
+		maxBackoff:     20 * time.Millisecond,
+	}
+	calls := 0
+	err := uploadWithCoordinatorRetry(
+		req,
+		config,
+		func(got uploadRequest) error {
+			calls++
+			if got.msg != msg || got.routeRow != msg.Y {
+				t.Fatal("expected retry to reuse the same upload request")
+			}
+			if calls == 1 {
+				return errors.New("Shard session lost")
+			}
+			return nil
+		},
+		func(time.Duration) {},
+	)
+	if err != nil {
+		t.Fatalf("expected retry to eventually succeed, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected two upload attempts, got %d", calls)
+	}
+}
+
 func TestUploadWithCoordinatorRetryDisabledReturnsCoordinatorNotActive(t *testing.T) {
 	wantErr := errors.New("Coordinator not active")
 	calls := 0
@@ -468,6 +509,28 @@ func TestUploadWithCoordinatorRetryDisabledReturnsCoordinatorNotActive(t *testin
 	)
 	if err != wantErr {
 		t.Fatalf("expected coordinator-not-active error %v, got %v", wantErr, err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one upload attempt, got %d", calls)
+	}
+}
+
+func TestUploadWithCoordinatorRetryDisabledReturnsShardSessionLost(t *testing.T) {
+	wantErr := errors.New("Shard session lost")
+	calls := 0
+	err := uploadWithCoordinatorRetry(
+		uploadRequest{msg: &db.Plaintext{}},
+		coordinatorRetryConfig{},
+		func(uploadRequest) error {
+			calls++
+			return wantErr
+		},
+		func(time.Duration) {
+			t.Fatal("sleep should not run when retry is disabled")
+		},
+	)
+	if err != wantErr {
+		t.Fatalf("expected shard-session-lost error %v, got %v", wantErr, err)
 	}
 	if calls != 1 {
 		t.Fatalf("expected one upload attempt, got %d", calls)

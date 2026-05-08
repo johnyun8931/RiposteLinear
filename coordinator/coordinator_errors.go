@@ -1,11 +1,15 @@
 package main
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
 const (
 	coordinatorWireNoActiveEpoch         = "No active epoch"
 	coordinatorWireNotActive             = "Coordinator not active"
 	coordinatorWireBogusUUID             = "Bogus UUID"
+	coordinatorWireShardSessionLost      = "Shard session lost"
 	coordinatorWireEpochAlreadyActive    = "An epoch is already in progress"
 	coordinatorWireInvalidEpochDuration  = "Epoch duration must be positive"
 	coordinatorWireSessionAllocation     = "could not allocate unique coordinator session"
@@ -16,6 +20,7 @@ var (
 	errCoordinatorNoActiveEpoch         = errors.New("coordinator no active epoch")
 	errCoordinatorNotActive             = errors.New("coordinator not active")
 	errCoordinatorBogusUUID             = errors.New("coordinator bogus uuid")
+	errCoordinatorShardSessionLost      = errors.New("coordinator shard session lost")
 	errCoordinatorEpochAlreadyActive    = errors.New("coordinator epoch already active")
 	errCoordinatorInvalidEpochDuration  = errors.New("coordinator invalid epoch duration")
 	errCoordinatorSessionAllocation     = errors.New("coordinator session allocation failed")
@@ -33,6 +38,8 @@ func coordinatorWireError(err error) error {
 		return errors.New(coordinatorWireNotActive)
 	case errors.Is(err, errCoordinatorBogusUUID):
 		return errors.New(coordinatorWireBogusUUID)
+	case errors.Is(err, errCoordinatorShardSessionLost):
+		return errors.New(coordinatorWireShardSessionLost)
 	case errors.Is(err, errCoordinatorEpochAlreadyActive):
 		return errors.New(coordinatorWireEpochAlreadyActive)
 	case errors.Is(err, errCoordinatorInvalidEpochDuration):
@@ -44,4 +51,11 @@ func coordinatorWireError(err error) error {
 	default:
 		return err
 	}
+}
+
+func coordinatorShardSessionError(err error) error {
+	if err != nil && strings.Contains(err.Error(), coordinatorWireBogusUUID) {
+		return coordinatorWireError(errCoordinatorShardSessionLost)
+	}
+	return err
 }

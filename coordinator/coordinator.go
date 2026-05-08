@@ -120,6 +120,7 @@ type Coordinator struct {
 	healthTimeout       time.Duration
 	healthStopCh        chan struct{}
 	healthDoneCh        chan struct{}
+	shardLeaderDialer   func(addr string) (shardClient, error)
 	standbyLeaderDialer func(addr string, timeout time.Duration) (closeableStatusClient, error)
 
 	scalingConfig             ScalingPolicyConfig
@@ -395,6 +396,7 @@ func newCoordinatorWithStandbyScalingAndSeedConfig(
 		healthTimeout:       defaultShardStatusTimeout,
 		healthStopCh:        make(chan struct{}),
 		healthDoneCh:        make(chan struct{}),
+		shardLeaderDialer:   dialShardLeader,
 		standbyLeaderDialer: dialStandbyShardLeader,
 		scalingConfig:       resolvedScalingConfig,
 	}
@@ -468,11 +470,12 @@ func dialStandbyShardLeader(leaderAddr string, timeout time.Duration) (closeable
 }
 
 func (c *Coordinator) connectShards() error {
-	for _, shard := range c.availableShards {
+	shardConfig := shardConfigForStatus(c.controlStore, c.availableShards)
+	for _, shard := range shardConfig.Shards {
 		if _, ok := c.clients[shard.ID]; ok {
 			continue
 		}
-		client, err := dialShardLeader(shard.Active.LeaderAddr)
+		client, err := c.shardLeaderDialer(shard.Active.LeaderAddr)
 		if err != nil {
 			return fmt.Errorf("connect shard %d leader %s: %w", shard.ID, shard.Active.LeaderAddr, err)
 		}
@@ -618,7 +621,10 @@ func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) erro
 	}
 	localArgs := *args
 	localArgs.Uuid = session.LocalUUID
-	return client.Upload2(&localArgs, reply)
+	if err := client.Upload2(&localArgs, reply); err != nil {
+		return coordinatorShardSessionError(err)
+	}
+	return nil
 }
 
 func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error {
@@ -639,7 +645,7 @@ func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) erro
 	localArgs.Uuid = session.LocalUUID
 	err = client.Upload3(&localArgs, reply)
 	if err != nil {
-		return err
+		return coordinatorShardSessionError(err)
 	}
 
 	if err := c.sessionStore.DeleteSession(context.Background(), session.GlobalUUID); err != nil && !errors.Is(err, errSessionMissing) {

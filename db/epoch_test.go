@@ -957,6 +957,24 @@ func TestStandbyReplicaRejectsDirectUploads(t *testing.T) {
 	}
 }
 
+func TestStandbyReplicaBecomesActiveOnStartEpoch(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetReplicaID(CompletedUploadReplicaStandby); err != nil {
+		t.Fatalf("set replica failed: %v", err)
+	}
+	var start StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &start); err != nil {
+		t.Fatalf("StartEpoch failed: %v", err)
+	}
+	if s.replicaID != CompletedUploadReplicaActive {
+		t.Fatalf("expected promoted replica to become active, got %q", s.replicaID)
+	}
+	var reply UploadReply1
+	if err := s.Upload1(&UploadArgs1{RouteRow: 0}, &reply); err != nil {
+		t.Fatalf("expected promoted replica to accept uploads, got %v", err)
+	}
+}
+
 func TestSetIngestionWorkerConfigValidatesValues(t *testing.T) {
 	s := newTestLeaderServer()
 	if err := s.SetIngestionWorkerConfig(10, time.Millisecond); err != nil {

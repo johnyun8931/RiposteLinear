@@ -29,6 +29,9 @@ var flagStatus = flag.Bool("status", false, "If set, query coordinator status ov
 var flagApplyScalingRecommendation = flag.Bool("apply-scaling-recommendation", false, "If set, apply the latest scaling recommendation to the next shard config and exit")
 var flagDryRunScalingRecommendation = flag.Bool("dry-run-scaling-recommendation", false, "If set, validate the latest scaling recommendation without updating the next shard config and exit")
 var flagSkipScalingRecommendation = flag.Bool("skip-scaling-recommendation", false, "If set, skip the latest scaling recommendation without updating the next shard config and exit")
+var flagPromoteShardStandby = flag.Bool("promote-shard-standby", false, "If set, promote a shard standby pair to active and exit")
+var flagPromoteShardID = flag.Int("promote-shard-id", -1, "Shard ID to promote when -promote-shard-standby is set")
+var flagForcePromoteShard = flag.Bool("force-promote-shard", false, "If set, allow planned or active-unreachable shard standby promotion")
 var flagControlStore = flag.String("control-store", "memory", "Control store backend: memory or dynamodb")
 var flagControlTable = flag.String("control-table", "", "DynamoDB table name for -control-store dynamodb")
 var flagSessionStore = flag.String("session-store", "memory", "Session store backend: memory or dynamodb")
@@ -55,8 +58,8 @@ func init() {
 func main() {
 	flag.Parse()
 
-	if adminCommandRequested(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation, *flagSkipScalingRecommendation) {
-		if err := validateAdminFlags(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation, *flagSkipScalingRecommendation, *flagAdminTarget); err != nil {
+	if adminCommandRequested(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation, *flagSkipScalingRecommendation, *flagPromoteShardStandby) {
+		if err := validateAdminFlags(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation, *flagSkipScalingRecommendation, *flagPromoteShardStandby, *flagPromoteShardID, *flagAdminTarget); err != nil {
 			log.Fatal(err)
 		}
 		runAdminCommand()
@@ -208,25 +211,28 @@ func buildSessionStore() (SessionStore, string, error) {
 	}
 }
 
-func adminCommandRequested(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool, skipScaling bool) bool {
-	return startEpochSeconds > 0 || epochStatus || status || applyScaling || dryRunScaling || skipScaling
+func adminCommandRequested(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool, skipScaling bool, promoteShard bool) bool {
+	return startEpochSeconds > 0 || epochStatus || status || applyScaling || dryRunScaling || skipScaling || promoteShard
 }
 
-func validateAdminFlags(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool, skipScaling bool, adminTarget string) error {
-	if !adminCommandRequested(startEpochSeconds, epochStatus, status, applyScaling, dryRunScaling, skipScaling) {
+func validateAdminFlags(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool, skipScaling bool, promoteShard bool, promoteShardID int, adminTarget string) error {
+	if !adminCommandRequested(startEpochSeconds, epochStatus, status, applyScaling, dryRunScaling, skipScaling, promoteShard) {
 		return nil
 	}
 	if adminTarget == "" {
 		return errors.New("Must specify -admin-target for admin RPC commands")
 	}
-	scalingCommands := 0
-	for _, enabled := range []bool{applyScaling, dryRunScaling, skipScaling} {
+	adminCommands := 0
+	for _, enabled := range []bool{startEpochSeconds > 0, epochStatus, status, applyScaling, dryRunScaling, skipScaling, promoteShard} {
 		if enabled {
-			scalingCommands++
+			adminCommands++
 		}
 	}
-	if scalingCommands > 1 {
-		return errors.New("must specify only one scaling recommendation admin command")
+	if adminCommands > 1 {
+		return errors.New("must specify only one admin command")
+	}
+	if promoteShard && promoteShardID < 0 {
+		return errors.New("must specify -promote-shard-id with -promote-shard-standby")
 	}
 	return nil
 }
@@ -310,6 +316,29 @@ func runAdminCommand() {
 			reply.RecommendationEpochID,
 			reply.ShardConfigVersion,
 			reply.Action,
+			reply.Reason,
+		)
+		return
+	}
+
+	if *flagPromoteShardStandby {
+		var reply db.PromoteShardStandbyReply
+		err = client.Call("Server.PromoteShardStandby", &db.PromoteShardStandbyArgs{
+			ShardID: *flagPromoteShardID,
+			Force:   *flagForcePromoteShard,
+			Reason:  "manual admin promotion",
+		}, &reply)
+		if err != nil {
+			log.Fatal("Could not promote shard standby: ", err)
+		}
+		log.Printf("promoted=%t shard=%d version=%d->%d old_active=%s new_active=%s status=%s reason=%s",
+			reply.Promoted,
+			reply.ShardID,
+			reply.PreviousVersion,
+			reply.NewVersion,
+			reply.OldActiveLeaderAddr,
+			reply.NewActiveLeaderAddr,
+			reply.Status,
 			reply.Reason,
 		)
 		return

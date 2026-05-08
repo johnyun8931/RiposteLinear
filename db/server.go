@@ -870,6 +870,11 @@ func (t *Server) StartEpoch(args *StartEpochArgs, reply *StartEpochReply) error 
 	if err := t.requirePeerReady("start epoch"); err != nil {
 		return err
 	}
+	if t.replicaID == CompletedUploadReplicaStandby {
+		log.Printf("Promoting standby replica to active on StartEpoch")
+		t.replicaID = CompletedUploadReplicaActive
+		t.standbyIngestionFanout = false
+	}
 	replyCh := make(chan startEpochResult, 1)
 	t.controlCh <- startEpochCommand{
 		durationSeconds: args.DurationSeconds,

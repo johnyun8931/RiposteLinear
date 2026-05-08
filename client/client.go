@@ -149,6 +149,14 @@ func isCoordinatorNotActiveError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "Coordinator not active")
 }
 
+func isShardSessionLostError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Shard session lost")
+}
+
+func isCoordinatorRetryableError(err error) bool {
+	return isCoordinatorNotActiveError(err) || isShardSessionLostError(err)
+}
+
 func isOverloadError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "server overloaded: ready queue full")
 }
@@ -186,7 +194,7 @@ func uploadWithCoordinatorRetry(req uploadRequest, config coordinatorRetryConfig
 		if err == nil {
 			return nil
 		}
-		if !config.enabled || !isCoordinatorNotActiveError(err) {
+		if !config.enabled || !isCoordinatorRetryableError(err) {
 			return err
 		}
 		log.Printf("Coordinator retry after %s: %v", backoff, err)
@@ -246,7 +254,7 @@ func runClientWithStop(server string, nextMessage messageProvider, overloadConfi
 			err = uploadWithCoordinatorRetry(req, coordinatorConfig, func(req uploadRequest) error {
 				return uploadWithOverloadRetry(req, overloadConfig, func(req uploadRequest) error {
 					err := uploader.upload(req)
-					if coordinatorConfig.enabled && isCoordinatorNotActiveError(err) {
+					if coordinatorConfig.enabled && isCoordinatorRetryableError(err) {
 						uploader.close()
 					}
 					return err

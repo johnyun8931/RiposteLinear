@@ -170,7 +170,7 @@ func validateShardInventoryContainsConfig(inventory []ShardConfig, active ShardC
 		if !ok {
 			return fmt.Errorf("configured shard inventory missing active shard %d", shard.ID)
 		}
-		if !shardsEqual(available, shard) {
+		if !shardsEqual(available, shard) && !shardsEqualWithActiveStandbySwapped(available, shard) {
 			return fmt.Errorf("configured shard inventory does not match active shard %d", shard.ID)
 		}
 	}
@@ -191,6 +191,17 @@ func shardsEqual(a ShardConfig, b ShardConfig) bool {
 		return false
 	}
 	return true
+}
+
+func shardsEqualWithActiveStandbySwapped(inventory ShardConfig, active ShardConfig) bool {
+	if inventory.ID != active.ID ||
+		inventory.StartRow != active.StartRow ||
+		inventory.EndRow != active.EndRow ||
+		inventory.Standby == nil ||
+		active.Standby == nil {
+		return false
+	}
+	return inventory.Active == *active.Standby && *inventory.Standby == active.Active
 }
 
 func routeShard(shards []ShardConfig, row int) (ShardConfig, error) {

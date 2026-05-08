@@ -1354,8 +1354,8 @@ func TestCoordinatorSkipScalingRecommendationRejectsWrongCycle(t *testing.T) {
 }
 
 func TestValidateAdminFlagsRejectsApplyAndDryRunTogether(t *testing.T) {
-	err := validateAdminFlags(0, false, false, true, true, false, "127.0.0.1:7000")
-	if err == nil || !strings.Contains(err.Error(), "scaling recommendation admin command") {
+	err := validateAdminFlags(0, false, false, true, true, false, false, -1, "127.0.0.1:7000")
+	if err == nil || !strings.Contains(err.Error(), "only one admin command") {
 		t.Fatalf("expected mutually exclusive apply flags error, got %v", err)
 	}
 }
@@ -1876,6 +1876,156 @@ func TestCoordinatorStatusIncludesStandbyHealthWhenConfigured(t *testing.T) {
 	}
 	if !shard.StandbyPromotable || shard.StandbyPromotionStatus != standbyPromotionStatusPromotable {
 		t.Fatalf("expected promotable standby, got %+v", shard)
+	}
+}
+
+func TestPromoteShardStandbyRejectsWithoutLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := mustCoordinatorWithLease(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	passive := mustStandbyCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-b", testLeaseTTL, testLeaseRenewInterval)
+	_ = active
+
+	err := passive.PromoteShardStandby(&db.PromoteShardStandbyArgs{ShardID: 0}, &db.PromoteShardStandbyReply{})
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected Coordinator not active, got %v", err)
+	}
+}
+
+func TestPromoteShardStandbyRejectsMissingStandby(t *testing.T) {
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaActive}}})
+
+	var reply db.PromoteShardStandbyReply
+	err := coord.PromoteShardStandby(&db.PromoteShardStandbyArgs{ShardID: 0, Force: true}, &reply)
+	if err == nil || reply.Status != standbyPromotionStatusMissingStandby {
+		t.Fatalf("expected missing standby rejection, err=%v reply=%+v", err, reply)
+	}
+}
+
+func TestPromoteShardStandbyRejectsHealthyActiveWithoutForce(t *testing.T) {
+	active := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaActive, CompletedUploadCommittedCount: 1}}
+	standby := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaStandby, CompletedUploadCommittedCount: 1}}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	coord.standbyLeaderDialer = func(addr string, timeout time.Duration) (closeableStatusClient, error) {
+		return standby, nil
+	}
+
+	var reply db.PromoteShardStandbyReply
+	err := coord.PromoteShardStandby(&db.PromoteShardStandbyArgs{ShardID: 0}, &reply)
+	if err == nil || reply.Status != shardPromotionStatusActiveHealthy {
+		t.Fatalf("expected healthy-active rejection, err=%v reply=%+v", err, reply)
+	}
+}
+
+func TestPromoteShardStandbyForceSwapsConfigAndRefreshesClient(t *testing.T) {
+	active := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaActive, CompletedUploadCommittedCount: 2}}
+	standbyStatus := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaStandby, CompletedUploadCommittedCount: 2}}
+	promoted := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaStandby}}
+	store := newMemoryControlStore(1)
+	shards := []ShardConfig{activeStandbyShard(0, 0, db.TABLE_HEIGHT)}
+	coord := mustCoordinatorWithLease(t, shards, map[int]shardClient{0: active}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	coord.standbyLeaderDialer = func(addr string, timeout time.Duration) (closeableStatusClient, error) {
+		return standbyStatus, nil
+	}
+	coord.shardLeaderDialer = func(addr string) (shardClient, error) {
+		if addr != "127.0.0.1:9000" {
+			t.Fatalf("unexpected promoted leader address: %s", addr)
+		}
+		return promoted, nil
+	}
+	snapshot := epochShardConfigRecord(shardConfigRecordFromShards(shards, 1), 7)
+	if err := store.PutEpochShardConfig(7, snapshot); err != nil {
+		t.Fatalf("PutEpochShardConfig failed: %v", err)
+	}
+
+	var reply db.PromoteShardStandbyReply
+	if err := coord.PromoteShardStandby(&db.PromoteShardStandbyArgs{ShardID: 0, Force: true}, &reply); err != nil {
+		t.Fatalf("PromoteShardStandby failed: %v", err)
+	}
+	if !reply.Promoted || reply.PreviousVersion != 1 || reply.NewVersion != 2 || reply.OldActiveLeaderAddr != "127.0.0.1:8000" || reply.NewActiveLeaderAddr != "127.0.0.1:9000" {
+		t.Fatalf("unexpected promotion reply: %+v", reply)
+	}
+	config, ok, err := store.GetShardConfig()
+	if err != nil || !ok {
+		t.Fatalf("GetShardConfig failed: ok=%t err=%v", ok, err)
+	}
+	if config.Version != 2 || config.Shards[0].Active.LeaderAddr != "127.0.0.1:9000" || config.Shards[0].Standby == nil || config.Shards[0].Standby.LeaderAddr != "127.0.0.1:8000" {
+		t.Fatalf("unexpected promoted shard config: %+v", config)
+	}
+	if coord.clients[0] != promoted {
+		t.Fatalf("expected active client to be refreshed to promoted standby")
+	}
+	epochSnapshot, ok, err := store.GetEpochShardConfig(7)
+	if err != nil || !ok || !shardConfigRecordsEqual(epochSnapshot, snapshot) {
+		t.Fatalf("expected epoch snapshot unchanged, ok=%t err=%v snapshot=%+v", ok, err, epochSnapshot)
+	}
+
+	epoch := db.EpochMeta{ID: 8, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().Add(time.Minute).UTC(), DurationSeconds: 60}
+	setCoordinatorActiveEpoch(t, coord, epoch)
+	var uploadReply db.UploadReply1
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: 0}, &uploadReply); err != nil {
+		t.Fatalf("Upload1 after promotion failed: %v", err)
+	}
+	if promoted.upload1Calls != 1 || active.upload1Calls != 0 {
+		t.Fatalf("expected promoted client to receive upload, active=%d promoted=%d", active.upload1Calls, promoted.upload1Calls)
+	}
+}
+
+func TestPromoteShardStandbyForceAllowsActiveUnreachable(t *testing.T) {
+	active := &fakeShardClient{statusErr: errors.New("active down")}
+	standbyStatus := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaStandby, CompletedUploadCommittedCount: 2}}
+	promoted := &fakeShardClient{}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	coord.standbyLeaderDialer = func(addr string, timeout time.Duration) (closeableStatusClient, error) {
+		return standbyStatus, nil
+	}
+	coord.shardLeaderDialer = func(addr string) (shardClient, error) {
+		return promoted, nil
+	}
+
+	var reply db.PromoteShardStandbyReply
+	if err := coord.PromoteShardStandby(&db.PromoteShardStandbyArgs{ShardID: 0, Force: true}, &reply); err != nil {
+		t.Fatalf("forced promotion with active unreachable failed: %v", err)
+	}
+	if !reply.Promoted {
+		t.Fatalf("expected promotion, got %+v", reply)
+	}
+}
+
+func TestUploadShardBogusUUIDMapsToShardSessionLost(t *testing.T) {
+	client := &fakeShardClient{upload2Err: errors.New(coordinatorWireBogusUUID), upload3Err: errors.New(coordinatorWireBogusUUID)}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: client})
+	epoch := db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().Add(time.Minute).UTC(), DurationSeconds: 60}
+	setCoordinatorActiveEpoch(t, coord, epoch)
+	session := SessionRecord{EpochID: 1, ShardID: 0, GlobalUUID: 101, LocalUUID: 202, CreatedAt: time.Now().UTC()}
+	session.HashKey[0] = 9
+	if err := coord.sessionStore.PutSession(context.Background(), session); err != nil {
+		t.Fatalf("PutSession failed: %v", err)
+	}
+
+	err := coord.Upload2(&db.UploadArgs2{Uuid: session.GlobalUUID, HashKey: session.HashKey}, &db.UploadReply2{})
+	if err == nil || err.Error() != coordinatorWireShardSessionLost {
+		t.Fatalf("expected Shard session lost from Upload2, got %v", err)
+	}
+	err = coord.Upload3(&db.UploadArgs3{Uuid: session.GlobalUUID, HashKey: session.HashKey}, &db.UploadReply3{})
+	if err == nil || err.Error() != coordinatorWireShardSessionLost {
+		t.Fatalf("expected Shard session lost from Upload3, got %v", err)
+	}
+
+	err = coord.Upload2(&db.UploadArgs2{Uuid: 999, HashKey: session.HashKey}, &db.UploadReply2{})
+	if err == nil || err.Error() != coordinatorWireBogusUUID {
+		t.Fatalf("expected missing coordinator session to remain Bogus UUID, got %v", err)
 	}
 }
 

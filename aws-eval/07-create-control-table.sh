@@ -13,11 +13,13 @@ fi
 require_cmd aws
 require_cmd grep
 require_cmd mktemp
+require_cmd python3
 
 DYNAMODB_CONTROL_TABLE="${DYNAMODB_CONTROL_TABLE:-${PROJECT_TAG}-control}"
 DYNAMODB_SESSION_TABLE="${DYNAMODB_SESSION_TABLE:-$DYNAMODB_CONTROL_TABLE}"
 ACTIVE_SHARD_COUNT="${ACTIVE_SHARD_COUNT:-2}"
 FORCE_SHARD_CONFIG="${FORCE_SHARD_CONFIG:-0}"
+FORCE_CONTROL_STATE="${FORCE_CONTROL_STATE:-0}"
 
 if [[ -f "$STATE_FILE" && -z "${COORDINATOR_IAM_INSTANCE_PROFILE_NAME:-}" ]]; then
   die "DynamoDB smoke requires launching with a DynamoDB-backed coordinator store so the coordinator gets an IAM instance profile. Re-run 01-launch.sh with CONTROL_STORE_BACKEND=dynamodb or SESSION_STORE_BACKEND=dynamodb."
@@ -48,6 +50,48 @@ ensure_table() {
 ensure_table "$DYNAMODB_CONTROL_TABLE" "control" "$(dynamodb_control_region)"
 if [[ "$DYNAMODB_SESSION_TABLE" != "$DYNAMODB_CONTROL_TABLE" || "$(dynamodb_session_region)" != "$(dynamodb_control_region)" ]]; then
   ensure_table "$DYNAMODB_SESSION_TABLE" "session" "$(dynamodb_session_region)"
+fi
+
+purge_table_items() {
+  local table="$1"
+  local region="$2"
+  local label="$3"
+  local scan_file
+  scan_file="$(mktemp)"
+  info "purging DynamoDB $label table items: $table"
+  aws_base --region "$region" dynamodb scan \
+    --table-name "$table" \
+    --projection-expression pk \
+    --output json >"$scan_file"
+  python3 - "$scan_file" <<'PY' | while IFS= read -r pk; do
+import json
+import sys
+
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for item in data.get("Items", []):
+    value = item.get("pk", {}).get("S")
+    if value:
+        print(value)
+PY
+    aws_base --region "$region" dynamodb delete-item \
+      --table-name "$table" \
+      --key "$(python3 - "$pk" <<'PY'
+import json
+import sys
+
+print(json.dumps({"pk": {"S": sys.argv[1]}}))
+PY
+)" >/dev/null
+  done
+  rm -f "$scan_file"
+}
+
+if [[ "$FORCE_CONTROL_STATE" == "1" || "$FORCE_CONTROL_STATE" == "true" ]]; then
+  purge_table_items "$DYNAMODB_CONTROL_TABLE" "$(dynamodb_control_region)" "control"
+  if [[ "$DYNAMODB_SESSION_TABLE" != "$DYNAMODB_CONTROL_TABLE" || "$(dynamodb_session_region)" != "$(dynamodb_control_region)" ]]; then
+    purge_table_items "$DYNAMODB_SESSION_TABLE" "$(dynamodb_session_region)" "session"
+  fi
 fi
 
 info "seeding shard config"

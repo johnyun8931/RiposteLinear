@@ -265,8 +265,21 @@ commit remains a known gap for a later protocol-log or idempotent-prepare slice.
 
 The S3 payload is retained after ack for debugging and replay audit. This gives
 active/passive shard promotion a durable replay boundary for uploads that
-successfully reached `Upload3`. Partial shard-side `Upload1`/`Upload2` sessions
-are still not durable at the shard layer.
+successfully reached `Upload3`. Manual hot promotion can swap a shard's active
+and standby pairs with:
+
+```bash
+coordinator -admin-target <addr> -promote-shard-standby -promote-shard-id <id> [-force-promote-shard]
+```
+
+Normal promotion requires a promotable standby. `-force-promote-shard` is the
+manual recovery path when the old active is unreachable or for planned
+promotion while it is still healthy. Partial shard-side `Upload1`/`Upload2`
+sessions are still not durable at the shard layer and may be dropped during
+promotion. In coordinator mode, clients treat `Shard session lost` as a
+retryable signal and restart the full upload from `Upload1`. Completed uploads
+that reached `Upload3` remain the durable handoff covered by SQS/S3 fanout and
+the replica-aware ledger.
 
 Future slices can close the partial-upload gap in increasing order of
 complexity:
@@ -289,9 +302,10 @@ DynamoDB completed-upload ledger are also opt-in. The current code has local
 and DynamoDB control-store wiring, local and DynamoDB session-store wiring,
 lease/fencing enforcement, local and SQS/S3 completed-upload ingestion
 queueing, replica-aware completed-upload idempotence, and active-passive shard
-health monitoring, but no active-passive shard promotion.
+health monitoring, plus manual hot standby shard promotion.
 
 Shard health monitoring is a prerequisite for failover, not failover itself.
-Shard active/passive promotion still requires durable accepted-work/session
-replay, promotion fencing, routing updates, and pair partial-delivery
-hardening. Horizontally scaled stateless write routers also remain later work.
+Automatic health-triggered promotion, durable partial-session replay, promotion
+fencing beyond the current coordinator lease, and pair partial-delivery
+hardening remain later work. Horizontally scaled stateless write routers also
+remain later work.

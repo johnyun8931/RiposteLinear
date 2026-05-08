@@ -355,6 +355,23 @@ type SkipScalingRecommendationReply struct {
 	Reason                string `json:"reason"`
 }
 
+type PromoteShardStandbyArgs struct {
+	ShardID int    `json:"shard_id"`
+	Force   bool   `json:"force"`
+	Reason  string `json:"reason"`
+}
+
+type PromoteShardStandbyReply struct {
+	Promoted            bool   `json:"promoted"`
+	ShardID             int    `json:"shard_id"`
+	PreviousVersion     int64  `json:"previous_version"`
+	NewVersion          int64  `json:"new_version"`
+	OldActiveLeaderAddr string `json:"old_active_leader_addr"`
+	NewActiveLeaderAddr string `json:"new_active_leader_addr"`
+	Status              string `json:"status"`
+	Reason              string `json:"reason"`
+}
+
 type AbortEpochArgs struct {
 	EpochID int64
 }
