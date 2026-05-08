@@ -43,7 +43,10 @@ import json
 import sys
 
 path, holder, min_token = sys.argv[1], sys.argv[2], int(sys.argv[3])
-status = json.load(open(path))
+try:
+    status = json.load(open(path))
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f"{path}: invalid JSON: {err}")
 if status.get("lease_holder") != holder:
     raise SystemExit(f"expected lease holder {holder}, got {status.get('lease_holder')}")
 if int(status.get("lease_fencing_token", 0)) < min_token:
@@ -64,7 +67,10 @@ import json
 import sys
 
 path, role, active_holder = sys.argv[1:]
-status = json.load(open(path))
+try:
+    status = json.load(open(path))
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f"{path}: invalid JSON: {err}")
 if status.get("role") != role:
     raise SystemExit(f"expected coordinator role {role}, got {status.get('role')}")
 if status.get("active_holder") != active_holder:
@@ -81,7 +87,10 @@ import json
 import sys
 
 path, holder, min_token = sys.argv[1], sys.argv[2], int(sys.argv[3])
-item = json.load(open(path)).get("Item", {})
+try:
+    item = json.load(open(path)).get("Item", {})
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f"{path}: invalid JSON: {err}")
 actual_holder = item.get("holder", {}).get("S")
 actual_token = int(item.get("fencing_token", {}).get("N", "0"))
 if actual_holder != holder:
@@ -151,7 +160,10 @@ import json
 import sys
 
 path, holder, min_token = sys.argv[1], sys.argv[2], int(sys.argv[3])
-status = json.load(open(path))
+try:
+    status = json.load(open(path))
+except (OSError, json.JSONDecodeError):
+    status = {}
 ok = (
     status.get("role") == "active"
     and status.get("lease_holder") == holder

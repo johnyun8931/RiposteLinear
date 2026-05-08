@@ -62,10 +62,16 @@ import os
 import sys
 
 epoch_path, lease_path, shard_config_path, epoch_shard_config_path, epoch_id, accepting, allow_completed, holder = sys.argv[1:]
-epoch = json.load(open(epoch_path)).get("Item", {})
-lease = json.load(open(lease_path)).get("Item", {})
-shard_config = json.load(open(shard_config_path)).get("Item", {})
-epoch_shard_config = json.load(open(epoch_shard_config_path)).get("Item", {}) if os.path.exists(epoch_shard_config_path) else {}
+def load_item(path):
+    try:
+        return json.load(open(path)).get("Item", {})
+    except (OSError, json.JSONDecodeError) as err:
+        raise SystemExit(f"{path}: invalid JSON: {err}")
+
+epoch = load_item(epoch_path)
+lease = load_item(lease_path)
+shard_config = load_item(shard_config_path)
+epoch_shard_config = load_item(epoch_shard_config_path) if os.path.exists(epoch_shard_config_path) else {}
 
 actual_epoch = epoch.get("epoch_id", {}).get("N")
 actual_accepting = epoch.get("accepting", {}).get("BOOL")
@@ -131,7 +137,10 @@ import json
 import sys
 
 path, epoch_id, accepted_requests, expected_global_height = sys.argv[1:]
-status = json.load(open(path))
+try:
+    status = json.load(open(path))
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f\"{path}: invalid JSON: {err}\")
 
 if int(status.get('scaling_epoch_id', 0)) != int(epoch_id):
     raise SystemExit(f\"scaling_epoch_id mismatch: expected {epoch_id}, got {status.get('scaling_epoch_id')}\")

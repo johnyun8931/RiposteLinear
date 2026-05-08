@@ -328,7 +328,10 @@ import json
 import sys
 
 path, want_epoch, want_accepted, want_global_height = sys.argv[1:]
-data = json.load(open(path))
+try:
+    data = json.load(open(path))
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f"{path}: invalid JSON: {err}")
 
 checks = {
     "scaling_epoch_id": int(want_epoch),
@@ -359,7 +362,10 @@ scaling_status_tsv() {
 import json
 import sys
 
-data = json.load(open(sys.argv[1]))
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, json.JSONDecodeError):
+    data = {}
 print(
     "\t".join(
         [

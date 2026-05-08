@@ -26,7 +26,17 @@ summary_md = result_dir / "comparison-summary.md"
 if not metadata_path.exists():
     raise SystemExit(f"missing metadata.json at {metadata_path}")
 
-metadata = json.loads(metadata_path.read_text())
+def load_json_file(path: Path):
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+metadata = load_json_file(metadata_path)
+if metadata is None:
+    raise SystemExit(f"invalid metadata.json at {metadata_path}")
 measured_seconds = int(metadata["config"]["measured_epoch_seconds"])
 client_exit_grace_seconds = int(metadata["config"].get("client_exit_grace_seconds", 30))
 client_concurrency = int(metadata["config"].get("client_concurrency", 16))
@@ -98,14 +108,7 @@ def parse_client_log(log_path: Path):
 
 def load_phase_status(phase: str):
     status_path = result_dir / "remotes" / "client" / "riposte-eval" / "phases" / phase / "phase-status.json"
-    if not status_path.exists():
-        return None
-    return json.loads(status_path.read_text())
-
-def load_json_file(path: Path):
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())
+    return load_json_file(status_path)
 
 def parse_time(value: str):
     return datetime.strptime(value, "%Y/%m/%d %H:%M:%S")

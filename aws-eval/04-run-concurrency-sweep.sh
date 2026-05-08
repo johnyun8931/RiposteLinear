@@ -67,12 +67,18 @@ phases = [
 
 valid = {}
 reasons = []
+def load_json(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as err:
+        return {"valid": False, "invalid_reason": f"invalid_json:{err}"}
+
 for phase in phases:
     path = result_dir / "remotes" / "client" / "riposte-eval" / "phases" / phase / "phase-status.json"
     if not path.exists():
         valid[phase] = "missing"
         continue
-    status = json.loads(path.read_text())
+    status = load_json(path)
     valid[phase] = str(bool(status.get("valid", False))).lower()
     if not status.get("valid", False):
         reason = status.get("client_exit_reason") or status.get("invalid_reason") or "invalid"

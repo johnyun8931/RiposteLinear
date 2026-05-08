@@ -46,7 +46,10 @@ import json
 import sys
 
 path, key, want = sys.argv[1:]
-data = json.load(open(path))
+try:
+    data = json.load(open(path))
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f"{path}: invalid JSON: {err}")
 got = data.get(key)
 if str(got) != want:
     raise SystemExit(f"{path}: {key} mismatch: got {got!r}, want {want!r}")
@@ -115,7 +118,10 @@ import json
 import sys
 
 path, version, shard_count, global_height = sys.argv[1:]
-item = json.load(open(path)).get("Item", {})
+try:
+    item = json.load(open(path)).get("Item", {})
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f"{path}: invalid JSON: {err}")
 def number(name):
     return int(item[name]["N"])
 checks = {

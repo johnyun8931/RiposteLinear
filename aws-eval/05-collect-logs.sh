@@ -256,12 +256,18 @@ lines = [
     "| --- | --- | --- | --- |",
 ]
 
+def load_json(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as err:
+        return {"valid": False, "invalid_reason": f"invalid_json:{err}"}
+
 for phase in phases:
     status_path = out_dir / "remotes" / "client" / "riposte-eval" / "phases" / phase / "phase-status.json"
     if not status_path.exists():
         lines.append(f"| {phase} | missing |  |  |")
         continue
-    status = json.loads(status_path.read_text())
+    status = load_json(status_path)
     lines.append(
         f"| {phase} | {str(bool(status.get('valid', False))).lower()} | "
         f"{status.get('client_exit_reason', '')} | {status.get('invalid_reason', '')} |"

@@ -402,7 +402,10 @@ capture_dynamodb_epoch_shard_config() {
 import json
 import sys
 
-item = json.load(open(sys.argv[1])).get("Item", {})
+try:
+    item = json.load(open(sys.argv[1])).get("Item", {})
+except (FileNotFoundError, json.JSONDecodeError):
+    item = {}
 print(item.get("epoch_id", {}).get("N", ""))
 PY
 )"

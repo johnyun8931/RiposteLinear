@@ -98,7 +98,10 @@ import json
 import sys
 
 path, want = sys.argv[1:]
-status = json.load(open(path))
+try:
+    status = json.load(open(path))
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f"{path}: invalid JSON: {err}")
 actual = status.get("role")
 if actual != want:
     raise SystemExit(f"expected role {want}, got {actual}")
