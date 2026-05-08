@@ -80,7 +80,7 @@ func handleOneClient(conn net.Conn) {
 
 	err := tlscon.Handshake()
 	if err != nil {
-		log.Printf("Handshake failed:", err)
+		log.Printf("Handshake failed: %v", err)
 		return
 	}
 
@@ -134,7 +134,7 @@ func validateCert(acceptCerts []tls.Certificate, present *x509.Certificate) bool
 		if acceptCerts[i].Leaf == nil {
 			certs, err := x509.ParseCertificates(acceptCerts[i].Certificate[0])
 			if err != nil {
-				log.Printf("Could not parse cert:", err)
+				log.Printf("Could not parse cert: %v", err)
 				return false
 			}
 

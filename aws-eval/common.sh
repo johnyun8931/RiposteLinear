@@ -106,7 +106,7 @@ remote_cmd() {
   local host="$1"
   local cmd="$2"
   local attempt status
-  for attempt in $(seq 1 5); do
+  for attempt in $(seq 1 "${SSH_COMMAND_ATTEMPTS:-12}"); do
     set +e
     # shellcheck disable=SC2046
     ssh $(ssh_opts) "${SSH_USER}@${host}" "$cmd"
@@ -115,7 +115,7 @@ remote_cmd() {
     if [[ "$status" -ne 255 ]]; then
       return "$status"
     fi
-    sleep "$attempt"
+    sleep "$((attempt < 5 ? attempt : 5))"
   done
   return "$status"
 }
@@ -124,16 +124,38 @@ copy_to_remote() {
   local src="$1"
   local host="$2"
   local dst="$3"
-  # shellcheck disable=SC2046
-  scp $(ssh_opts) "$src" "${SSH_USER}@${host}:${dst}"
+  local attempt status
+  for attempt in $(seq 1 "${SSH_COMMAND_ATTEMPTS:-12}"); do
+    set +e
+    # shellcheck disable=SC2046
+    scp $(ssh_opts) "$src" "${SSH_USER}@${host}:${dst}"
+    status=$?
+    set -e
+    if [[ "$status" -ne 255 ]]; then
+      return "$status"
+    fi
+    sleep "$((attempt < 5 ? attempt : 5))"
+  done
+  return "$status"
 }
 
 copy_from_remote() {
   local host="$1"
   local src="$2"
   local dst="$3"
-  # shellcheck disable=SC2046
-  scp -r $(ssh_opts) "${SSH_USER}@${host}:${src}" "$dst"
+  local attempt status
+  for attempt in $(seq 1 "${SSH_COMMAND_ATTEMPTS:-12}"); do
+    set +e
+    # shellcheck disable=SC2046
+    scp -r $(ssh_opts) "${SSH_USER}@${host}:${src}" "$dst"
+    status=$?
+    set -e
+    if [[ "$status" -ne 255 ]]; then
+      return "$status"
+    fi
+    sleep "$((attempt < 5 ? attempt : 5))"
+  done
+  return "$status"
 }
 
 wait_for_ssh() {
