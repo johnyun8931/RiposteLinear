@@ -24,6 +24,8 @@ type MemoryControlStore struct {
 	scalingByEpoch   map[int64]ScalingRecommendationRecord
 	latestScaling    ScalingRecommendationRecord
 	hasLatestScaling bool
+	epochCycle       EpochCycleRecord
+	hasEpochCycle    bool
 }
 
 func NewMemoryControlStore(shardConfigVersion int64) *MemoryControlStore {
@@ -239,6 +241,35 @@ func (s *MemoryControlStore) GetEpochScalingRecommendation(epochID int64) (Scali
 		return ScalingRecommendationRecord{}, false, nil
 	}
 	return record, true, nil
+}
+
+func (s *MemoryControlStore) GetEpochCycle() (EpochCycleRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasEpochCycle {
+		return EpochCycleRecord{}, false, nil
+	}
+	return s.epochCycle, true, nil
+}
+
+func (s *MemoryControlStore) PutEpochCycleTransition(from string, to string, update EpochCycleRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	from = normalizeEpochCycleState(from)
+	current := EpochCycleStateIdle
+	if s.hasEpochCycle {
+		current = s.epochCycle.State
+	}
+	if current != from {
+		return fmt.Errorf("%w: current state %s, expected %s", errEpochCycleTransition, current, from)
+	}
+	record, err := prepareEpochCycleRecord(from, to, update, s.epochCycle, s.hasEpochCycle)
+	if err != nil {
+		return err
+	}
+	s.epochCycle = record
+	s.hasEpochCycle = true
+	return nil
 }
 
 type memoryIngestionQueue struct {

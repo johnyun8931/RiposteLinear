@@ -91,7 +91,25 @@ func applicableControl(t *testing.T) *controlstore.MemoryControlStore {
 	if err := store.PutScalingRecommendation(scalingRecommendationRecord(1, 1, "grow")); err != nil {
 		t.Fatalf("PutScalingRecommendation failed: %v", err)
 	}
+	setRecommendationReadyCycle(t, store)
 	return store
+}
+
+func setRecommendationReadyCycle(t *testing.T, store controlstore.ControlStore) {
+	t.Helper()
+	if err := store.PutEpochCycleTransition(controlstore.EpochCycleStateIdle, controlstore.EpochCycleStateActive, controlstore.EpochCycleRecord{
+		EpochID:            1,
+		ShardConfigVersion: 1,
+	}); err != nil {
+		t.Fatalf("cycle idle -> active failed: %v", err)
+	}
+	if err := store.PutEpochCycleTransition(controlstore.EpochCycleStateActive, controlstore.EpochCycleStateRecommendationReady, controlstore.EpochCycleRecord{
+		EpochID:                      1,
+		ShardConfigVersion:           1,
+		ScalingRecommendationEpochID: 1,
+	}); err != nil {
+		t.Fatalf("cycle active -> recommendation_ready failed: %v", err)
+	}
 }
 
 func applicableDryRunReply() db.ApplyScalingRecommendationReply {
@@ -107,7 +125,9 @@ func applicableDryRunReply() db.ApplyScalingRecommendationReply {
 
 func TestEvaluateOnceSkipsMissingRecommendation(t *testing.T) {
 	coord := &fakeCoordinatorAdmin{}
-	scaler, logs := testAutoscaler(controlstore.NewMemoryControlStore(1), coord, false)
+	control := controlstore.NewMemoryControlStore(1)
+	setRecommendationReadyCycle(t, control)
+	scaler, logs := testAutoscaler(control, coord, false)
 
 	decision, err := scaler.evaluateOnce(context.Background())
 	if err != nil {
@@ -126,6 +146,7 @@ func TestEvaluateOnceSkipsStaleRecommendation(t *testing.T) {
 	if err := control.PutScalingRecommendation(scalingRecommendationRecord(1, 1, "grow")); err != nil {
 		t.Fatalf("PutScalingRecommendation failed: %v", err)
 	}
+	setRecommendationReadyCycle(t, control)
 	coord := &fakeCoordinatorAdmin{}
 	scaler, logs := testAutoscaler(control, coord, false)
 

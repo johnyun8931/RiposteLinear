@@ -296,6 +296,9 @@ type CoordinatorStatusReply struct {
 	LatestScalingRecommendedShards int                      `json:"latest_scaling_recommended_shards"`
 	ScalingApplyStatus             string                   `json:"scaling_apply_status"`
 	ScalingApplyReason             string                   `json:"scaling_apply_reason"`
+	EpochCycleState                string                   `json:"epoch_cycle_state"`
+	EpochCycleEpochID              int64                    `json:"epoch_cycle_epoch_id"`
+	EpochCycleReason               string                   `json:"epoch_cycle_reason"`
 	Shards                         []CoordinatorShardStatus `json:"shards"`
 }
 

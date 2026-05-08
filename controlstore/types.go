@@ -9,21 +9,35 @@ import (
 )
 
 var (
-	ErrLeaseHeld      = errors.New("coordinator lease is held")
-	ErrLeaseNotHeld   = errors.New("coordinator lease is not held")
-	ErrStaleFence     = errors.New("stale coordinator fencing token")
-	ErrEpochMismatch  = errors.New("epoch mismatch")
-	ErrSessionExists  = errors.New("coordinator session already exists")
-	ErrSessionMissing = errors.New("coordinator session is missing")
+	ErrLeaseHeld            = errors.New("coordinator lease is held")
+	ErrLeaseNotHeld         = errors.New("coordinator lease is not held")
+	ErrStaleFence           = errors.New("stale coordinator fencing token")
+	ErrEpochMismatch        = errors.New("epoch mismatch")
+	ErrEpochCycleTransition = errors.New("invalid epoch cycle transition")
+	ErrSessionExists        = errors.New("coordinator session already exists")
+	ErrSessionMissing       = errors.New("coordinator session is missing")
 )
 
 var (
-	errLeaseHeld      = ErrLeaseHeld
-	errLeaseNotHeld   = ErrLeaseNotHeld
-	errStaleFence     = ErrStaleFence
-	errEpochMismatch  = ErrEpochMismatch
-	errSessionExists  = ErrSessionExists
-	errSessionMissing = ErrSessionMissing
+	errLeaseHeld            = ErrLeaseHeld
+	errLeaseNotHeld         = ErrLeaseNotHeld
+	errStaleFence           = ErrStaleFence
+	errEpochMismatch        = ErrEpochMismatch
+	errEpochCycleTransition = ErrEpochCycleTransition
+	errSessionExists        = ErrSessionExists
+	errSessionMissing       = ErrSessionMissing
+)
+
+const (
+	EpochCycleStateIdle                = "idle"
+	EpochCycleStateActive              = "active"
+	EpochCycleStateCompleted           = "completed"
+	EpochCycleStateRecommendationReady = "recommendation_ready"
+	EpochCycleStateScalingInProgress   = "scaling_in_progress"
+	EpochCycleStateScalingApplied      = "scaling_applied"
+	EpochCycleStateScalingSkipped      = "scaling_skipped"
+	EpochCycleStateReadyForNextEpoch   = "ready_for_next_epoch"
+	EpochCycleStateFailed              = "failed"
 )
 
 type CoordinatorLease struct {
@@ -48,6 +62,8 @@ type ControlStore interface {
 	PutScalingRecommendation(record ScalingRecommendationRecord) error
 	GetLatestScalingRecommendation() (ScalingRecommendationRecord, bool, error)
 	GetEpochScalingRecommendation(epochID int64) (ScalingRecommendationRecord, bool, error)
+	GetEpochCycle() (EpochCycleRecord, bool, error)
+	PutEpochCycleTransition(from string, to string, update EpochCycleRecord) error
 }
 
 type ShardConfigRecord struct {
@@ -86,6 +102,16 @@ type ScalingRecommendationRecord struct {
 	ProposedGlobalTableHeight int
 	ShardConfigVersion        int64
 	CreatedAt                 time.Time
+}
+
+type EpochCycleRecord struct {
+	State                        string
+	EpochID                      int64
+	ShardConfigVersion           int64
+	ScalingRecommendationEpochID int64
+	Reason                       string
+	CreatedAt                    time.Time
+	UpdatedAt                    time.Time
 }
 
 type IngestionMessage struct {

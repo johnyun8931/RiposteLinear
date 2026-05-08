@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"bitbucket.org/henrycg/riposte/controlstore"
 	"bitbucket.org/henrycg/riposte/db"
 	"bitbucket.org/henrycg/riposte/utils"
 )
@@ -655,6 +656,9 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 	if err := c.requireCoordinatorLease(); err != nil {
 		return coordinatorWireError(errCoordinatorNotActive)
 	}
+	if err := requireEpochCycleAllowsStart(c.controlStore); err != nil {
+		return err
+	}
 
 	latestEpochID := int64(0)
 	if currentEpoch, ok := c.controlStore.CurrentEpoch(); ok {
@@ -720,6 +724,10 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 		c.abortStarted(started, decision.nextEpochID)
 		return fmt.Errorf("start epoch in control store: %w", err)
 	}
+	if err := transitionEpochCycleStarted(controlStore, epoch.ID, shardConfigVersion); err != nil {
+		c.abortStarted(started, decision.nextEpochID)
+		return fmt.Errorf("start epoch cycle: %w", err)
+	}
 
 	c.commitStartedEpoch(epoch, shardConfig.ShardCount)
 
@@ -761,10 +769,16 @@ func (c *Coordinator) completeEpoch() {
 		log.Printf("Complete epoch %d in control store failed: %v", decision.epochID, err)
 		return
 	}
+	shardConfigVersion := currentShardConfigVersion(controlStore)
 	if metrics.EpochID == decision.epochID {
-		record := scalingRecommendationRecord(metrics, recommendation, currentShardConfigVersion(controlStore), time.Now().UTC())
+		record := scalingRecommendationRecord(metrics, recommendation, shardConfigVersion, time.Now().UTC())
 		if err := controlStore.PutScalingRecommendation(record); err != nil {
 			log.Printf("Persist scaling recommendation for epoch %d failed: %v", decision.epochID, err)
+			transitionEpochCycleFailed(controlStore, controlstore.EpochCycleStateActive, decision.epochID, shardConfigVersion, err.Error())
+			return
+		}
+		if err := transitionEpochCycleRecommendationReady(controlStore, decision.epochID, shardConfigVersion); err != nil {
+			log.Printf("Recommendation-ready epoch %d cycle transition failed: %v", decision.epochID, err)
 		}
 	}
 }
@@ -852,7 +866,29 @@ func (c *Coordinator) ApplyScalingRecommendation(args *db.ApplyScalingRecommenda
 		populateApplyScalingRecommendationReply(reply, evaluation, false)
 		return nil
 	}
+	cycleState := epochCycleState(c.controlStore)
+	if cycleState == controlstore.EpochCycleStateRecommendationReady {
+		if err := putEpochCycleTransition(c.controlStore, controlstore.EpochCycleStateRecommendationReady, controlstore.EpochCycleStateScalingInProgress, EpochCycleRecord{
+			EpochID:                      evaluation.recommendation.EpochID,
+			ShardConfigVersion:           evaluation.current.Version,
+			ScalingRecommendationEpochID: evaluation.recommendation.EpochID,
+			Reason:                       "scaling apply started",
+		}); err != nil {
+			return err
+		}
+	} else if cycleState != controlstore.EpochCycleStateScalingInProgress {
+		return fmt.Errorf("epoch cycle state %s does not allow scaling apply", cycleState)
+	}
 	if err := c.controlStore.PutShardConfig(evaluation.proposed); err != nil {
+		transitionEpochCycleFailed(c.controlStore, controlstore.EpochCycleStateScalingInProgress, evaluation.recommendation.EpochID, evaluation.current.Version, err.Error())
+		return err
+	}
+	if err := putEpochCycleTransition(c.controlStore, controlstore.EpochCycleStateScalingInProgress, controlstore.EpochCycleStateScalingApplied, EpochCycleRecord{
+		EpochID:                      evaluation.recommendation.EpochID,
+		ShardConfigVersion:           evaluation.proposed.Version,
+		ScalingRecommendationEpochID: evaluation.recommendation.EpochID,
+		Reason:                       "scaling recommendation applied",
+	}); err != nil {
 		return err
 	}
 	populateApplyScalingRecommendationReply(reply, evaluation, true)
@@ -905,6 +941,13 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 	reply.ScalingAcceptedRequests = snapshot.scalingMetrics.AcceptedRequestCount
 	reply.ScalingDurationSecs = snapshot.scalingMetrics.DurationSeconds
 	populateScalingApplyStatus(reply, scalingApply)
+	if cycle, ok, err := controlStore.GetEpochCycle(); err == nil && ok {
+		reply.EpochCycleState = cycle.State
+		reply.EpochCycleEpochID = cycle.EpochID
+		reply.EpochCycleReason = cycle.Reason
+	} else {
+		reply.EpochCycleState = controlstore.EpochCycleStateIdle
+	}
 	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
 
 	for i, shard := range shards {

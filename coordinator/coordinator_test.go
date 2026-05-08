@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"bitbucket.org/henrycg/riposte/controlstore"
 	"bitbucket.org/henrycg/riposte/db"
 )
 
@@ -195,6 +196,47 @@ func setCoordinatorActiveEpoch(t *testing.T, coord *Coordinator, epoch db.EpochM
 	coord.epoch = epoch
 	if err := coord.controlStore.StartEpoch(epoch, currentShardConfigVersion(coord.controlStore)); err != nil {
 		t.Fatalf("control store StartEpoch failed: %v", err)
+	}
+}
+
+func setEpochCycleRecommendationReady(t *testing.T, store ControlStore, epochID int64, shardConfigVersion int64) {
+	t.Helper()
+	if cycle, ok, err := store.GetEpochCycle(); err != nil {
+		t.Fatalf("GetEpochCycle failed: %v", err)
+	} else if ok && cycle.State == controlstore.EpochCycleStateRecommendationReady {
+		return
+	}
+	if err := store.PutEpochCycleTransition(controlstore.EpochCycleStateIdle, controlstore.EpochCycleStateActive, EpochCycleRecord{
+		EpochID:            epochID,
+		ShardConfigVersion: shardConfigVersion,
+	}); err != nil {
+		t.Fatalf("cycle idle -> active failed: %v", err)
+	}
+	if err := store.PutEpochCycleTransition(controlstore.EpochCycleStateActive, controlstore.EpochCycleStateRecommendationReady, EpochCycleRecord{
+		EpochID:                      epochID,
+		ShardConfigVersion:           shardConfigVersion,
+		ScalingRecommendationEpochID: epochID,
+	}); err != nil {
+		t.Fatalf("cycle active -> recommendation_ready failed: %v", err)
+	}
+}
+
+func setEpochCycleReadyForNext(t *testing.T, store ControlStore, epochID int64, shardConfigVersion int64) {
+	t.Helper()
+	setEpochCycleRecommendationReady(t, store, epochID, shardConfigVersion)
+	if err := store.PutEpochCycleTransition(controlstore.EpochCycleStateRecommendationReady, controlstore.EpochCycleStateScalingInProgress, EpochCycleRecord{
+		EpochID:                      epochID,
+		ShardConfigVersion:           shardConfigVersion,
+		ScalingRecommendationEpochID: epochID,
+	}); err != nil {
+		t.Fatalf("cycle recommendation_ready -> scaling_in_progress failed: %v", err)
+	}
+	if err := store.PutEpochCycleTransition(controlstore.EpochCycleStateScalingInProgress, controlstore.EpochCycleStateScalingApplied, EpochCycleRecord{
+		EpochID:                      epochID,
+		ShardConfigVersion:           shardConfigVersion,
+		ScalingRecommendationEpochID: epochID,
+	}); err != nil {
+		t.Fatalf("cycle scaling_in_progress -> scaling_applied failed: %v", err)
 	}
 }
 
@@ -847,6 +889,38 @@ func TestCoordinatorStartEpochFailsWithStaleLease(t *testing.T) {
 	}
 }
 
+func TestCoordinatorStartEpochRejectsScalingInProgressCycle(t *testing.T) {
+	store := newMemoryControlStore(1)
+	if err := store.PutEpochCycleTransition(controlstore.EpochCycleStateIdle, controlstore.EpochCycleStateActive, EpochCycleRecord{EpochID: 1, ShardConfigVersion: 1}); err != nil {
+		t.Fatalf("cycle idle -> active failed: %v", err)
+	}
+	if err := store.PutEpochCycleTransition(controlstore.EpochCycleStateActive, controlstore.EpochCycleStateRecommendationReady, EpochCycleRecord{EpochID: 1, ShardConfigVersion: 1}); err != nil {
+		t.Fatalf("cycle active -> recommendation_ready failed: %v", err)
+	}
+	if err := store.PutEpochCycleTransition(controlstore.EpochCycleStateRecommendationReady, controlstore.EpochCycleStateScalingInProgress, EpochCycleRecord{EpochID: 1, ShardConfigVersion: 1}); err != nil {
+		t.Fatalf("cycle recommendation_ready -> scaling_in_progress failed: %v", err)
+	}
+	startTime := time.Now().UTC().Truncate(time.Second)
+	client := &fakeShardClient{startReply: db.StartEpochReply{
+		EpochID:      2,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+	}}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: client}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{})
+	if err == nil || !strings.Contains(err.Error(), controlstore.EpochCycleStateScalingInProgress) {
+		t.Fatalf("expected scaling-in-progress cycle rejection, got %v", err)
+	}
+	if client.startCalls != 0 {
+		t.Fatalf("expected shard not to be contacted, got %d calls", client.startCalls)
+	}
+}
+
 func TestCoordinatorStartEpochProducesSharedMetadata(t *testing.T) {
 	startTime := time.Now().UTC().Truncate(time.Second)
 	reply := db.StartEpochReply{
@@ -916,6 +990,10 @@ func TestCoordinatorCompleteEpochMirrorsControlStore(t *testing.T) {
 	accepting, err := coord.controlStore.Accepting(reply.EpochID)
 	if err != nil || accepting {
 		t.Fatalf("expected completed control-store epoch not accepting, accepting=%t err=%v", accepting, err)
+	}
+	cycle, ok, err := coord.controlStore.GetEpochCycle()
+	if err != nil || !ok || cycle.State != controlstore.EpochCycleStateRecommendationReady || cycle.EpochID != reply.EpochID {
+		t.Fatalf("expected recommendation-ready cycle, ok=%t err=%v cycle=%+v", ok, err, cycle)
 	}
 }
 
@@ -1014,6 +1092,7 @@ func TestCoordinatorApplyScalingRecommendationWritesNextShardConfig(t *testing.T
 	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
 		t.Fatalf("PutScalingRecommendation failed: %v", err)
 	}
+	setEpochCycleRecommendationReady(t, store, 1, 1)
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
 		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
@@ -1047,6 +1126,10 @@ func TestCoordinatorApplyScalingRecommendationWritesNextShardConfig(t *testing.T
 	if config.Version != 2 || config.ShardCount != 2 || config.GlobalTableHeight != 2*db.TABLE_HEIGHT {
 		t.Fatalf("unexpected applied shard config: %+v", config)
 	}
+	cycle, ok, err := store.GetEpochCycle()
+	if err != nil || !ok || cycle.State != controlstore.EpochCycleStateScalingApplied {
+		t.Fatalf("expected scaling-applied cycle after apply, ok=%t err=%v cycle=%+v", ok, err, cycle)
+	}
 	epochSnapshot, ok, err := store.GetEpochShardConfig(1)
 	if err != nil || !ok || !shardConfigRecordsEqual(epochSnapshot, snapshot) {
 		t.Fatalf("expected epoch snapshot unchanged, ok=%t err=%v got=%+v want=%+v", ok, err, epochSnapshot, snapshot)
@@ -1065,6 +1148,7 @@ func TestCoordinatorDryRunScalingRecommendationDoesNotWriteNextShardConfig(t *te
 	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
 		t.Fatalf("PutScalingRecommendation failed: %v", err)
 	}
+	setEpochCycleRecommendationReady(t, store, 1, 1)
 	coord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
 		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
@@ -1090,6 +1174,10 @@ func TestCoordinatorDryRunScalingRecommendationDoesNotWriteNextShardConfig(t *te
 	if !shardConfigRecordsEqual(config, initialConfig) {
 		t.Fatalf("dry-run mutated shard config: got %+v want %+v", config, initialConfig)
 	}
+	cycle, ok, err := store.GetEpochCycle()
+	if err != nil || !ok || cycle.State != controlstore.EpochCycleStateRecommendationReady {
+		t.Fatalf("expected dry-run to leave cycle recommendation_ready, ok=%t err=%v cycle=%+v", ok, err, cycle)
+	}
 }
 
 func TestCoordinatorApplyScalingRecommendationRejectsWithoutLease(t *testing.T) {
@@ -1103,6 +1191,7 @@ func TestCoordinatorApplyScalingRecommendationRejectsWithoutLease(t *testing.T) 
 	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
 		t.Fatalf("PutScalingRecommendation failed: %v", err)
 	}
+	setEpochCycleRecommendationReady(t, store, 1, 1)
 	activeCoord := mustCoordinatorWithLease(t, []ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
 		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
@@ -1734,6 +1823,7 @@ func TestCoordinatorStartEpochResetsActiveScalingMetricsAndKeepsLastRecommendati
 	completeCoordinatorUpload(t, coord, 1)
 	coord.completeEpoch()
 	lastRecommendation := coord.lastScalingRecommendation
+	setEpochCycleReadyForNext(t, coord.controlStore, 1, currentShardConfigVersion(coord.controlStore))
 
 	startCoordinatorEpoch(t, coord, active, 2, startTime.Add(2*time.Minute), 60)
 

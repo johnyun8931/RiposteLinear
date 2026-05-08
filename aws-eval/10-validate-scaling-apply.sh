@@ -61,6 +61,7 @@ capture_dynamodb_snapshot() {
   remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$remote_dir'"
   capture_dynamodb_control_item lease "$local_dir/lease.json"
   capture_dynamodb_control_item epoch "$local_dir/epoch.json"
+  capture_dynamodb_control_item epoch-cycle "$local_dir/epoch-cycle.json"
   capture_dynamodb_control_item shard-config "$local_dir/shard-config.json"
   capture_dynamodb_control_item scaling#latest "$local_dir/scaling-latest.json"
   if capture_dynamodb_epoch_shard_config "$local_dir/epoch.json" "$local_dir/epoch-shard-config.json"; then
@@ -68,6 +69,7 @@ capture_dynamodb_snapshot() {
   fi
   copy_to_remote "$local_dir/lease.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/lease.json"
   copy_to_remote "$local_dir/epoch.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/epoch.json"
+  copy_to_remote "$local_dir/epoch-cycle.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/epoch-cycle.json"
   copy_to_remote "$local_dir/shard-config.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/shard-config.json"
   copy_to_remote "$local_dir/scaling-latest.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/scaling-latest.json"
 }
@@ -83,7 +85,7 @@ reset_dynamodb_validation_state() {
   local pk session_pks
 
   info "resetting DynamoDB scaling-apply validation state"
-  for pk in lease epoch shard-config shard-config#epoch#1 shard-config#epoch#2 scaling#latest scaling#epoch#1 scaling#epoch#2; do
+  for pk in lease epoch epoch-cycle shard-config shard-config#epoch#1 shard-config#epoch#2 scaling#latest scaling#epoch#1 scaling#epoch#2; do
     delete_control_pk "$pk"
   done
 
@@ -161,6 +163,7 @@ epoch1="$(extract_field "$start_line" "epoch")"
 [[ -n "$epoch1" ]] || die "could not parse epoch 1 id from: $start_line"
 wait_for_status_state coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" active 20 >/dev/null || die "epoch 1 did not become active"
 capture_status epoch1-active
+assert_json_field "$APPLY_LOCAL_DIR/status-epoch1-active.json" epoch_cycle_state active
 
 info "verifying row 256 is rejected before apply"
 if remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$APPLY_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 2 -y 256 -payload pre-apply-row256 -threads '$CLIENT_THREADS' -log '$APPLY_LOGS_REMOTE/client-pre-apply-row256.log'"; then
@@ -175,6 +178,7 @@ assert_json_field "$APPLY_LOCAL_DIR/status-before-apply.json" current_shard_coun
 assert_json_field "$APPLY_LOCAL_DIR/status-before-apply.json" latest_scaling_action grow
 assert_json_field "$APPLY_LOCAL_DIR/status-before-apply.json" latest_scaling_recommended_shards 2
 assert_json_field "$APPLY_LOCAL_DIR/status-before-apply.json" scaling_apply_status applicable
+assert_json_field "$APPLY_LOCAL_DIR/status-before-apply.json" epoch_cycle_state recommendation_ready
 capture_dynamodb_snapshot before-apply
 assert_shard_config_count "$APPLY_LOCAL_DIR/dynamodb-before-apply/epoch-shard-config.json" 1 1 256
 
@@ -189,6 +193,7 @@ grep -q "global_table_height=256->512" "$APPLY_LOCAL_DIR/dry-run-output.log" || 
 capture_status after-dry-run
 assert_json_field "$APPLY_LOCAL_DIR/status-after-dry-run.json" current_shard_count 1
 assert_json_field "$APPLY_LOCAL_DIR/status-after-dry-run.json" global_table_height 256
+assert_json_field "$APPLY_LOCAL_DIR/status-after-dry-run.json" epoch_cycle_state recommendation_ready
 capture_dynamodb_snapshot after-dry-run
 assert_shard_config_count "$APPLY_LOCAL_DIR/dynamodb-after-dry-run/shard-config.json" 1 1 256
 
@@ -209,6 +214,7 @@ fi
 capture_status after-apply
 assert_json_field "$APPLY_LOCAL_DIR/status-after-apply.json" current_shard_count 2
 assert_json_field "$APPLY_LOCAL_DIR/status-after-apply.json" global_table_height 512
+assert_json_field "$APPLY_LOCAL_DIR/status-after-apply.json" epoch_cycle_state scaling_applied
 capture_dynamodb_snapshot after-apply
 assert_shard_config_count "$APPLY_LOCAL_DIR/dynamodb-after-apply/shard-config.json" 2 2 512
 
@@ -219,6 +225,7 @@ epoch2="$(extract_field "$start_line" "epoch")"
 wait_for_status_state coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" active 20 >/dev/null || die "epoch 2 did not become active"
 capture_status epoch2-active
 assert_json_field "$APPLY_LOCAL_DIR/status-epoch2-active.json" current_shard_count 2
+assert_json_field "$APPLY_LOCAL_DIR/status-epoch2-active.json" epoch_cycle_state active
 
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$APPLY_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 7 -y 0 -payload epoch2-row0 -threads '$CLIENT_THREADS' -log '$APPLY_LOGS_REMOTE/client-epoch2-row0.log'"
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$APPLY_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 8 -y 256 -payload epoch2-row256 -threads '$CLIENT_THREADS' -log '$APPLY_LOGS_REMOTE/client-epoch2-row256.log'"

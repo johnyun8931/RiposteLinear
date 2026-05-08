@@ -73,6 +73,7 @@ epoch1="$(extract_field "$start_line" "epoch")"
 [[ -n "$epoch1" ]] || die "could not parse epoch 1 id from: $start_line"
 wait_for_status_state coordinator "$COORDINATOR_ADDR" active 10 >/dev/null || die "epoch 1 did not become active"
 status_json coordinator "$COORDINATOR_ADDR" >"$APPLY_DIR/status-epoch1-active.json"
+assert_status_field "$APPLY_DIR/status-epoch1-active.json" epoch_cycle_state active
 
 if run_client -coordinator "$COORDINATOR_ADDR" -x 2 -y 256 -payload pre-apply-row256 -log "$PRE_APPLY_ROW256_LOG"; then
 	die "row 256 unexpectedly succeeded before scaling apply"
@@ -87,6 +88,7 @@ assert_status_field "$APPLY_DIR/status-before-apply.json" current_shard_count 1
 assert_status_field "$APPLY_DIR/status-before-apply.json" latest_scaling_action grow
 assert_status_field "$APPLY_DIR/status-before-apply.json" latest_scaling_recommended_shards 2
 assert_status_field "$APPLY_DIR/status-before-apply.json" scaling_apply_status applicable
+assert_status_field "$APPLY_DIR/status-before-apply.json" epoch_cycle_state recommendation_ready
 echo "PASS: epoch 1 persisted an applicable grow recommendation"
 
 info "Dry-running latest scaling recommendation"
@@ -100,6 +102,7 @@ grep -q "global_table_height=256->512" "$APPLY_DIR/dry-run-output.log" || die "d
 status_json coordinator "$COORDINATOR_ADDR" >"$APPLY_DIR/status-after-dry-run.json"
 assert_status_field "$APPLY_DIR/status-after-dry-run.json" current_shard_count 1
 assert_status_field "$APPLY_DIR/status-after-dry-run.json" global_table_height 256
+assert_status_field "$APPLY_DIR/status-after-dry-run.json" epoch_cycle_state recommendation_ready
 echo "PASS: dry-run validates the proposal without changing the active shard config"
 
 info "Applying latest scaling recommendation"
@@ -111,6 +114,7 @@ grep -q "global_table_height=256->512" "$APPLY_DIR/apply-output.log" || die "app
 status_json coordinator "$COORDINATOR_ADDR" >"$APPLY_DIR/status-after-apply.json"
 assert_status_field "$APPLY_DIR/status-after-apply.json" current_shard_count 2
 assert_status_field "$APPLY_DIR/status-after-apply.json" global_table_height 512
+assert_status_field "$APPLY_DIR/status-after-apply.json" epoch_cycle_state scaling_applied
 echo "PASS: manual apply updated the active shard config to two shards"
 
 info "Starting epoch 2 after scaling apply"
@@ -123,6 +127,7 @@ fi
 wait_for_status_state coordinator "$COORDINATOR_ADDR" active 10 >/dev/null || die "epoch 2 did not become active"
 status_json coordinator "$COORDINATOR_ADDR" >"$APPLY_DIR/status-epoch2-active.json"
 assert_status_field "$APPLY_DIR/status-epoch2-active.json" current_shard_count 2
+assert_status_field "$APPLY_DIR/status-epoch2-active.json" epoch_cycle_state active
 
 run_client -coordinator "$COORDINATOR_ADDR" -x 7 -y 0 -payload epoch2-row0 -log "$EPOCH2_ROW0_LOG"
 run_client -coordinator "$COORDINATOR_ADDR" -x 8 -y 256 -payload epoch2-row256 -log "$EPOCH2_ROW256_LOG"

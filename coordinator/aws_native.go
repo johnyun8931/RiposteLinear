@@ -5,12 +5,13 @@ import (
 )
 
 var (
-	errLeaseHeld      = controlstore.ErrLeaseHeld
-	errLeaseNotHeld   = controlstore.ErrLeaseNotHeld
-	errStaleFence     = controlstore.ErrStaleFence
-	errEpochMismatch  = controlstore.ErrEpochMismatch
-	errSessionExists  = controlstore.ErrSessionExists
-	errSessionMissing = controlstore.ErrSessionMissing
+	errLeaseHeld            = controlstore.ErrLeaseHeld
+	errLeaseNotHeld         = controlstore.ErrLeaseNotHeld
+	errStaleFence           = controlstore.ErrStaleFence
+	errEpochMismatch        = controlstore.ErrEpochMismatch
+	errEpochCycleTransition = controlstore.ErrEpochCycleTransition
+	errSessionExists        = controlstore.ErrSessionExists
+	errSessionMissing       = controlstore.ErrSessionMissing
 )
 
 type CoordinatorLease = controlstore.CoordinatorLease
@@ -19,6 +20,7 @@ type ShardConfigRecord = controlstore.ShardConfigRecord
 type ShardConfig = controlstore.ShardConfig
 type PairConfig = controlstore.PairConfig
 type ScalingRecommendationRecord = controlstore.ScalingRecommendationRecord
+type EpochCycleRecord = controlstore.EpochCycleRecord
 type IngestionMessage = controlstore.IngestionMessage
 type QueuedIngestionMessage = controlstore.QueuedIngestionMessage
 type IngestionQueue = controlstore.IngestionQueue

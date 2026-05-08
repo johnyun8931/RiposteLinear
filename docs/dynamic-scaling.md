@@ -47,10 +47,23 @@ the authoritative shard topology:
 ```text
 pk = scaling#epoch#<epoch_id>
 pk = scaling#latest
+pk = epoch-cycle
 ```
 
 These records are proposals only. They do not update `pk="shard-config"`, do
 not provision new shard machines, and do not change routing.
+
+`pk="epoch-cycle"` records the inter-epoch milestone for operators and the
+autoscaler. The normal path is:
+
+```text
+idle -> active -> recommendation_ready -> scaling_applied|scaling_skipped
+```
+
+`StartEpoch` is the gate for opening the next epoch. It accepts the first epoch
+from `idle`, and later accepts only a settled previous outcome such as
+`scaling_applied` or `scaling_skipped`. This keeps the durable state tied to
+real milestones instead of advancing through synthetic workflow states.
 
 The manual apply path promotes a valid `scaling#latest` proposal into
 `pk="shard-config"` only when no epoch is active or accepting:
@@ -89,13 +102,16 @@ apply the recommendation through `ApplyScalingRecommendation`.
 
 Current apply ownership is:
 
-1. The autoscaler reads `scaling#latest`, `shard-config`, and `epoch`.
-2. The autoscaler skips missing, stale, `keep`, active, or accepting cases.
-3. The autoscaler calls coordinator `ApplyScalingRecommendation(DryRun=true)`.
-4. If dry-run is applicable and `-apply` is set, the autoscaler calls
+1. The autoscaler waits for `epoch-cycle = recommendation_ready`.
+2. The autoscaler reads `scaling#latest`, `shard-config`, and `epoch`.
+3. The autoscaler skips missing, stale, `keep`, active, or accepting cases and
+   records `scaling_skipped` when running with `-apply`.
+4. The autoscaler calls coordinator `ApplyScalingRecommendation(DryRun=true)`.
+5. If dry-run is applicable and `-apply` is set, the autoscaler records
+   `scaling_in_progress` and calls
    `ApplyScalingRecommendation(DryRun=false)`.
-5. The coordinator verifies it still holds the lease, repeats the safety checks,
-   and performs the `pk="shard-config"` write.
+6. The coordinator verifies it still holds the lease, repeats the safety checks,
+   writes `pk="shard-config"`, and records `scaling_applied`.
 
 This duplication of checks is intentional. The autoscaler check is a cheap
 preflight and log signal. The coordinator check is the authoritative guard
@@ -129,6 +145,11 @@ script/phase3-local-apply-scaling.sh
 That flow starts two shard pairs as endpoint inventory, seeds one active shard,
 generates a real `grow` recommendation, applies it manually, and verifies the
 next epoch routes global row `256` to shard 1.
+
+A later timer-driven scheduler should sit above these milestones. It can start
+an epoch for a configured duration, wait for the epoch timer to elapse, poll for
+`recommendation_ready` with backoff, run the autoscaler, then start the next
+epoch only after `scaling_applied` or `scaling_skipped`.
 
 ## Initial Policy Shape
 

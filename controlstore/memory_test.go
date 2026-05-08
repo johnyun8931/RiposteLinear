@@ -189,6 +189,55 @@ func TestMemoryControlStoreScalingRecommendation(t *testing.T) {
 	}
 }
 
+func TestMemoryControlStoreEpochCycleTransitions(t *testing.T) {
+	store := NewMemoryControlStore(1)
+	if _, ok, err := store.GetEpochCycle(); err != nil || ok {
+		t.Fatalf("expected no initial epoch cycle, ok=%t err=%v", ok, err)
+	}
+
+	if err := store.PutEpochCycleTransition(EpochCycleStateIdle, EpochCycleStateActive, EpochCycleRecord{
+		EpochID:            1,
+		ShardConfigVersion: 1,
+		Reason:             "started",
+	}); err != nil {
+		t.Fatalf("idle -> active failed: %v", err)
+	}
+	cycle, ok, err := store.GetEpochCycle()
+	if err != nil || !ok || cycle.State != EpochCycleStateActive || cycle.EpochID != 1 || cycle.Reason != "started" {
+		t.Fatalf("unexpected active cycle ok=%t err=%v cycle=%+v", ok, err, cycle)
+	}
+
+	if err := store.PutEpochCycleTransition(EpochCycleStateIdle, EpochCycleStateActive, EpochCycleRecord{EpochID: 2}); !errors.Is(err, errEpochCycleTransition) {
+		t.Fatalf("expected stale transition to fail, got %v", err)
+	}
+	if err := store.PutEpochCycleTransition(EpochCycleStateActive, EpochCycleStateReadyForNextEpoch, EpochCycleRecord{EpochID: 1}); !errors.Is(err, errEpochCycleTransition) {
+		t.Fatalf("expected invalid transition to fail, got %v", err)
+	}
+
+	transitions := []struct {
+		from string
+		to   string
+	}{
+		{EpochCycleStateActive, EpochCycleStateRecommendationReady},
+		{EpochCycleStateRecommendationReady, EpochCycleStateScalingInProgress},
+		{EpochCycleStateScalingInProgress, EpochCycleStateScalingApplied},
+	}
+	for _, transition := range transitions {
+		if err := store.PutEpochCycleTransition(transition.from, transition.to, EpochCycleRecord{
+			EpochID:                      1,
+			ShardConfigVersion:           1,
+			ScalingRecommendationEpochID: 1,
+			Reason:                       transition.to,
+		}); err != nil {
+			t.Fatalf("%s -> %s failed: %v", transition.from, transition.to, err)
+		}
+	}
+	cycle, ok, err = store.GetEpochCycle()
+	if err != nil || !ok || cycle.State != EpochCycleStateScalingApplied {
+		t.Fatalf("expected applied cycle ok=%t err=%v cycle=%+v", ok, err, cycle)
+	}
+}
+
 func TestMemoryIngestionQueueEnqueueReceiveAck(t *testing.T) {
 	queue := newMemoryIngestionQueue()
 	ctx := context.Background()

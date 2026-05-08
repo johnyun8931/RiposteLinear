@@ -609,6 +609,82 @@ func (s *DynamoDBStore) putScalingRecommendationAtKey(pk string, record ScalingR
 	return err
 }
 
+func epochCycleFromItem(item map[string]ddbtypes.AttributeValue) EpochCycleRecord {
+	return EpochCycleRecord{
+		State:                        stringAttr(item, "cycle_state"),
+		EpochID:                      int64Attr(item, "epoch_id"),
+		ShardConfigVersion:           int64Attr(item, "shard_config_version"),
+		ScalingRecommendationEpochID: int64Attr(item, "scaling_recommendation_epoch_id"),
+		Reason:                       stringAttr(item, "reason"),
+		CreatedAt:                    time.UnixMilli(int64Attr(item, "created_unix_ms")).UTC(),
+		UpdatedAt:                    time.UnixMilli(int64Attr(item, "updated_unix_ms")).UTC(),
+	}
+}
+
+func epochCycleToAttributes(record EpochCycleRecord) map[string]ddbtypes.AttributeValue {
+	return map[string]ddbtypes.AttributeValue{
+		":cycle_state":                     &ddbtypes.AttributeValueMemberS{Value: record.State},
+		":epoch_id":                        numberAttr(record.EpochID),
+		":shard_config_version":            numberAttr(record.ShardConfigVersion),
+		":scaling_recommendation_epoch_id": numberAttr(record.ScalingRecommendationEpochID),
+		":reason":                          &ddbtypes.AttributeValueMemberS{Value: record.Reason},
+		":created_unix_ms":                 numberAttr(record.CreatedAt.UnixMilli()),
+		":updated_unix_ms":                 numberAttr(record.UpdatedAt.UnixMilli()),
+	}
+}
+
+func (s *DynamoDBStore) GetEpochCycle() (EpochCycleRecord, bool, error) {
+	item, ok, err := s.getItem(dynamoControlEpochCyclePK)
+	if err != nil || !ok {
+		return EpochCycleRecord{}, false, err
+	}
+	return epochCycleFromItem(item), true, nil
+}
+
+func (s *DynamoDBStore) PutEpochCycleTransition(from string, to string, update EpochCycleRecord) error {
+	from = normalizeEpochCycleState(from)
+	current, ok, err := s.GetEpochCycle()
+	if err != nil {
+		return err
+	}
+	currentState := EpochCycleStateIdle
+	if ok {
+		currentState = current.State
+	}
+	if currentState != from {
+		return fmt.Errorf("%w: current state %s, expected %s", errEpochCycleTransition, currentState, from)
+	}
+	record, err := prepareEpochCycleRecord(from, to, update, current, ok)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := s.operationContext()
+	defer cancel()
+	condition := "#cycle_state = :from_state"
+	if !ok {
+		condition = "attribute_not_exists(pk)"
+	}
+	values := epochCycleToAttributes(record)
+	if ok {
+		values[":from_state"] = &ddbtypes.AttributeValueMemberS{Value: from}
+	}
+	_, err = s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           aws.String(s.table),
+		Key:                 dynamoKey(dynamoControlEpochCyclePK),
+		UpdateExpression:    aws.String("SET #cycle_state = :cycle_state, epoch_id = :epoch_id, shard_config_version = :shard_config_version, scaling_recommendation_epoch_id = :scaling_recommendation_epoch_id, reason = :reason, created_unix_ms = :created_unix_ms, updated_unix_ms = :updated_unix_ms"),
+		ConditionExpression: aws.String(condition),
+		ExpressionAttributeNames: map[string]string{
+			"#cycle_state": "cycle_state",
+		},
+		ExpressionAttributeValues: values,
+	})
+	if err != nil && isConditionalCheckFailed(err) {
+		return errEpochCycleTransition
+	}
+	return err
+}
+
 func DynamoDBStoreConfigError(name string) error {
 	return fmt.Errorf("%s is required for dynamodb store", name)
 }

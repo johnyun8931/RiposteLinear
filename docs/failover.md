@@ -88,6 +88,8 @@ The DynamoDB table uses a single string partition key named `pk`:
 - `pk="scaling#epoch#<epoch_id>"` and `pk="scaling#latest"` store completed
   epoch scaling recommendations. These are proposals until an operator applies
   the latest applicable recommendation between epochs.
+- `pk="epoch-cycle"` stores the current inter-epoch milestone, such as
+  `active`, `recommendation_ready`, `scaling_applied`, or `scaling_skipped`.
 
 The `pk="epoch"` record also stores `shard_config_version` and
 `shard_config_key`, where the key points at the epoch-bound shard-config
@@ -118,6 +120,12 @@ That boundary keeps one authoritative topology writer:
 - The coordinator, guarded by the lease, writes epoch/control/topology state.
 - The autoscaler observes and requests apply.
 - Shard servers process assigned local tables and do not mutate topology.
+
+The epoch-cycle record is not a full workflow engine. It records durable
+milestones and gates the next `StartEpoch`: after the first epoch, a new epoch
+should start only after the previous recommendation reached `scaling_applied` or
+`scaling_skipped`. A later timer-driven scheduler can use those milestones to
+run repeated epochs without local operator scripts.
 
 A later design could make the autoscaler the direct topology writer, but only if
 the lease/fencing and topology mutation rules move into a shared owner so the

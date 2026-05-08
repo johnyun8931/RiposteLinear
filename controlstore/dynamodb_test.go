@@ -122,6 +122,20 @@ func scalingRecommendationItem(record ScalingRecommendationRecord) map[string]dd
 	}
 }
 
+func epochCycleItem(record EpochCycleRecord) map[string]ddbtypes.AttributeValue {
+	values := epochCycleToAttributes(record)
+	return map[string]ddbtypes.AttributeValue{
+		dynamoControlPKName:               &ddbtypes.AttributeValueMemberS{Value: dynamoControlEpochCyclePK},
+		"cycle_state":                     values[":cycle_state"],
+		"epoch_id":                        values[":epoch_id"],
+		"shard_config_version":            values[":shard_config_version"],
+		"scaling_recommendation_epoch_id": values[":scaling_recommendation_epoch_id"],
+		"reason":                          values[":reason"],
+		"created_unix_ms":                 values[":created_unix_ms"],
+		"updated_unix_ms":                 values[":updated_unix_ms"],
+	}
+}
+
 func TestDynamoDBControlStoreAcquireLeaseUsesConditionalUpdate(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
 	fake := &fakeDynamoDBControlClient{
@@ -268,6 +282,105 @@ func TestDynamoDBControlStoreEpochOperations(t *testing.T) {
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
 	}, 4)); err != nil {
 		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+}
+
+func TestDynamoDBControlStoreEpochCycleTransitionUsesConditionalUpdate(t *testing.T) {
+	now := time.Unix(5000, 0).UTC()
+	existing := EpochCycleRecord{
+		State:              EpochCycleStateRecommendationReady,
+		EpochID:            7,
+		ShardConfigVersion: 3,
+		CreatedAt:          now.Add(-time.Minute),
+		UpdatedAt:          now.Add(-time.Minute),
+	}
+	fake := &fakeDynamoDBControlClient{
+		getItem: func(input *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{Item: epochCycleItem(existing)}, nil
+		},
+		updateItem: func(input *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			if input.ConditionExpression == nil || !strings.Contains(aws.ToString(input.ConditionExpression), "#cycle_state = :from_state") {
+				t.Fatalf("expected cycle transition condition, got %v", aws.ToString(input.ConditionExpression))
+			}
+			from, ok := input.ExpressionAttributeValues[":from_state"].(*ddbtypes.AttributeValueMemberS)
+			if !ok || from.Value != EpochCycleStateRecommendationReady {
+				t.Fatalf("expected from recommendation_ready, got %#v", input.ExpressionAttributeValues[":from_state"])
+			}
+			to, ok := input.ExpressionAttributeValues[":cycle_state"].(*ddbtypes.AttributeValueMemberS)
+			if !ok || to.Value != EpochCycleStateScalingInProgress {
+				t.Fatalf("expected to scaling_in_progress, got %#v", input.ExpressionAttributeValues[":cycle_state"])
+			}
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	}
+	store, err := NewDynamoDBStore(fake, "control")
+	if err != nil {
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
+	}
+
+	if err := store.PutEpochCycleTransition(EpochCycleStateRecommendationReady, EpochCycleStateScalingInProgress, EpochCycleRecord{
+		EpochID:                      7,
+		ShardConfigVersion:           3,
+		ScalingRecommendationEpochID: 7,
+		Reason:                       "apply",
+	}); err != nil {
+		t.Fatalf("PutEpochCycleTransition failed: %v", err)
+	}
+}
+
+func TestDynamoDBControlStoreEpochCycleInitialTransitionOmitsUnusedFromState(t *testing.T) {
+	fake := &fakeDynamoDBControlClient{
+		getItem: func(input *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{}, nil
+		},
+		updateItem: func(input *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			if input.ConditionExpression == nil || aws.ToString(input.ConditionExpression) != "attribute_not_exists(pk)" {
+				t.Fatalf("expected initial cycle condition, got %v", aws.ToString(input.ConditionExpression))
+			}
+			if _, ok := input.ExpressionAttributeValues[":from_state"]; ok {
+				t.Fatalf("initial transition should not include unused :from_state")
+			}
+			to, ok := input.ExpressionAttributeValues[":cycle_state"].(*ddbtypes.AttributeValueMemberS)
+			if !ok || to.Value != EpochCycleStateActive {
+				t.Fatalf("expected to active, got %#v", input.ExpressionAttributeValues[":cycle_state"])
+			}
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	}
+	store, err := NewDynamoDBStore(fake, "control")
+	if err != nil {
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
+	}
+
+	if err := store.PutEpochCycleTransition(EpochCycleStateIdle, EpochCycleStateActive, EpochCycleRecord{
+		EpochID:            8,
+		ShardConfigVersion: 4,
+		Reason:             "started",
+	}); err != nil {
+		t.Fatalf("PutEpochCycleTransition failed: %v", err)
+	}
+}
+
+func TestDynamoDBControlStoreEpochCycleRejectsStaleTransition(t *testing.T) {
+	existing := EpochCycleRecord{
+		State:     EpochCycleStateScalingInProgress,
+		EpochID:   7,
+		CreatedAt: time.Unix(5000, 0).UTC(),
+		UpdatedAt: time.Unix(5000, 0).UTC(),
+	}
+	fake := &fakeDynamoDBControlClient{
+		getItem: func(input *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{Item: epochCycleItem(existing)}, nil
+		},
+	}
+	store, err := NewDynamoDBStore(fake, "control")
+	if err != nil {
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
+	}
+
+	err = store.PutEpochCycleTransition(EpochCycleStateRecommendationReady, EpochCycleStateScalingInProgress, EpochCycleRecord{EpochID: 7})
+	if !errors.Is(err, errEpochCycleTransition) {
+		t.Fatalf("expected epoch cycle transition error, got %v", err)
 	}
 }
 
