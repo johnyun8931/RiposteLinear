@@ -34,6 +34,8 @@ DYNAMODB_SESSION_REGION="${DYNAMODB_SESSION_REGION:-}"
 COORDINATOR_IAM_POLICY_NAME="${COORDINATOR_IAM_POLICY_NAME:-RiposteDynamoDBControlStore}"
 COORDINATOR_LEASE_TTL_SECONDS="${COORDINATOR_LEASE_TTL_SECONDS:-30}"
 COORDINATOR_LEASE_RENEW_SECONDS="${COORDINATOR_LEASE_RENEW_SECONDS:-10}"
+COORDINATOR_INITIAL_ACTIVE_SHARDS="${COORDINATOR_INITIAL_ACTIVE_SHARDS:-0}"
+COORDINATOR_EXTRA_ARGS="${COORDINATOR_EXTRA_ARGS:-}"
 PUBLIC_ENTRY_BACKEND="${PUBLIC_ENTRY_BACKEND:-none}"
 PUBLIC_ENTRY_MULTI_COORDINATOR="${PUBLIC_ENTRY_MULTI_COORDINATOR:-0}"
 
@@ -611,18 +613,22 @@ start_remote_coordinator() {
   local lease_renew="${6:-$COORDINATOR_LEASE_RENEW_SECONDS}"
   local pid_path="${7:-}"
   local standby="${8:-0}"
-  local control_args session_args mkdir_cmd
+  local control_args session_args seed_args mkdir_cmd
   control_args="$(coordinator_control_store_args "$holder" "$lease_ttl" "$lease_renew")"
   session_args="$(coordinator_session_store_args)"
+  seed_args=""
+  if [[ "$COORDINATOR_INITIAL_ACTIVE_SHARDS" != "0" ]]; then
+    seed_args=" -initial-active-shards '$COORDINATOR_INITIAL_ACTIVE_SHARDS'"
+  fi
   if [[ "$standby" == "1" || "$standby" == "true" ]]; then
     control_args="$control_args -standby"
   fi
   mkdir_cmd="mkdir -p '$(dirname "$log_path")'"
   if [[ -n "$pid_path" ]]; then
     mkdir_cmd="$mkdir_cmd '$(dirname "$pid_path")'"
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args$session_args > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args$session_args$seed_args $COORDINATOR_EXTRA_ARGS > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
   else
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args$session_args > '${log_path}.nohup' 2>&1 &"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args$session_args$seed_args $COORDINATOR_EXTRA_ARGS > '${log_path}.nohup' 2>&1 &"
   fi
 }
 

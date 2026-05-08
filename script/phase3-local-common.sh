@@ -283,6 +283,13 @@ start_epoch() {
 	printf '%s\n' "$out" | tail -n1
 }
 
+apply_scaling_recommendation() {
+	local addr="$1"
+	local out
+	out="$("$COORDINATOR_BIN" -admin-target "$addr" -apply-scaling-recommendation 2>&1)"
+	printf '%s\n' "$out" | tail -n1
+}
+
 run_client() {
 	"$CLIENT_BIN" "$@"
 }

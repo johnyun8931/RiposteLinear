@@ -92,8 +92,11 @@ func shardConfigFingerprint(config ShardConfigRecord) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func ensureShardConfig(controlStore ControlStore, shards []ShardConfig, canWrite bool) (ShardConfigRecord, error) {
-	desired := shardConfigRecordFromShards(shards, 1)
+func ensureShardConfig(controlStore ControlStore, inventory []ShardConfig, seed []ShardConfig, canWrite bool) (ShardConfigRecord, error) {
+	if len(seed) == 0 {
+		seed = inventory
+	}
+	desired := shardConfigRecordFromShards(seed, 1)
 	existing, ok, err := controlStore.GetShardConfig()
 	if err != nil {
 		return ShardConfigRecord{}, err
@@ -107,10 +110,21 @@ func ensureShardConfig(controlStore ControlStore, shards []ShardConfig, canWrite
 		}
 		return desired, nil
 	}
-	if err := validateShardInventoryContainsConfig(shards, existing); err != nil {
+	if err := validateShardInventoryContainsConfig(inventory, existing); err != nil {
 		return ShardConfigRecord{}, err
 	}
 	return existing, nil
+}
+
+func initialShardConfigSeed(inventory []ShardConfig, initialActiveShards int) ([]ShardConfig, error) {
+	if initialActiveShards == 0 {
+		return append([]ShardConfig(nil), inventory...), nil
+	}
+	record, err := buildShardConfigFromInventory(inventory, initialActiveShards, 1)
+	if err != nil {
+		return nil, err
+	}
+	return record.Shards, nil
 }
 
 func currentShardConfigVersion(controlStore ControlStore) int64 {

@@ -36,6 +36,7 @@ var flagCoordinatorID = flag.String("coordinator-id", "", "Coordinator lease hol
 var flagLeaseTTLSeconds = flag.Int64("lease-ttl-seconds", int64(defaultCoordinatorLeaseTTL/time.Second), "Coordinator lease TTL in seconds")
 var flagLeaseRenewSeconds = flag.Int64("lease-renew-seconds", int64(defaultCoordinatorLeaseRenewInterval/time.Second), "Coordinator lease renewal interval in seconds")
 var flagStandby = flag.Bool("standby", false, "If set, stay alive as passive standby when another coordinator holds the lease")
+var flagInitialActiveShards = flag.Int("initial-active-shards", 0, "Initial active shard count to seed when control-store shard config is missing; 0 uses all configured shards")
 var flagScalingMinShards = flag.Int("scaling-min-shards", 0, "Minimum shard count for scaling recommendations; defaults to current shard count")
 var flagScalingMaxShards = flag.Int("scaling-max-shards", 0, "Maximum shard count for scaling recommendations; defaults to current shard count")
 var flagScalingTargetRowsPerShard = flag.Int("scaling-target-rows-per-shard", db.TABLE_HEIGHT, "Target logical rows per shard for scaling recommendations")
@@ -102,7 +103,7 @@ func main() {
 		MaxShardMultiplier:        *flagScalingMaxShardMultiplier,
 	}
 
-	coord, err := newCoordinatorWithStandbyAndScalingConfig(
+	coord, err := newCoordinatorWithStandbyScalingAndSeedConfig(
 		shards,
 		nil,
 		controlStore,
@@ -113,6 +114,7 @@ func main() {
 		leaseRenewInterval,
 		*flagStandby,
 		scalingConfig,
+		*flagInitialActiveShards,
 	)
 	if err != nil {
 		log.Fatal(err)

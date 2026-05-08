@@ -333,6 +333,22 @@ func newCoordinatorWithStandbyAndScalingConfig(
 	standby bool,
 	scalingConfig ScalingPolicyConfig,
 ) (*Coordinator, error) {
+	return newCoordinatorWithStandbyScalingAndSeedConfig(shards, clients, controlStore, sessionStore, sessionStoreBackend, leaseHolder, leaseTTL, leaseRenewInterval, standby, scalingConfig, 0)
+}
+
+func newCoordinatorWithStandbyScalingAndSeedConfig(
+	shards []ShardConfig,
+	clients map[int]shardClient,
+	controlStore ControlStore,
+	sessionStore SessionStore,
+	sessionStoreBackend string,
+	leaseHolder string,
+	leaseTTL time.Duration,
+	leaseRenewInterval time.Duration,
+	standby bool,
+	scalingConfig ScalingPolicyConfig,
+	initialActiveShards int,
+) (*Coordinator, error) {
 	if controlStore == nil {
 		return nil, errors.New("control store is required")
 	}
@@ -359,7 +375,11 @@ func newCoordinatorWithStandbyAndScalingConfig(
 	if err != nil {
 		role = coordinatorRolePassive
 	}
-	activeConfig, err := ensureShardConfig(controlStore, validated, role == coordinatorRoleActive)
+	seed, err := initialShardConfigSeed(validated, initialActiveShards)
+	if err != nil {
+		return nil, err
+	}
+	activeConfig, err := ensureShardConfig(controlStore, validated, seed, role == coordinatorRoleActive)
 	if err != nil {
 		return nil, err
 	}

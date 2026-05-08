@@ -293,6 +293,19 @@ to B while A still owns the lease, verifies B can route uploads through the
 shared session store, then stops A and verifies B promotes and handles a new
 epoch.
 
+To validate manual scaling recommendation apply:
+
+```bash
+CONTROL_STORE_BACKEND=dynamodb SESSION_STORE_BACKEND=dynamodb \
+./aws-eval/10-validate-scaling-apply.sh
+```
+
+This seeds `pk="shard-config"` with one active shard while keeping both shard
+endpoints configured, generates a real `grow` recommendation, applies it with
+`-apply-scaling-recommendation`, and verifies the next epoch routes global row
+`256` to shard 1. Artifacts are written under
+`aws-eval/.state/scaling-apply/`.
+
 ### 5. Benchmark
 
 ```bash

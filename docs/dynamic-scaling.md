@@ -66,6 +66,16 @@ inventory; they are inactive until a manually applied shard config includes
 them. Upload routing and epoch start use the active `pk="shard-config"` record,
 not every endpoint listed on the command line.
 
+Local validation is available with:
+
+```bash
+script/phase3-local-apply-scaling.sh
+```
+
+That flow starts two shard pairs as endpoint inventory, seeds one active shard,
+generates a real `grow` recommendation, applies it manually, and verifies the
+next epoch routes global row `256` to shard 1.
+
 ## Initial Policy Shape
 
 Use hysteresis so shard count does not flap between epochs:
