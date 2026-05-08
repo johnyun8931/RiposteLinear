@@ -471,12 +471,12 @@ func (c *Coordinator) cachedOrStoredSession(globalUUID int64) (SessionRecord, er
 }
 
 func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
+	if err := c.requireCoordinatorLease(); err != nil {
+		return coordinatorWireError(errCoordinatorNotActive)
+	}
 	decision := c.upload1Decision()
 	if decision.err != nil {
 		return coordinatorWireError(decision.err)
-	}
-	if err := c.requireCoordinatorLease(); err != nil {
-		return coordinatorWireError(errCoordinatorNoActiveEpoch)
 	}
 	accepting, err := decision.controlStore.Accepting(decision.epoch.ID)
 	if err != nil || !accepting {
@@ -559,7 +559,7 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 
 func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) error {
 	if err := c.requireCoordinatorLease(); err != nil {
-		return coordinatorWireError(errCoordinatorNoActiveEpoch)
+		return coordinatorWireError(errCoordinatorNotActive)
 	}
 	session, err := c.cachedOrStoredSession(args.Uuid)
 	if err != nil || session.HashKey != args.HashKey {
@@ -577,7 +577,7 @@ func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) erro
 
 func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error {
 	if err := c.requireCoordinatorLease(); err != nil {
-		return coordinatorWireError(errCoordinatorNoActiveEpoch)
+		return coordinatorWireError(errCoordinatorNotActive)
 	}
 	session, err := c.cachedOrStoredSession(args.Uuid)
 	if err != nil || session.HashKey != args.HashKey {
@@ -615,7 +615,7 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 		return coordinatorWireError(errCoordinatorInvalidEpochDuration)
 	}
 	if err := c.requireCoordinatorLease(); err != nil {
-		return err
+		return coordinatorWireError(errCoordinatorNotActive)
 	}
 
 	decision := c.startEpochDecision(args)
@@ -653,7 +653,7 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 
 	if err := c.requireCoordinatorLease(); err != nil {
 		c.abortStarted(started, decision.nextEpochID)
-		return err
+		return coordinatorWireError(errCoordinatorNotActive)
 	}
 
 	epoch := db.EpochMeta{

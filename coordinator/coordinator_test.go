@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -448,8 +447,30 @@ func TestCoordinatorRejectsWritesWithoutActiveEpoch(t *testing.T) {
 	}, map[int]shardClient{0: &fakeShardClient{}})
 
 	err := coord.Upload1(&db.UploadArgs1{RouteRow: 0}, &db.UploadReply1{})
-	if err == nil || err.Error() != "No active epoch" {
+	if err == nil || err.Error() != coordinatorWireNoActiveEpoch {
 		t.Fatalf("expected no active epoch error, got %v", err)
+	}
+}
+
+func TestCoordinatorUpload2AndUpload3RejectBadSession(t *testing.T) {
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}})
+	setCoordinatorActiveEpoch(t, coord, db.EpochMeta{
+		ID:              1,
+		State:           db.EpochStateActive,
+		StartTime:       time.Now().UTC(),
+		EndTime:         time.Now().UTC().Add(time.Minute),
+		DurationSeconds: 60,
+	})
+
+	err := coord.Upload2(&db.UploadArgs2{Uuid: 12345}, &db.UploadReply2{})
+	if err == nil || err.Error() != coordinatorWireBogusUUID {
+		t.Fatalf("expected bogus uuid from Upload2, got %v", err)
+	}
+	err = coord.Upload3(&db.UploadArgs3{Uuid: 12345}, &db.UploadReply3{})
+	if err == nil || err.Error() != coordinatorWireBogusUUID {
+		t.Fatalf("expected bogus uuid from Upload3, got %v", err)
 	}
 }
 
@@ -518,19 +539,28 @@ func TestPassiveCoordinatorRejectsMutations(t *testing.T) {
 	}, map[int]shardClient{0: fakeClient}, store, "coord-b", testLeaseTTL, testLeaseRenewInterval)
 
 	err := standby.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60}, &db.StartEpochReply{})
-	if err == nil || !strings.Contains(err.Error(), "coordinator lease unavailable") {
-		t.Fatalf("expected coordinator lease error, got %v", err)
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active error, got %v", err)
 	}
 	if fakeClient.startCalls != 0 {
 		t.Fatalf("expected passive coordinator not to contact shard, got %d calls", fakeClient.startCalls)
 	}
 
 	err = standby.Upload1(&db.UploadArgs1{RouteRow: 0}, &db.UploadReply1{})
-	if err == nil || err.Error() != "No active epoch" {
-		t.Fatalf("expected no active epoch error, got %v", err)
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active error, got %v", err)
 	}
 	if fakeClient.upload1Calls != 0 {
 		t.Fatalf("expected passive Upload1 not to reach shard, got %d calls", fakeClient.upload1Calls)
+	}
+
+	err = standby.Upload2(&db.UploadArgs2{Uuid: 12345}, &db.UploadReply2{})
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active from Upload2, got %v", err)
+	}
+	err = standby.Upload3(&db.UploadArgs3{Uuid: 12345}, &db.UploadReply3{})
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active from Upload3, got %v", err)
 	}
 }
 
@@ -700,8 +730,8 @@ func TestCoordinatorStartEpochFailsWithStaleLease(t *testing.T) {
 	stealCoordinatorLease(t, store, "coord-b")
 
 	err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{})
-	if err == nil || !strings.Contains(err.Error(), "coordinator lease unavailable") {
-		t.Fatalf("expected coordinator lease error, got %v", err)
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active error, got %v", err)
 	}
 	if client.startCalls != 0 {
 		t.Fatalf("expected stale coordinator not to contact shard, got %d StartEpoch calls", client.startCalls)
@@ -927,7 +957,7 @@ func TestCoordinatorUpload1RejectsWhenControlStoreNotAccepting(t *testing.T) {
 	}
 
 	err := coord.Upload1(&db.UploadArgs1{RouteRow: 0}, &db.UploadReply1{})
-	if err == nil || err.Error() != "No active epoch" {
+	if err == nil || err.Error() != coordinatorWireNoActiveEpoch {
 		t.Fatalf("expected no active epoch error, got %v", err)
 	}
 	if fakeClient.upload1Calls != 0 {
@@ -946,11 +976,20 @@ func TestCoordinatorUpload1RejectsWithStaleLease(t *testing.T) {
 	stealCoordinatorLease(t, store, "coord-b")
 
 	err := coord.Upload1(&db.UploadArgs1{RouteRow: 0}, &db.UploadReply1{})
-	if err == nil || err.Error() != "No active epoch" {
-		t.Fatalf("expected no active epoch error, got %v", err)
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active error, got %v", err)
 	}
 	if fakeClient.upload1Calls != 0 {
 		t.Fatalf("expected Upload1 not to reach shard with stale lease, got %d calls", fakeClient.upload1Calls)
+	}
+
+	err = coord.Upload2(&db.UploadArgs2{Uuid: 12345}, &db.UploadReply2{})
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active from Upload2, got %v", err)
+	}
+	err = coord.Upload3(&db.UploadArgs3{Uuid: 12345}, &db.UploadReply3{})
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active from Upload3, got %v", err)
 	}
 }
 

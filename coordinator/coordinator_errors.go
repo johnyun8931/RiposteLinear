@@ -4,6 +4,7 @@ import "errors"
 
 const (
 	coordinatorWireNoActiveEpoch         = "No active epoch"
+	coordinatorWireNotActive             = "Coordinator not active"
 	coordinatorWireBogusUUID             = "Bogus UUID"
 	coordinatorWireEpochAlreadyActive    = "An epoch is already in progress"
 	coordinatorWireInvalidEpochDuration  = "Epoch duration must be positive"
@@ -13,6 +14,7 @@ const (
 
 var (
 	errCoordinatorNoActiveEpoch         = errors.New("coordinator no active epoch")
+	errCoordinatorNotActive             = errors.New("coordinator not active")
 	errCoordinatorBogusUUID             = errors.New("coordinator bogus uuid")
 	errCoordinatorEpochAlreadyActive    = errors.New("coordinator epoch already active")
 	errCoordinatorInvalidEpochDuration  = errors.New("coordinator invalid epoch duration")
@@ -27,6 +29,8 @@ func coordinatorWireError(err error) error {
 	switch {
 	case errors.Is(err, errCoordinatorNoActiveEpoch):
 		return errors.New(coordinatorWireNoActiveEpoch)
+	case errors.Is(err, errCoordinatorNotActive):
+		return errors.New(coordinatorWireNotActive)
 	case errors.Is(err, errCoordinatorBogusUUID):
 		return errors.New(coordinatorWireBogusUUID)
 	case errors.Is(err, errCoordinatorEpochAlreadyActive):
