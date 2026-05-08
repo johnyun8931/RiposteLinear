@@ -406,6 +406,18 @@ func (t *Server) recordIngestionAck() {
 	t.ingestionDiagnostics.ackCount++
 }
 
+func (t *Server) recordCompletedUploadCommitted() {
+	t.ingestionDiagnostics.mu.Lock()
+	defer t.ingestionDiagnostics.mu.Unlock()
+	t.ingestionDiagnostics.committedCount++
+}
+
+func (t *Server) recordCompletedUploadDuplicateSkip() {
+	t.ingestionDiagnostics.mu.Lock()
+	defer t.ingestionDiagnostics.mu.Unlock()
+	t.ingestionDiagnostics.duplicateSkipCount++
+}
+
 func (t *Server) recordIngestionError(kind string, err error) {
 	t.ingestionDiagnostics.mu.Lock()
 	defer t.ingestionDiagnostics.mu.Unlock()
@@ -421,17 +433,36 @@ func (t *Server) recordIngestionError(kind string, err error) {
 	t.ingestionDiagnostics.lastErrorTime = time.Now().UTC()
 }
 
+func (t *Server) recordCompletedUploadLedgerError(kind string, err error) {
+	t.ingestionDiagnostics.mu.Lock()
+	defer t.ingestionDiagnostics.mu.Unlock()
+	switch kind {
+	case "begin":
+		t.ingestionDiagnostics.ledgerBeginErrorCount++
+	case "complete":
+		t.ingestionDiagnostics.ledgerCompleteErrorCount++
+	}
+	t.ingestionDiagnostics.ledgerLastError = err.Error()
+	t.ingestionDiagnostics.ledgerLastErrorTime = time.Now().UTC()
+}
+
 func (t *Server) ingestionDiagnosticsSnapshot() ingestionDiagnostics {
 	t.ingestionDiagnostics.mu.Lock()
 	defer t.ingestionDiagnostics.mu.Unlock()
 	return ingestionDiagnostics{
-		processedCount:    t.ingestionDiagnostics.processedCount,
-		ackCount:          t.ingestionDiagnostics.ackCount,
-		receiveErrorCount: t.ingestionDiagnostics.receiveErrorCount,
-		processErrorCount: t.ingestionDiagnostics.processErrorCount,
-		ackErrorCount:     t.ingestionDiagnostics.ackErrorCount,
-		lastError:         t.ingestionDiagnostics.lastError,
-		lastErrorTime:     t.ingestionDiagnostics.lastErrorTime,
+		processedCount:           t.ingestionDiagnostics.processedCount,
+		ackCount:                 t.ingestionDiagnostics.ackCount,
+		receiveErrorCount:        t.ingestionDiagnostics.receiveErrorCount,
+		processErrorCount:        t.ingestionDiagnostics.processErrorCount,
+		ackErrorCount:            t.ingestionDiagnostics.ackErrorCount,
+		committedCount:           t.ingestionDiagnostics.committedCount,
+		duplicateSkipCount:       t.ingestionDiagnostics.duplicateSkipCount,
+		ledgerBeginErrorCount:    t.ingestionDiagnostics.ledgerBeginErrorCount,
+		ledgerCompleteErrorCount: t.ingestionDiagnostics.ledgerCompleteErrorCount,
+		lastError:                t.ingestionDiagnostics.lastError,
+		lastErrorTime:            t.ingestionDiagnostics.lastErrorTime,
+		ledgerLastError:          t.ingestionDiagnostics.ledgerLastError,
+		ledgerLastErrorTime:      t.ingestionDiagnostics.ledgerLastErrorTime,
 	}
 }
 
@@ -470,6 +501,25 @@ func (t *Server) processIngestionJob(item QueuedCompletedUploadMessage) {
 	t.amPublishingMutex.RLock()
 	defer t.amPublishingMutex.RUnlock()
 
+	begin, err := t.completedUploadLedger.BeginProcessing(context.Background(), msg, time.Now().UTC(), t.completedUploadProcessingTTL)
+	if err != nil {
+		log.Printf("Error beginning completed upload ledger processing uuid %d: %v", msg.Uuid, err)
+		t.recordCompletedUploadLedgerError("begin", err)
+		return
+	}
+	if begin.AlreadyCommitted {
+		log.Printf("Skipping already committed completed upload uuid %d", msg.Uuid)
+		t.recordCompletedUploadDuplicateSkip()
+		if err := t.ingestionQueue.Ack(context.Background(), item.ReceiptHandle); err != nil {
+			log.Printf("Error acking duplicate committed ingestion uuid %d: %v", msg.Uuid, err)
+			t.recordIngestionError("ack", err)
+			return
+		}
+		t.recordIngestionAck()
+		t.notifyIngestionQueueDrained()
+		return
+	}
+
 	t.clientsServedMutex.Lock()
 	t.clientsServed += 1
 	t.clientsServedMutex.Unlock()
@@ -486,6 +536,12 @@ func (t *Server) processIngestionJob(item QueuedCompletedUploadMessage) {
 		return
 	}
 	t.recordIngestionProcessed()
+	if err := t.completedUploadLedger.CompleteProcessing(context.Background(), begin.Lease, time.Now().UTC()); err != nil {
+		log.Printf("Error completing completed upload ledger processing uuid %d: %v", msg.Uuid, err)
+		t.recordCompletedUploadLedgerError("complete", err)
+		return
+	}
+	t.recordCompletedUploadCommitted()
 	if err := t.ingestionQueue.Ack(context.Background(), item.ReceiptHandle); err != nil {
 		log.Printf("Error acking ingestion uuid %d: %v", msg.Uuid, err)
 		t.recordIngestionError("ack", err)
@@ -846,6 +902,15 @@ func (t *Server) Status(_ *StatusArgs, reply *StatusReply) error {
 	if !diagnostics.lastErrorTime.IsZero() {
 		reply.IngestionLastErrorUnix = diagnostics.lastErrorTime.Unix()
 	}
+	reply.CompletedUploadLedgerBackend = t.completedUploadLedgerBackend
+	reply.CompletedUploadCommittedCount = diagnostics.committedCount
+	reply.CompletedUploadDuplicateSkipCount = diagnostics.duplicateSkipCount
+	reply.CompletedUploadLedgerBeginErrors = diagnostics.ledgerBeginErrorCount
+	reply.CompletedUploadLedgerCompleteErrors = diagnostics.ledgerCompleteErrorCount
+	reply.CompletedUploadLedgerLastError = diagnostics.ledgerLastError
+	if !diagnostics.ledgerLastErrorTime.IsZero() {
+		reply.CompletedUploadLedgerLastErrorUnix = diagnostics.ledgerLastErrorTime.Unix()
+	}
 	if !t.isLeader() {
 		reply.State = EpochStateNoActive.String()
 		reply.PeerState = "not_applicable"
@@ -1035,6 +1100,8 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 	t.SetIngestionQueueBackend(memoryIngestionQueueBackend)
 	t.ingestionBatchSize = defaultIngestionReceiveBatchSize
 	t.ingestionErrorBackoff = defaultIngestionWorkerErrorBackoff
+	t.SetCompletedUploadLedger(newMemoryCompletedUploadLedger())
+	t.completedUploadProcessingTTL = defaultCompletedUploadProcessingTTL
 	t.processUploadFn = t.submitPrepares
 	t.commitUploadFn = t.submitCommits
 	if t.isLeader() {
@@ -1067,6 +1134,15 @@ func (t *Server) SetCompletedUploadQueue(queue CompletedUploadQueue) error {
 	return nil
 }
 
+func (t *Server) SetCompletedUploadLedger(ledger CompletedUploadLedger) error {
+	if ledger == nil {
+		return errors.New("completed upload ledger is required")
+	}
+	t.completedUploadLedger = ledger
+	t.completedUploadLedgerBackend = ledger.Backend()
+	return nil
+}
+
 func (t *Server) SetIngestionWorkerConfig(receiveBatchSize int, errorBackoff time.Duration) error {
 	if receiveBatchSize < 1 || receiveBatchSize > 10 {
 		return errors.New("ingestion receive batch size must be between 1 and 10")
@@ -1076,6 +1152,14 @@ func (t *Server) SetIngestionWorkerConfig(receiveBatchSize int, errorBackoff tim
 	}
 	t.ingestionBatchSize = receiveBatchSize
 	t.ingestionErrorBackoff = errorBackoff
+	return nil
+}
+
+func (t *Server) SetCompletedUploadProcessingTTL(ttl time.Duration) error {
+	if ttl <= 0 {
+		return errors.New("completed upload processing ttl must be positive")
+	}
+	t.completedUploadProcessingTTL = ttl
 	return nil
 }
 

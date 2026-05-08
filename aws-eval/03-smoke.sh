@@ -162,11 +162,11 @@ assert_ingestion_smoke_artifacts() {
   if ! sqs_ingestion_enabled; then
     return 0
   fi
-  python3 - "$dir/shard0-queue-attributes.json" "$dir/shard1-queue-attributes.json" "$dir/s3-payloads.json" <<'PY'
+  python3 - "$dir/shard0-queue-attributes.json" "$dir/shard1-queue-attributes.json" "$dir/s3-payloads.json" "$dir/completed-upload-ledger.json" "$COMPLETED_UPLOAD_LEDGER_BACKEND" <<'PY'
 import json
 import sys
 
-shard0_path, shard1_path, payloads_path = sys.argv[1:]
+shard0_path, shard1_path, payloads_path, ledger_path, ledger_backend = sys.argv[1:]
 
 def load(path):
     try:
@@ -185,6 +185,12 @@ payloads = load(payloads_path).get("Contents", [])
 keys = [item.get("Key", "") for item in payloads]
 if len([key for key in keys if key.startswith("completed-uploads/")]) < 2:
     raise SystemExit(f"expected at least two completed-upload S3 payloads, got {keys}")
+
+if ledger_backend == "dynamodb":
+    items = load(ledger_path).get("Items", [])
+    committed = [item for item in items if item.get("state", {}).get("S") == "committed"]
+    if len(committed) < 2:
+        raise SystemExit(f"expected at least two committed completed-upload ledger records, got {items}")
 PY
 }
 
@@ -213,6 +219,12 @@ if int(status.get('ingestion_ack_count', 0)) < 1:
 for key in ('ingestion_receive_error_count', 'ingestion_process_error_count', 'ingestion_ack_error_count'):
     if int(status.get(key, 0)) != 0:
         raise SystemExit(f\"{path}: expected {key}=0, got {status.get(key)} last_error={status.get('ingestion_last_error')}\")
+if status.get('completed_upload_ledger_backend') == 'dynamodb':
+    if int(status.get('completed_upload_committed_count', 0)) < 1:
+        raise SystemExit(f\"{path}: expected at least one committed ledger upload, got {status.get('completed_upload_committed_count')}\")
+    for key in ('completed_upload_ledger_begin_error_count', 'completed_upload_ledger_complete_error_count'):
+        if int(status.get(key, 0)) != 0:
+            raise SystemExit(f\"{path}: expected {key}=0, got {status.get(key)} last_error={status.get('completed_upload_ledger_last_error')}\")
 PY"
 }
 
@@ -280,8 +292,10 @@ if sqs_ingestion_enabled; then
   capture_ingestion_artifacts "$SMOKE_LOCAL_DIR/ingestion-completed"
   assert_ingestion_smoke_artifacts "$SMOKE_LOCAL_DIR/ingestion-completed"
   remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE/ingestion-completed'"
-  for artifact in shard0-queue-attributes.json shard1-queue-attributes.json s3-payloads.json; do
-    copy_to_remote "$SMOKE_LOCAL_DIR/ingestion-completed/$artifact" "$COORDINATOR_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/ingestion-completed/$artifact"
+  for artifact in shard0-queue-attributes.json shard1-queue-attributes.json s3-payloads.json completed-upload-ledger.json; do
+    if [[ -f "$SMOKE_LOCAL_DIR/ingestion-completed/$artifact" ]]; then
+      copy_to_remote "$SMOKE_LOCAL_DIR/ingestion-completed/$artifact" "$COORDINATOR_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/ingestion-completed/$artifact"
+    fi
   done
 fi
 capture_dynamodb_smoke_state completed

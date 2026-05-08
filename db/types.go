@@ -224,29 +224,36 @@ type EpochStatusReply struct {
 type StatusArgs struct{}
 
 type StatusReply struct {
-	Healthy                 bool   `json:"healthy"`
-	IsLeader                bool   `json:"is_leader"`
-	ServerIndex             int    `json:"server_index"`
-	ShardID                 int    `json:"shard_id"`
-	EpochID                 int64  `json:"epoch_id"`
-	State                   string `json:"state"`
-	StartUnix               int64  `json:"start_unix"`
-	EndUnix                 int64  `json:"end_unix"`
-	DurationSecs            int64  `json:"duration_secs"`
-	Accepting               bool   `json:"accepting"`
-	LastResult              string `json:"last_result"`
-	PeerState               string `json:"peer_state"`
-	PeerError               string `json:"peer_error"`
-	IngestionQueueBackend   string `json:"ingestion_queue_backend"`
-	IngestionQueueDepth     int    `json:"ingestion_queue_depth"`
-	IngestionInflightCount  int    `json:"ingestion_inflight_count"`
-	IngestionProcessedCount int64  `json:"ingestion_processed_count"`
-	IngestionAckCount       int64  `json:"ingestion_ack_count"`
-	IngestionReceiveErrors  int64  `json:"ingestion_receive_error_count"`
-	IngestionProcessErrors  int64  `json:"ingestion_process_error_count"`
-	IngestionAckErrors      int64  `json:"ingestion_ack_error_count"`
-	IngestionLastError      string `json:"ingestion_last_error"`
-	IngestionLastErrorUnix  int64  `json:"ingestion_last_error_unix"`
+	Healthy                             bool   `json:"healthy"`
+	IsLeader                            bool   `json:"is_leader"`
+	ServerIndex                         int    `json:"server_index"`
+	ShardID                             int    `json:"shard_id"`
+	EpochID                             int64  `json:"epoch_id"`
+	State                               string `json:"state"`
+	StartUnix                           int64  `json:"start_unix"`
+	EndUnix                             int64  `json:"end_unix"`
+	DurationSecs                        int64  `json:"duration_secs"`
+	Accepting                           bool   `json:"accepting"`
+	LastResult                          string `json:"last_result"`
+	PeerState                           string `json:"peer_state"`
+	PeerError                           string `json:"peer_error"`
+	IngestionQueueBackend               string `json:"ingestion_queue_backend"`
+	IngestionQueueDepth                 int    `json:"ingestion_queue_depth"`
+	IngestionInflightCount              int    `json:"ingestion_inflight_count"`
+	IngestionProcessedCount             int64  `json:"ingestion_processed_count"`
+	IngestionAckCount                   int64  `json:"ingestion_ack_count"`
+	IngestionReceiveErrors              int64  `json:"ingestion_receive_error_count"`
+	IngestionProcessErrors              int64  `json:"ingestion_process_error_count"`
+	IngestionAckErrors                  int64  `json:"ingestion_ack_error_count"`
+	IngestionLastError                  string `json:"ingestion_last_error"`
+	IngestionLastErrorUnix              int64  `json:"ingestion_last_error_unix"`
+	CompletedUploadLedgerBackend        string `json:"completed_upload_ledger_backend"`
+	CompletedUploadCommittedCount       int64  `json:"completed_upload_committed_count"`
+	CompletedUploadDuplicateSkipCount   int64  `json:"completed_upload_duplicate_skip_count"`
+	CompletedUploadLedgerBeginErrors    int64  `json:"completed_upload_ledger_begin_error_count"`
+	CompletedUploadLedgerCompleteErrors int64  `json:"completed_upload_ledger_complete_error_count"`
+	CompletedUploadLedgerLastError      string `json:"completed_upload_ledger_last_error"`
+	CompletedUploadLedgerLastErrorUnix  int64  `json:"completed_upload_ledger_last_error_unix"`
 }
 
 type CoordinatorStatusArgs struct {
@@ -495,14 +502,20 @@ type processCompletedUploadFunc func(CompletedUploadMessage) (bool, error)
 type commitCompletedUploadFunc func(int64, bool) error
 
 type ingestionDiagnostics struct {
-	mu                sync.Mutex
-	processedCount    int64
-	ackCount          int64
-	receiveErrorCount int64
-	processErrorCount int64
-	ackErrorCount     int64
-	lastError         string
-	lastErrorTime     time.Time
+	mu                       sync.Mutex
+	processedCount           int64
+	ackCount                 int64
+	receiveErrorCount        int64
+	processErrorCount        int64
+	ackErrorCount            int64
+	committedCount           int64
+	duplicateSkipCount       int64
+	ledgerBeginErrorCount    int64
+	ledgerCompleteErrorCount int64
+	lastError                string
+	lastErrorTime            time.Time
+	ledgerLastError          string
+	ledgerLastErrorTime      time.Time
 }
 
 type Server struct {
@@ -537,13 +550,16 @@ type Server struct {
 	controlCh      chan leaderControlCommand
 	mergeFn        func() (string, error)
 
-	ingestionQueue        completedUploadQueue
-	ingestionQueueBackend string
-	ingestionBatchSize    int
-	ingestionErrorBackoff time.Duration
-	ingestionDiagnostics  ingestionDiagnostics
-	processUploadFn       processCompletedUploadFunc
-	commitUploadFn        commitCompletedUploadFunc
+	ingestionQueue               completedUploadQueue
+	ingestionQueueBackend        string
+	ingestionBatchSize           int
+	ingestionErrorBackoff        time.Duration
+	completedUploadLedger        CompletedUploadLedger
+	completedUploadLedgerBackend string
+	completedUploadProcessingTTL time.Duration
+	ingestionDiagnostics         ingestionDiagnostics
+	processUploadFn              processCompletedUploadFunc
+	commitUploadFn               commitCompletedUploadFunc
 }
 
 func init() {

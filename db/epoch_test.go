@@ -94,6 +94,34 @@ func (q *ackFailingCompletedUploadQueue) Stats() IngestionQueueStats {
 	return IngestionQueueStats{Inflight: 1}
 }
 
+type completeFailingCompletedUploadLedger struct{}
+
+func (l *completeFailingCompletedUploadLedger) Backend() string {
+	return "complete-failing"
+}
+
+func (l *completeFailingCompletedUploadLedger) BeginProcessing(context.Context, CompletedUploadMessage, time.Time, time.Duration) (CompletedUploadLedgerBeginResult, error) {
+	return CompletedUploadLedgerBeginResult{Lease: CompletedUploadProcessingLease{ShardID: 0, EpochID: 1, Uuid: 12, AttemptID: "attempt"}}, nil
+}
+
+func (l *completeFailingCompletedUploadLedger) CompleteProcessing(context.Context, CompletedUploadProcessingLease, time.Time) error {
+	return errors.New("ledger complete failed")
+}
+
+type busyCompletedUploadLedger struct{}
+
+func (l *busyCompletedUploadLedger) Backend() string {
+	return "busy"
+}
+
+func (l *busyCompletedUploadLedger) BeginProcessing(context.Context, CompletedUploadMessage, time.Time, time.Duration) (CompletedUploadLedgerBeginResult, error) {
+	return CompletedUploadLedgerBeginResult{}, errCompletedUploadProcessingBusy
+}
+
+func (l *busyCompletedUploadLedger) CompleteProcessing(context.Context, CompletedUploadProcessingLease, time.Time) error {
+	return nil
+}
+
 func TestUploadRejectedWithoutActiveEpoch(t *testing.T) {
 	s := newTestLeaderServer()
 
@@ -684,6 +712,9 @@ func TestIngestionWorkerAcksAfterSuccessfulProcessing(t *testing.T) {
 	if status.IngestionProcessedCount != 1 || status.IngestionAckCount != 1 || status.IngestionProcessErrors != 0 || status.IngestionAckErrors != 0 {
 		t.Fatalf("unexpected successful ingestion diagnostics: %+v", status)
 	}
+	if status.CompletedUploadCommittedCount != 1 || status.CompletedUploadLedgerCompleteErrors != 0 {
+		t.Fatalf("unexpected successful ledger diagnostics: %+v", status)
+	}
 }
 
 func TestIngestionWorkerLeavesFailedProcessingUnacked(t *testing.T) {
@@ -713,6 +744,9 @@ func TestIngestionWorkerLeavesFailedProcessingUnacked(t *testing.T) {
 	if status.IngestionProcessedCount != 0 || status.IngestionAckCount != 0 || status.IngestionProcessErrors != 1 || status.IngestionLastError == "" || status.IngestionLastErrorUnix == 0 {
 		t.Fatalf("unexpected failed ingestion diagnostics: %+v", status)
 	}
+	if status.CompletedUploadCommittedCount != 0 {
+		t.Fatalf("failed processing should not mark committed: %+v", status)
+	}
 }
 
 func TestIngestionWorkerRecordsAckErrors(t *testing.T) {
@@ -741,6 +775,100 @@ func TestIngestionWorkerRecordsAckErrors(t *testing.T) {
 	}
 	if status.IngestionProcessedCount != 1 || status.IngestionAckCount != 0 || status.IngestionAckErrors != 1 || status.IngestionLastError != "ack failed" {
 		t.Fatalf("unexpected ack error diagnostics: %+v", status)
+	}
+	if status.CompletedUploadCommittedCount != 1 {
+		t.Fatalf("ack failure should happen after ledger commit: %+v", status)
+	}
+}
+
+func TestIngestionWorkerSkipsAlreadyCommittedDuplicate(t *testing.T) {
+	s := newTestLeaderServer()
+	msg := CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 10}
+	begin, err := s.completedUploadLedger.BeginProcessing(context.Background(), msg, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("begin failed: %v", err)
+	}
+	if err := s.completedUploadLedger.CompleteProcessing(context.Background(), begin.Lease, time.Now().UTC()); err != nil {
+		t.Fatalf("complete failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		t.Fatal("duplicate should not be prepared again")
+		return false, nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), msg); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 0 {
+		t.Fatalf("expected duplicate to be acked, got %+v", stats)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.CompletedUploadDuplicateSkipCount != 1 || status.IngestionAckCount != 1 || status.IngestionProcessedCount != 0 {
+		t.Fatalf("unexpected duplicate diagnostics: %+v", status)
+	}
+}
+
+func TestIngestionWorkerLeavesLedgerCompleteFailureUnacked(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetCompletedUploadLedger(&completeFailingCompletedUploadLedger{}); err != nil {
+		t.Fatalf("set ledger failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		return nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 12}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 1 {
+		t.Fatalf("expected ledger complete failure to leave item in flight, got %+v", stats)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.CompletedUploadLedgerCompleteErrors != 1 || status.IngestionAckCount != 0 {
+		t.Fatalf("unexpected ledger complete diagnostics: %+v", status)
+	}
+}
+
+func TestIngestionWorkerLeavesBusyLedgerUnacked(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetCompletedUploadLedger(&busyCompletedUploadLedger{}); err != nil {
+		t.Fatalf("set ledger failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		t.Fatal("busy ledger should not run prepare")
+		return false, nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 13}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 1 {
+		t.Fatalf("expected busy ledger to leave item in flight, got %+v", stats)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.CompletedUploadLedgerBeginErrors != 1 || status.IngestionProcessedCount != 0 {
+		t.Fatalf("unexpected busy ledger diagnostics: %+v", status)
 	}
 }
 

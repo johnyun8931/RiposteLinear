@@ -251,13 +251,18 @@ INGESTION_QUEUE_BACKEND=memory
 To validate the durable completed-upload boundary, launch with:
 
 ```bash
-INGESTION_QUEUE_BACKEND=sqs ./aws-eval/01-launch.sh
+INGESTION_QUEUE_BACKEND=sqs \
+COMPLETED_UPLOAD_LEDGER_BACKEND=dynamodb \
+./aws-eval/01-launch.sh
 ```
 
 Terraform creates one SQS queue per shard and one S3 bucket for completed-upload
 payloads. Shard leaders write the full completed-upload job to S3, enqueue a
 small SQS pointer, and delete the SQS message only after prepare/commit
-succeeds. S3 payloads are retained after ack for debugging and replay audit.
+succeeds. With the DynamoDB completed-upload ledger enabled, workers mark
+completed uploads committed before deleting the SQS message, and duplicate
+redelivery of committed work is acked without rerunning prepare/commit. S3
+payloads are retained after ack for debugging and replay audit.
 
 Operational knobs default to conservative smoke-safe values:
 
@@ -266,12 +271,16 @@ INGESTION_RECEIVE_BATCH_SIZE=1
 INGESTION_SQS_WAIT_SECONDS=10
 INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS=300
 INGESTION_WORKER_ERROR_BACKOFF_MS=250
+COMPLETED_UPLOAD_LEDGER_BACKEND=memory
+COMPLETED_UPLOAD_LEDGER_TABLE=$DYNAMODB_CONTROL_TABLE
+COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS=900
 ```
 
-Smoke captures SQS queue attributes and S3 payload listings under
-`smoke/run/logs/ingestion-completed/`. `05-collect-logs.sh` also copies current
-ingestion artifacts under `aws/ingestion/`. Completed shard status JSON includes
-processed, acked, and ingestion error counters.
+Smoke captures SQS queue attributes, S3 payload listings, and DynamoDB ledger
+records under `smoke/run/logs/ingestion-completed/`. `05-collect-logs.sh` also
+copies current ingestion artifacts under `aws/ingestion/`. Completed shard
+status JSON includes processed, acked, ingestion error, ledger commit,
+duplicate-skip, and ledger error counters.
 
 ### 4. Smoke
 
@@ -307,7 +316,9 @@ and `global_table_height=512`.
 
 If `INGESTION_QUEUE_BACKEND=sqs`, smoke waits for both shard queues to drain,
 verifies the SQS approximate visible/in-flight counts are zero, and verifies
-that at least two completed-upload payloads were written to S3.
+that at least two completed-upload payloads were written to S3. If
+`COMPLETED_UPLOAD_LEDGER_BACKEND=dynamodb`, smoke also verifies at least two
+committed completed-upload ledger records.
 
 To validate coordinator lease/fencing behavior with two coordinator attempts:
 

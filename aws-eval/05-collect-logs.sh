@@ -197,6 +197,9 @@ payload = {
         "ingestion_worker_error_backoff_ms": int(os.environ["INGESTION_WORKER_ERROR_BACKOFF_MS"]),
         "ingestion_sqs_shard0_queue_url": os.environ["INGESTION_SQS_SHARD0_QUEUE_URL"],
         "ingestion_sqs_shard1_queue_url": os.environ["INGESTION_SQS_SHARD1_QUEUE_URL"],
+        "completed_upload_ledger_backend": os.environ["COMPLETED_UPLOAD_LEDGER_BACKEND"],
+        "completed_upload_ledger_table": os.environ["COMPLETED_UPLOAD_LEDGER_TABLE"],
+        "completed_upload_processing_ttl_seconds": int(os.environ["COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS"]),
         "nlb": {
             "name": os.environ["NLB_NAME"],
             "dns_name": os.environ["NLB_DNS_NAME"],

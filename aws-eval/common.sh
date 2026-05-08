@@ -44,6 +44,9 @@ INGESTION_RECEIVE_BATCH_SIZE="${INGESTION_RECEIVE_BATCH_SIZE:-1}"
 INGESTION_SQS_WAIT_SECONDS="${INGESTION_SQS_WAIT_SECONDS:-10}"
 INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS="${INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS:-300}"
 INGESTION_WORKER_ERROR_BACKOFF_MS="${INGESTION_WORKER_ERROR_BACKOFF_MS:-250}"
+COMPLETED_UPLOAD_LEDGER_BACKEND="${COMPLETED_UPLOAD_LEDGER_BACKEND:-memory}"
+COMPLETED_UPLOAD_LEDGER_TABLE="${COMPLETED_UPLOAD_LEDGER_TABLE:-$DYNAMODB_CONTROL_TABLE}"
+COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS="${COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS:-900}"
 SERVER_INGESTION_IAM_POLICY_NAME="${SERVER_INGESTION_IAM_POLICY_NAME:-RiposteCompletedUploadIngestion}"
 
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
@@ -345,7 +348,7 @@ dynamodb_session_enabled() {
 }
 
 dynamodb_runtime_enabled() {
-  dynamodb_control_enabled || dynamodb_session_enabled
+  dynamodb_control_enabled || dynamodb_session_enabled || [[ "$COMPLETED_UPLOAD_LEDGER_BACKEND" == "dynamodb" ]]
 }
 
 sqs_ingestion_enabled() {
@@ -468,10 +471,17 @@ validate_public_entry_backend() {
 validate_ingestion_queue_backend() {
   case "$INGESTION_QUEUE_BACKEND" in
     memory|sqs)
-      return 0
       ;;
     *)
       die "unknown INGESTION_QUEUE_BACKEND: $INGESTION_QUEUE_BACKEND"
+      ;;
+  esac
+  case "$COMPLETED_UPLOAD_LEDGER_BACKEND" in
+    memory|dynamodb)
+      return 0
+      ;;
+    *)
+      die "unknown COMPLETED_UPLOAD_LEDGER_BACKEND: $COMPLETED_UPLOAD_LEDGER_BACKEND"
       ;;
   esac
 }
@@ -495,18 +505,35 @@ ingestion_queue_url_for_shard() {
 
 server_ingestion_queue_args() {
 	local shard_id="$1"
-	local worker_args
+	local worker_args ledger_args
 	worker_args="$(printf -- " -ingestion-receive-batch-size %s -ingestion-worker-error-backoff-ms %s" \
 		"$(quote "$INGESTION_RECEIVE_BATCH_SIZE")" \
 		"$(quote "$INGESTION_WORKER_ERROR_BACKOFF_MS")")"
+	ledger_args="$(printf -- " -completed-upload-processing-ttl-seconds %s" \
+		"$(quote "$COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS")")"
+	case "$COMPLETED_UPLOAD_LEDGER_BACKEND" in
+	memory)
+		;;
+	dynamodb)
+		[[ -n "${COMPLETED_UPLOAD_LEDGER_TABLE:-}" ]] || die "COMPLETED_UPLOAD_LEDGER_TABLE is required when COMPLETED_UPLOAD_LEDGER_BACKEND=dynamodb"
+		ledger_args="$(printf -- "%s -completed-upload-ledger dynamodb -completed-upload-ledger-table %s -aws-region %s" \
+			"$ledger_args" \
+			"$(quote "$COMPLETED_UPLOAD_LEDGER_TABLE")" \
+			"$(quote "$AWS_REGION")")"
+		;;
+	*)
+		die "unknown COMPLETED_UPLOAD_LEDGER_BACKEND: $COMPLETED_UPLOAD_LEDGER_BACKEND"
+		;;
+	esac
 	case "$INGESTION_QUEUE_BACKEND" in
 	memory)
-		printf '%s' "$worker_args"
+		printf '%s%s' "$worker_args" "$ledger_args"
 		;;
 	sqs)
 		[[ -n "${INGESTION_S3_BUCKET:-}" ]] || die "INGESTION_S3_BUCKET is required when INGESTION_QUEUE_BACKEND=sqs"
-		printf -- "%s -ingestion-queue sqs -ingestion-sqs-queue-url %s -ingestion-s3-bucket %s -aws-region %s -ingestion-sqs-wait-seconds %s -ingestion-sqs-visibility-timeout-seconds %s" \
+		printf -- "%s%s -ingestion-queue sqs -ingestion-sqs-queue-url %s -ingestion-s3-bucket %s -aws-region %s -ingestion-sqs-wait-seconds %s -ingestion-sqs-visibility-timeout-seconds %s" \
 			"$worker_args" \
+			"$ledger_args" \
 			"$(quote "$(ingestion_queue_url_for_shard "$shard_id")")" \
 			"$(quote "$INGESTION_S3_BUCKET")" \
 			"$(quote "$AWS_REGION")" \
@@ -537,6 +564,13 @@ capture_ingestion_artifacts() {
     --bucket "$INGESTION_S3_BUCKET" \
     --prefix "completed-uploads/" \
     --output json >"$output_dir/s3-payloads.json" || true
+  if [[ "$COMPLETED_UPLOAD_LEDGER_BACKEND" == "dynamodb" ]]; then
+    aws_region dynamodb scan \
+      --table-name "$COMPLETED_UPLOAD_LEDGER_TABLE" \
+      --filter-expression 'begins_with(pk, :prefix)' \
+      --expression-attribute-values '{":prefix":{"S":"completed-upload#"}}' \
+      --output json >"$output_dir/completed-upload-ledger.json" || true
+  fi
 }
 
 wait_for_sqs_ingestion_drain() {

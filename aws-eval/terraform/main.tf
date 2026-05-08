@@ -4,24 +4,76 @@ locals {
     RunId   = var.run_id
   }
 
-  dynamodb_runtime_enabled = var.control_store_backend == "dynamodb" || var.session_store_backend == "dynamodb"
-  session_table_name       = var.dynamodb_session_table != "" ? var.dynamodb_session_table : var.dynamodb_control_table
-  session_table_region     = var.dynamodb_session_region != "" ? var.dynamodb_session_region : var.dynamodb_control_region
+  completed_upload_ledger_dynamodb_enabled = var.completed_upload_ledger_backend == "dynamodb"
+  completed_upload_ledger_table_name       = var.completed_upload_ledger_table != "" ? var.completed_upload_ledger_table : var.dynamodb_control_table
+  dynamodb_runtime_enabled                 = var.control_store_backend == "dynamodb" || var.session_store_backend == "dynamodb" || local.completed_upload_ledger_dynamodb_enabled
+  session_table_name                       = var.dynamodb_session_table != "" ? var.dynamodb_session_table : var.dynamodb_control_table
+  session_table_region                     = var.dynamodb_session_region != "" ? var.dynamodb_session_region : var.dynamodb_control_region
   dynamodb_table_arns = distinct(concat(
     var.control_store_backend == "dynamodb" ? [
       "arn:aws:dynamodb:${var.dynamodb_control_region}:${data.aws_caller_identity.current.account_id}:table/${var.dynamodb_control_table}",
     ] : [],
     var.session_store_backend == "dynamodb" ? [
       "arn:aws:dynamodb:${local.session_table_region}:${data.aws_caller_identity.current.account_id}:table/${local.session_table_name}",
+    ] : [],
+    local.completed_upload_ledger_dynamodb_enabled ? [
+      "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${local.completed_upload_ledger_table_name}",
     ] : []
   ))
-  public_entry_enabled  = var.public_entry_backend == "nlb"
-  multi_coordinator     = local.public_entry_enabled && contains(["1", "true"], lower(var.public_entry_multi_coordinator))
-  nlb_suffix            = substr(var.run_id, max(0, length(var.run_id) - 16), 16)
-  nlb_name              = substr("riposte-${local.nlb_suffix}", 0, 32)
-  nlb_target_group_name = substr("riposte-tg-${local.nlb_suffix}", 0, 32)
-  ingestion_sqs_enabled = var.ingestion_queue_backend == "sqs"
-  ingestion_bucket_name = var.ingestion_s3_bucket != "" ? var.ingestion_s3_bucket : lower(substr("${var.project_tag}-${var.run_id}-ingestion", 0, 63))
+  public_entry_enabled       = var.public_entry_backend == "nlb"
+  multi_coordinator          = local.public_entry_enabled && contains(["1", "true"], lower(var.public_entry_multi_coordinator))
+  nlb_suffix                 = substr(var.run_id, max(0, length(var.run_id) - 16), 16)
+  nlb_name                   = substr("riposte-${local.nlb_suffix}", 0, 32)
+  nlb_target_group_name      = substr("riposte-tg-${local.nlb_suffix}", 0, 32)
+  ingestion_sqs_enabled      = var.ingestion_queue_backend == "sqs"
+  server_aws_runtime_enabled = local.ingestion_sqs_enabled || local.completed_upload_ledger_dynamodb_enabled
+  ingestion_bucket_name      = var.ingestion_s3_bucket != "" ? var.ingestion_s3_bucket : lower(substr("${var.project_tag}-${var.run_id}-ingestion", 0, 63))
+  ingestion_sqs_queue_arns = local.ingestion_sqs_enabled ? [
+    aws_sqs_queue.ingestion_shard0[0].arn,
+    aws_sqs_queue.ingestion_shard1[0].arn,
+  ] : []
+  ingestion_s3_object_arns = local.ingestion_sqs_enabled ? ["${aws_s3_bucket.ingestion_payloads[0].arn}/*"] : []
+  ingestion_s3_bucket_arns = local.ingestion_sqs_enabled ? [aws_s3_bucket.ingestion_payloads[0].arn] : []
+  server_ingestion_policy_statements = concat(
+    local.ingestion_sqs_enabled ? [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:GetQueueAttributes",
+          "sqs:ReceiveMessage",
+          "sqs:SendMessage",
+          "sqs:DeleteMessage",
+        ]
+        Resource = local.ingestion_sqs_queue_arns
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = local.ingestion_s3_object_arns
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = local.ingestion_s3_bucket_arns
+      },
+    ] : [],
+    local.completed_upload_ledger_dynamodb_enabled ? [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:DescribeTable",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+        ]
+        Resource = ["arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${local.completed_upload_ledger_table_name}"]
+      },
+    ] : []
+  )
 }
 
 resource "aws_key_pair" "eval" {
@@ -220,7 +272,7 @@ resource "aws_s3_bucket_public_access_block" "ingestion_payloads" {
 }
 
 resource "aws_iam_role" "server_ingestion" {
-  count = local.ingestion_sqs_enabled ? 1 : 0
+  count = local.server_aws_runtime_enabled ? 1 : 0
 
   name = var.server_ingestion_iam_role_name
   assume_role_policy = jsonencode({
@@ -240,47 +292,18 @@ resource "aws_iam_role" "server_ingestion" {
 }
 
 resource "aws_iam_role_policy" "server_ingestion" {
-  count = local.ingestion_sqs_enabled ? 1 : 0
+  count = local.server_aws_runtime_enabled ? 1 : 0
 
   name = var.server_ingestion_iam_policy_name
   role = aws_iam_role.server_ingestion[0].id
   policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "sqs:GetQueueAttributes",
-          "sqs:ReceiveMessage",
-          "sqs:SendMessage",
-          "sqs:DeleteMessage",
-        ]
-        Resource = [
-          aws_sqs_queue.ingestion_shard0[0].arn,
-          aws_sqs_queue.ingestion_shard1[0].arn,
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-        ]
-        Resource = "${aws_s3_bucket.ingestion_payloads[0].arn}/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:ListBucket",
-        ]
-        Resource = aws_s3_bucket.ingestion_payloads[0].arn
-      }
-    ]
+    Version   = "2012-10-17"
+    Statement = local.server_ingestion_policy_statements
   })
 }
 
 resource "aws_iam_instance_profile" "server_ingestion" {
-  count = local.ingestion_sqs_enabled ? 1 : 0
+  count = local.server_aws_runtime_enabled ? 1 : 0
 
   name = var.server_ingestion_iam_instance_profile_name
   role = aws_iam_role.server_ingestion[0].name
@@ -317,7 +340,7 @@ resource "aws_instance" "shard0_leader" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
-  iam_instance_profile        = local.ingestion_sqs_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
+  iam_instance_profile        = local.server_aws_runtime_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-shard0-leader"
@@ -339,7 +362,7 @@ resource "aws_instance" "shard0_follower" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
-  iam_instance_profile        = local.ingestion_sqs_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
+  iam_instance_profile        = local.server_aws_runtime_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-shard0-follower"
@@ -361,7 +384,7 @@ resource "aws_instance" "shard1_leader" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
-  iam_instance_profile        = local.ingestion_sqs_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
+  iam_instance_profile        = local.server_aws_runtime_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-shard1-leader"
@@ -383,7 +406,7 @@ resource "aws_instance" "shard1_follower" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
-  iam_instance_profile        = local.ingestion_sqs_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
+  iam_instance_profile        = local.server_aws_runtime_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-shard1-follower"

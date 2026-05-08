@@ -16,7 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
@@ -38,6 +40,9 @@ var flagIngestionReceiveBatchSize = flag.Int("ingestion-receive-batch-size", 1, 
 var flagIngestionSQSWaitSeconds = flag.Int("ingestion-sqs-wait-seconds", 10, "SQS long-poll wait seconds for completed upload ingestion")
 var flagIngestionSQSVisibilityTimeoutSeconds = flag.Int("ingestion-sqs-visibility-timeout-seconds", 300, "SQS visibility timeout seconds for completed upload ingestion")
 var flagIngestionWorkerErrorBackoffMs = flag.Int("ingestion-worker-error-backoff-ms", 250, "Worker backoff in milliseconds after ingestion receive errors")
+var flagCompletedUploadLedger = flag.String("completed-upload-ledger", "memory", "Completed upload processing ledger backend")
+var flagCompletedUploadLedgerTable = flag.String("completed-upload-ledger-table", "", "DynamoDB table name for -completed-upload-ledger dynamodb")
+var flagCompletedUploadProcessingTTLSeconds = flag.Int("completed-upload-processing-ttl-seconds", 900, "Completed upload processing ledger lease TTL in seconds")
 var flagAWSRegion = flag.String("aws-region", "", "AWS SDK region override")
 var flagAdminTarget = flag.String("admin-target", "", "Target leader address for admin RPC commands")
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
@@ -145,6 +150,10 @@ func main() {
 	if err := slotTable.SetIngestionWorkerConfig(*flagIngestionReceiveBatchSize, time.Duration(*flagIngestionWorkerErrorBackoffMs)*time.Millisecond); err != nil {
 		log.Fatal(err)
 	}
+	configureCompletedUploadLedger(slotTable)
+	if err := slotTable.SetCompletedUploadProcessingTTL(time.Duration(*flagCompletedUploadProcessingTTLSeconds) * time.Second); err != nil {
+		log.Fatal(err)
+	}
 	slotTable.SetResultsDir(*flagResultsDir)
 	slotTable.Initialize(&a, &a)
 	rpc.Register(slotTable)
@@ -170,7 +179,22 @@ func validateIngestionFlags() error {
 	if *flagIngestionSQSVisibilityTimeoutSeconds <= 0 {
 		return errors.New("-ingestion-sqs-visibility-timeout-seconds must be positive")
 	}
+	if *flagCompletedUploadProcessingTTLSeconds <= 0 {
+		return errors.New("-completed-upload-processing-ttl-seconds must be positive")
+	}
 	return nil
+}
+
+func loadAWSConfig(purpose string) aws.Config {
+	options := []func(*awsconfig.LoadOptions) error{}
+	if *flagAWSRegion != "" {
+		options = append(options, awsconfig.WithRegion(*flagAWSRegion))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(context.Background(), options...)
+	if err != nil {
+		log.Fatalf("Could not load AWS config for %s: %v", purpose, err)
+	}
+	return cfg
 }
 
 func configureIngestionQueue(slotTable *db.Server) {
@@ -186,14 +210,7 @@ func configureIngestionQueue(slotTable *db.Server) {
 		if *flagIngestionS3Bucket == "" {
 			log.Fatal("-ingestion-s3-bucket is required when -ingestion-queue=sqs")
 		}
-		options := []func(*awsconfig.LoadOptions) error{}
-		if *flagAWSRegion != "" {
-			options = append(options, awsconfig.WithRegion(*flagAWSRegion))
-		}
-		cfg, err := awsconfig.LoadDefaultConfig(context.Background(), options...)
-		if err != nil {
-			log.Fatal("Could not load AWS config for SQS ingestion queue: ", err)
-		}
+		cfg := loadAWSConfig("SQS ingestion queue")
 		queue, err := db.NewSQSCompletedUploadQueueWithOptions(sqs.NewFromConfig(cfg), s3.NewFromConfig(cfg), *flagIngestionSQSQueueURL, *flagIngestionS3Bucket, db.SQSCompletedUploadQueueOptions{
 			WaitTimeSeconds:          int32(*flagIngestionSQSWaitSeconds),
 			VisibilityTimeoutSeconds: int32(*flagIngestionSQSVisibilityTimeoutSeconds),
@@ -208,6 +225,27 @@ func configureIngestionQueue(slotTable *db.Server) {
 		if err := slotTable.SetIngestionQueueBackend(*flagIngestionQueue); err != nil {
 			log.Fatal(err)
 		}
+	}
+}
+
+func configureCompletedUploadLedger(slotTable *db.Server) {
+	switch *flagCompletedUploadLedger {
+	case "", "memory":
+		return
+	case "dynamodb":
+		if *flagCompletedUploadLedgerTable == "" {
+			log.Fatal("-completed-upload-ledger-table is required when -completed-upload-ledger=dynamodb")
+		}
+		cfg := loadAWSConfig("DynamoDB completed upload ledger")
+		ledger, err := db.NewDynamoDBCompletedUploadLedger(dynamodb.NewFromConfig(cfg), *flagCompletedUploadLedgerTable)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := slotTable.SetCompletedUploadLedger(ledger); err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatalf("unsupported completed upload ledger backend %q", *flagCompletedUploadLedger)
 	}
 }
 

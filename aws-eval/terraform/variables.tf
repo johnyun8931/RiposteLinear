@@ -248,6 +248,21 @@ variable "ingestion_worker_error_backoff_ms" {
   default = 250
 }
 
+variable "completed_upload_ledger_backend" {
+  type    = string
+  default = "memory"
+}
+
+variable "completed_upload_ledger_table" {
+  type    = string
+  default = ""
+}
+
+variable "completed_upload_processing_ttl_seconds" {
+  type    = number
+  default = 900
+}
+
 variable "server_ingestion_iam_role_name" {
   type    = string
   default = "riposte-server-ingestion"

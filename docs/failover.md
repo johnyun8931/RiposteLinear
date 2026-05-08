@@ -216,10 +216,23 @@ The opt-in AWS ingestion backend uses SQS plus S3:
   queue visibility timeout.
 
 The server exposes operational controls for SQS wait time, visibility timeout,
-receive batch size, and worker error backoff. Shard status reports processed,
-acked, receive-error, process-error, and ack-error counters plus the last
-ingestion error. These counters are diagnostics only; this slice does not add a
-durable processed-upload ledger.
+receive batch size, worker error backoff, and completed-upload processing TTL.
+Shard status reports processed, acked, receive-error, process-error, ack-error,
+ledger-commit, duplicate-skip, and ledger-error counters plus the last ingestion
+and ledger errors.
+
+The completed-upload ledger is opt-in durable state for SQS redelivery. In
+`memory` mode it is process-local. In `dynamodb` mode it writes
+`pk="completed-upload#shard#<shard_id>#epoch#<epoch_id>#uuid#<uuid>"` records
+with `processing` and `committed` states. Workers check the ledger before
+prepare/commit; already-committed duplicates are acked without replaying
+prepare/commit. After prepare/commit succeeds, the worker marks the ledger
+committed before deleting the SQS message.
+
+This is pragmatic idempotence, not transactional exactly-once processing. It
+closes the common path where commit succeeds, the ledger commit succeeds, and
+the later SQS delete fails. A crash after shard commit but before the ledger
+commit remains a known gap for a later protocol-log or idempotent-prepare slice.
 
 The S3 payload is retained after ack for debugging and replay audit. This gives
 active/passive shard promotion a durable replay boundary for uploads that
@@ -242,11 +255,11 @@ complexity:
 ## Current Boundary
 
 DynamoDB control-store and session-store wiring is opt-in. SQS/S3
-completed-upload ingestion is also opt-in. The current code has local and
-DynamoDB control-store wiring, local and DynamoDB session-store wiring,
-lease/fencing enforcement, local and SQS/S3 completed-upload ingestion queueing,
-and active-passive shard health monitoring, but no active-passive shard
-promotion.
+completed-upload ingestion and the DynamoDB completed-upload ledger are also
+opt-in. The current code has local and DynamoDB control-store wiring, local and
+DynamoDB session-store wiring, lease/fencing enforcement, local and SQS/S3
+completed-upload ingestion queueing, a completed-upload idempotence ledger, and
+active-passive shard health monitoring, but no active-passive shard promotion.
 
 Shard health monitoring is a prerequisite for failover, not failover itself.
 Shard active/passive promotion still requires durable accepted-work/session

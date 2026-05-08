@@ -103,6 +103,9 @@ output "state_env" {
     INGESTION_SQS_SHARD0_QUEUE_ARN             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard0[0].arn : ""
     INGESTION_SQS_SHARD1_QUEUE_URL             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard1[0].url : ""
     INGESTION_SQS_SHARD1_QUEUE_ARN             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard1[0].arn : ""
+    COMPLETED_UPLOAD_LEDGER_BACKEND            = var.completed_upload_ledger_backend
+    COMPLETED_UPLOAD_LEDGER_TABLE              = local.completed_upload_ledger_table_name
+    COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS    = var.completed_upload_processing_ttl_seconds
     SERVER_INGESTION_IAM_ROLE_NAME             = var.server_ingestion_iam_role_name
     SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME = var.server_ingestion_iam_instance_profile_name
     SERVER_INGESTION_IAM_POLICY_NAME           = var.server_ingestion_iam_policy_name
