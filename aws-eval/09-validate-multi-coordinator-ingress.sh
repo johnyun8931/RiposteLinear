@@ -48,6 +48,10 @@ capture_dynamodb_snapshot() {
   remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$remote_dir'"
   capture_dynamodb_control_item lease "$local_dir/lease.json"
   capture_dynamodb_control_item epoch "$local_dir/epoch.json"
+  capture_dynamodb_control_item shard-config "$local_dir/shard-config.json"
+  if capture_dynamodb_epoch_shard_config "$local_dir/epoch.json" "$local_dir/epoch-shard-config.json"; then
+    copy_to_remote "$local_dir/epoch-shard-config.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/epoch-shard-config.json"
+  fi
   aws_base --region "$(dynamodb_session_region)" dynamodb scan \
     --table-name "$(dynamodb_session_table)" \
     --consistent-read \
@@ -56,6 +60,7 @@ capture_dynamodb_snapshot() {
     --output json >"$local_dir/sessions.json"
   copy_to_remote "$local_dir/lease.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/lease.json"
   copy_to_remote "$local_dir/epoch.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/epoch.json"
+  copy_to_remote "$local_dir/shard-config.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/shard-config.json"
   copy_to_remote "$local_dir/sessions.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/sessions.json"
 }
 

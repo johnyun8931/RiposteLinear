@@ -391,6 +391,23 @@ capture_dynamodb_control_item() {
     --output json >"$output_path"
 }
 
+capture_dynamodb_epoch_shard_config() {
+  local epoch_file="$1"
+  local output_path="$2"
+  local epoch_id
+
+  epoch_id="$(python3 - "$epoch_file" <<'PY'
+import json
+import sys
+
+item = json.load(open(sys.argv[1])).get("Item", {})
+print(item.get("epoch_id", {}).get("N", ""))
+PY
+)"
+  [[ -n "$epoch_id" ]] || return 1
+  capture_dynamodb_control_item "shard-config#epoch#$epoch_id" "$output_path"
+}
+
 validate_public_entry_backend() {
   case "$PUBLIC_ENTRY_BACKEND" in
     none|nlb)

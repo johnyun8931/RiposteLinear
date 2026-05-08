@@ -38,8 +38,8 @@ ingestion still need SQS-style queueing and later routing work.
 
 The first AWS-native implementation slices are intentionally SDK-free:
 
-- `ControlStore` defines lease/fencing, epoch state, accepting state, and shard
-  config version operations.
+- `ControlStore` defines lease/fencing, epoch state, accepting state, and full
+  shard config operations.
 - `IngestionQueue` defines enqueue, receive, and ack operations for durable
   accepted write/session work.
 - In-memory implementations provide deterministic local tests and model the
@@ -74,11 +74,20 @@ The DynamoDB table uses a single string partition key named `pk`:
 - `pk="lease"` stores the active coordinator holder, fencing token, and lease
   expiry timestamp.
 - `pk="epoch"` stores epoch metadata and accepting state.
-- `pk="shard-config"` stores the shard config version.
+- `pk="shard-config"` stores the authoritative shard topology: version, shard
+  count, rows per shard, global table height, and active/standby shard
+  assignments.
+- `pk="shard-config#epoch#<epoch_id>"` stores the immutable shard topology
+  snapshot used by that epoch. The current shard config can change later for a
+  future epoch, but historical reads/results should use the epoch snapshot.
 - `pk="session#<global_uuid>"` stores a coordinator session admitted by
   `Upload1`, including epoch ID, shard ID, local UUID, hash key, global row, and
   shard-local row. The coordinator deletes this record after successful
   `Upload3`.
+
+The `pk="epoch"` record also stores `shard_config_version` and
+`shard_config_key`, where the key points at the epoch-bound shard-config
+snapshot.
 
 Use `aws-eval/07-create-control-table.sh` to create the minimal table when
 testing the DynamoDB backends. The helper records the selected table and region
@@ -97,9 +106,12 @@ Warm standby distinguishes three coordinator roles:
   another coordinator acquired a newer fencing token.
 
 `stale` is a debugging signal for the split-brain-risk case. It should behave
-like `passive` for mutations: reject `StartEpoch`, reject `Upload1`, and avoid
-epoch completion. The fencing token is the safety mechanism; an old token cannot
-renew or mutate after a newer holder takes over.
+like `passive` for control mutations: reject `StartEpoch` and avoid epoch
+completion. Upload routing is allowed only when the shared control store still
+reports an active accepting epoch, because in-flight upload sessions are now
+recoverable through the shared session store. The fencing token is the safety
+mechanism; an old token cannot renew or mutate control state after a newer
+holder takes over.
 
 The warm-standby slice has local regression coverage and AWS validation, but it
 has not had a deep manual code review. Before merging broadly or building SQS

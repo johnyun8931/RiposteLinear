@@ -83,6 +83,22 @@ func sessionItem(session SessionRecord) map[string]ddbtypes.AttributeValue {
 	}
 }
 
+func shardConfigItem(config ShardConfigRecord) map[string]ddbtypes.AttributeValue {
+	values := shardConfigToAttributes(config)
+	key := config.Key
+	if key == "" {
+		key = dynamoControlShardConfigPK
+	}
+	return map[string]ddbtypes.AttributeValue{
+		dynamoControlPKName:   &ddbtypes.AttributeValueMemberS{Value: key},
+		"version":             values[":version"],
+		"shard_count":         values[":shard_count"],
+		"rows_per_shard":      values[":rows_per_shard"],
+		"global_table_height": values[":global_table_height"],
+		"shards":              values[":shards"],
+	}
+}
+
 func TestDynamoDBControlStoreAcquireLeaseUsesConditionalUpdate(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
 	fake := &fakeDynamoDBControlClient{
@@ -167,6 +183,15 @@ func TestDynamoDBControlStoreEpochOperations(t *testing.T) {
 		if input.ConditionExpression == nil && strings.Contains(aws.ToString(input.UpdateExpression), "epoch_id") {
 			t.Fatalf("expected epoch update to be conditional")
 		}
+		if strings.Contains(aws.ToString(input.UpdateExpression), "epoch_id") {
+			if input.ExpressionAttributeValues[":shard_config_version"] == nil {
+				t.Fatal("expected epoch record to include shard config version")
+			}
+			keyAttr, ok := input.ExpressionAttributeValues[":shard_config_key"].(*ddbtypes.AttributeValueMemberS)
+			if !ok || keyAttr.Value != epochShardConfigKey(epoch.ID) {
+				t.Fatalf("expected epoch shard config key %q, got %#v", epochShardConfigKey(epoch.ID), input.ExpressionAttributeValues[":shard_config_key"])
+			}
+		}
 		if strings.Contains(aws.ToString(input.UpdateExpression), "#state = :completed") {
 			completed := epoch
 			completed.State = db.EpochStateCompleted
@@ -180,10 +205,9 @@ func TestDynamoDBControlStoreEpochOperations(t *testing.T) {
 			return &dynamodb.GetItemOutput{Item: epochItem(epoch, true)}, nil
 		}
 		if pk == dynamoControlShardConfigPK {
-			return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
-				dynamoControlPKName: &ddbtypes.AttributeValueMemberS{Value: dynamoControlShardConfigPK},
-				"version":           numberAttr(3),
-			}}, nil
+			return &dynamodb.GetItemOutput{Item: shardConfigItem(shardConfigRecordFromShards([]ShardConfig{
+				activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+			}, 3))}, nil
 		}
 		return &dynamodb.GetItemOutput{}, nil
 	}
@@ -210,14 +234,74 @@ func TestDynamoDBControlStoreEpochOperations(t *testing.T) {
 	if completed.State != db.EpochStateCompleted {
 		t.Fatalf("expected completed epoch, got %+v", completed)
 	}
-	if version := store.ShardConfigVersion(); version != 3 {
-		t.Fatalf("expected shard config version 3, got %d", version)
+	config, ok, err := store.GetShardConfig()
+	if err != nil || !ok || config.Version != 3 || config.ShardCount != 1 {
+		t.Fatalf("expected shard config version 3 count 1, ok=%t err=%v config=%+v", ok, err, config)
 	}
 	if err := store.SetAccepting(epoch.ID, false); err != nil {
 		t.Fatalf("SetAccepting failed: %v", err)
 	}
-	if err := store.SetShardConfigVersion(4); err != nil {
-		t.Fatalf("SetShardConfigVersion failed: %v", err)
+	if err := store.PutShardConfig(shardConfigRecordFromShards([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, 4)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+}
+
+func TestDynamoDBControlStoreEpochShardConfigSnapshot(t *testing.T) {
+	config := shardConfigRecordFromShards([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, 3)
+	fake := &fakeDynamoDBControlClient{}
+	fake.updateItem = func(input *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+		if got := input.Key[dynamoControlPKName].(*ddbtypes.AttributeValueMemberS).Value; got != epochShardConfigKey(7) {
+			t.Fatalf("unexpected snapshot key %q", got)
+		}
+		if input.ConditionExpression == nil || !strings.Contains(aws.ToString(input.ConditionExpression), "config_hash = :config_hash") {
+			t.Fatalf("expected immutable snapshot condition, got %v", aws.ToString(input.ConditionExpression))
+		}
+		if input.ExpressionAttributeValues[":config_hash"] == nil {
+			t.Fatal("expected config hash attribute")
+		}
+		return &dynamodb.UpdateItemOutput{}, nil
+	}
+	fake.getItem = func(input *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+		if got := input.Key[dynamoControlPKName].(*ddbtypes.AttributeValueMemberS).Value; got != epochShardConfigKey(7) {
+			t.Fatalf("unexpected get key %q", got)
+		}
+		return &dynamodb.GetItemOutput{Item: shardConfigItem(epochShardConfigRecord(config, 7))}, nil
+	}
+	store, err := newDynamoDBControlStore(fake, "control")
+	if err != nil {
+		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+	}
+
+	if err := store.PutEpochShardConfig(7, epochShardConfigRecord(config, 7)); err != nil {
+		t.Fatalf("PutEpochShardConfig failed: %v", err)
+	}
+	got, ok, err := store.GetEpochShardConfig(7)
+	if err != nil || !ok || !shardConfigRecordsEqual(got, epochShardConfigRecord(config, 7)) {
+		t.Fatalf("unexpected epoch shard config ok=%t err=%v config=%+v", ok, err, got)
+	}
+}
+
+func TestDynamoDBControlStoreEpochShardConfigRejectsDifferentRewrite(t *testing.T) {
+	conditionalErr := &ddbtypes.ConditionalCheckFailedException{}
+	fake := &fakeDynamoDBControlClient{
+		updateItem: func(input *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			return nil, conditionalErr
+		},
+	}
+	store, err := newDynamoDBControlStore(fake, "control")
+	if err != nil {
+		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+	}
+
+	err = store.PutEpochShardConfig(7, epochShardConfigRecord(shardConfigRecordFromShards([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, 3), 7))
+	if err == nil || !strings.Contains(err.Error(), "different config") {
+		t.Fatalf("expected different config error, got %v", err)
 	}
 }
 

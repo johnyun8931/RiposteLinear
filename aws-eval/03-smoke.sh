@@ -35,6 +35,9 @@ capture_dynamodb_smoke_state() {
     capture_dynamodb_control_item "$pk" "$local_dir/${pk}.json"
     copy_to_remote "$local_dir/${pk}.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/${pk}.json"
   done
+  if capture_dynamodb_epoch_shard_config "$local_dir/epoch.json" "$local_dir/epoch-shard-config.json"; then
+    copy_to_remote "$local_dir/epoch-shard-config.json" "$COORDINATOR_PUBLIC_IP" "$remote_dir/epoch-shard-config.json"
+  fi
 }
 
 assert_dynamodb_smoke_state() {
@@ -46,29 +49,46 @@ assert_dynamodb_smoke_state() {
   local epoch_file="$SMOKE_LOCAL_DIR/dynamodb-$stage/epoch.json"
   local lease_file="$SMOKE_LOCAL_DIR/dynamodb-$stage/lease.json"
   local shard_config_file="$SMOKE_LOCAL_DIR/dynamodb-$stage/shard-config.json"
+  local epoch_shard_config_file="$SMOKE_LOCAL_DIR/dynamodb-$stage/epoch-shard-config.json"
 
   if ! dynamodb_control_enabled; then
     return 0
   fi
 
   holder="$(coordinator_holder_id)"
-  python3 - "$epoch_file" "$lease_file" "$shard_config_file" "$epoch_id" "$accepting" "$allow_completed" "$holder" <<'PY'
+  python3 - "$epoch_file" "$lease_file" "$shard_config_file" "$epoch_shard_config_file" "$epoch_id" "$accepting" "$allow_completed" "$holder" <<'PY'
 import json
+import os
 import sys
 
-epoch_path, lease_path, shard_config_path, epoch_id, accepting, allow_completed, holder = sys.argv[1:]
+epoch_path, lease_path, shard_config_path, epoch_shard_config_path, epoch_id, accepting, allow_completed, holder = sys.argv[1:]
 epoch = json.load(open(epoch_path)).get("Item", {})
 lease = json.load(open(lease_path)).get("Item", {})
 shard_config = json.load(open(shard_config_path)).get("Item", {})
+epoch_shard_config = json.load(open(epoch_shard_config_path)).get("Item", {}) if os.path.exists(epoch_shard_config_path) else {}
 
 actual_epoch = epoch.get("epoch_id", {}).get("N")
 actual_accepting = epoch.get("accepting", {}).get("BOOL")
 actual_state = epoch.get("state", {}).get("S")
+actual_shard_config_key = epoch.get("shard_config_key", {}).get("S")
 actual_holder = lease.get("holder", {}).get("S")
 actual_shard_version = shard_config.get("version", {}).get("N")
+actual_shard_count = shard_config.get("shard_count", {}).get("N")
+actual_rows_per_shard = shard_config.get("rows_per_shard", {}).get("N")
+actual_global_height = shard_config.get("global_table_height", {}).get("N")
+actual_shards = shard_config.get("shards", {}).get("L", [])
+snapshot_pk = epoch_shard_config.get("pk", {}).get("S")
+snapshot_shard_version = epoch_shard_config.get("version", {}).get("N")
+snapshot_shard_count = epoch_shard_config.get("shard_count", {}).get("N")
+snapshot_rows_per_shard = epoch_shard_config.get("rows_per_shard", {}).get("N")
+snapshot_global_height = epoch_shard_config.get("global_table_height", {}).get("N")
+snapshot_shards = epoch_shard_config.get("shards", {}).get("L", [])
 
 if actual_epoch != epoch_id:
     raise SystemExit(f"DynamoDB epoch id mismatch: expected {epoch_id}, got {actual_epoch}")
+expected_snapshot_key = f"shard-config#epoch#{epoch_id}"
+if actual_shard_config_key != expected_snapshot_key:
+    raise SystemExit(f"DynamoDB epoch shard_config_key mismatch: expected {expected_snapshot_key}, got {actual_shard_config_key}")
 expected_accepting = accepting == "true"
 completed_is_allowed = allow_completed == "true" and actual_state == "completed" and actual_accepting is False
 if actual_accepting != expected_accepting and not completed_is_allowed:
@@ -77,6 +97,26 @@ if actual_holder != holder:
     raise SystemExit(f"DynamoDB lease holder mismatch: expected {holder}, got {actual_holder}")
 if actual_shard_version != "1":
     raise SystemExit(f"DynamoDB shard config version mismatch: expected 1, got {actual_shard_version}")
+if actual_shard_count != "2":
+    raise SystemExit(f"DynamoDB shard count mismatch: expected 2, got {actual_shard_count}")
+if actual_rows_per_shard != "256":
+    raise SystemExit(f"DynamoDB rows_per_shard mismatch: expected 256, got {actual_rows_per_shard}")
+if actual_global_height != "512":
+    raise SystemExit(f"DynamoDB global_table_height mismatch: expected 512, got {actual_global_height}")
+if len(actual_shards) != 2:
+    raise SystemExit(f"DynamoDB shard entries mismatch: expected 2, got {len(actual_shards)}")
+if snapshot_pk != expected_snapshot_key:
+    raise SystemExit(f"DynamoDB epoch shard config key mismatch: expected {expected_snapshot_key}, got {snapshot_pk}")
+if snapshot_shard_version != "1":
+    raise SystemExit(f"DynamoDB epoch shard config version mismatch: expected 1, got {snapshot_shard_version}")
+if snapshot_shard_count != "2":
+    raise SystemExit(f"DynamoDB epoch shard count mismatch: expected 2, got {snapshot_shard_count}")
+if snapshot_rows_per_shard != "256":
+    raise SystemExit(f"DynamoDB epoch rows_per_shard mismatch: expected 256, got {snapshot_rows_per_shard}")
+if snapshot_global_height != "512":
+    raise SystemExit(f"DynamoDB epoch global_table_height mismatch: expected 512, got {snapshot_global_height}")
+if len(snapshot_shards) != 2:
+    raise SystemExit(f"DynamoDB epoch shard entries mismatch: expected 2, got {len(snapshot_shards)}")
 PY
 }
 

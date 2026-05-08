@@ -32,8 +32,19 @@ type ControlStore interface {
 	CurrentEpoch() (db.EpochMeta, bool)
 	SetAccepting(epochID int64, accepting bool) error
 	Accepting(epochID int64) (bool, error)
-	ShardConfigVersion() int64
-	SetShardConfigVersion(version int64) error
+	GetShardConfig() (ShardConfigRecord, bool, error)
+	PutShardConfig(config ShardConfigRecord) error
+	GetEpochShardConfig(epochID int64) (ShardConfigRecord, bool, error)
+	PutEpochShardConfig(epochID int64, config ShardConfigRecord) error
+}
+
+type ShardConfigRecord struct {
+	Key               string
+	Version           int64
+	ShardCount        int
+	RowsPerShard      int
+	GlobalTableHeight int
+	Shards            []ShardConfig
 }
 
 type IngestionMessage struct {

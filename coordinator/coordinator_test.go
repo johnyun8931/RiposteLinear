@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +43,15 @@ type collidingSessionStore struct {
 	inner       *memorySessionStore
 	collisions  int
 	putAttempts int
+}
+
+type failingEpochShardConfigStore struct {
+	ControlStore
+	err error
+}
+
+func (s *failingEpochShardConfigStore) PutEpochShardConfig(epochID int64, config ShardConfigRecord) error {
+	return s.err
 }
 
 func (s *collidingSessionStore) PutSession(ctx context.Context, session SessionRecord) error {
@@ -183,7 +193,7 @@ func mustStandbyCoordinatorWithSessionStore(t *testing.T, shards []ShardConfig, 
 func setCoordinatorActiveEpoch(t *testing.T, coord *Coordinator, epoch db.EpochMeta) {
 	t.Helper()
 	coord.epoch = epoch
-	if err := coord.controlStore.StartEpoch(epoch, coord.controlStore.ShardConfigVersion()); err != nil {
+	if err := coord.controlStore.StartEpoch(epoch, currentShardConfigVersion(coord.controlStore)); err != nil {
 		t.Fatalf("control store StartEpoch failed: %v", err)
 	}
 }
@@ -732,6 +742,35 @@ func TestCoordinatorStartEpochRequiresAllShardsAndAbortsStartedShardOnFailure(t 
 	}
 }
 
+func TestCoordinatorStartEpochAbortsStartedShardsWhenShardConfigSnapshotFails(t *testing.T) {
+	startTime := time.Unix(1000, 0).UTC()
+	shard := &fakeShardClient{startReply: db.StartEpochReply{
+		EpochID:      1,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+	}}
+	store := &failingEpochShardConfigStore{
+		ControlStore: newMemoryControlStore(1),
+		err:          errors.New("snapshot failed"),
+	}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: shard}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{})
+	if err == nil || !strings.Contains(err.Error(), "write epoch shard config") {
+		t.Fatalf("expected shard config snapshot failure, got %v", err)
+	}
+	if shard.abortCalls != 1 {
+		t.Fatalf("expected started shard to be aborted once, got %d", shard.abortCalls)
+	}
+	if coord.epoch.State != db.EpochStateNoActive {
+		t.Fatalf("expected coordinator epoch to remain closed, got %+v", coord.epoch)
+	}
+}
+
 func TestCoordinatorStartEpochUsesOnlyActivePairWhenStandbyConfigured(t *testing.T) {
 	startTime := time.Unix(1000, 0).UTC()
 	active := &fakeShardClient{startReply: db.StartEpochReply{
@@ -823,6 +862,10 @@ func TestCoordinatorStartEpochProducesSharedMetadata(t *testing.T) {
 	epoch, ok := coord.controlStore.CurrentEpoch()
 	if !ok || epoch.ID != reply.EpochID || epoch.State != db.EpochStateActive {
 		t.Fatalf("expected active control-store epoch, ok=%t epoch=%+v", ok, epoch)
+	}
+	config, ok, err := coord.controlStore.GetEpochShardConfig(reply.EpochID)
+	if err != nil || !ok || config.Key != epochShardConfigKey(reply.EpochID) || config.ShardCount != 2 {
+		t.Fatalf("expected epoch shard config snapshot, ok=%t err=%v config=%+v", ok, err, config)
 	}
 	accepting, err := coord.controlStore.Accepting(reply.EpochID)
 	if err != nil || !accepting {
@@ -1064,6 +1107,64 @@ func TestStaleCoordinatorRoutesUploadsWhenControlStoreAccepts(t *testing.T) {
 	}
 }
 
+func TestCoordinatorStartupWritesInitialShardConfig(t *testing.T) {
+	store := newMemoryControlStore(1)
+	shards := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}
+	coord := mustCoordinatorWithLease(t, shards, map[int]shardClient{
+		0: &fakeShardClient{},
+		1: &fakeShardClient{},
+	}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	_ = coord
+
+	config, ok, err := store.GetShardConfig()
+	if err != nil || !ok {
+		t.Fatalf("expected startup to write shard config, ok=%t err=%v", ok, err)
+	}
+	want := shardConfigRecordFromShards(shards, 1)
+	if !shardConfigRecordsEqual(config, want) {
+		t.Fatalf("unexpected shard config: got %+v want %+v", config, want)
+	}
+}
+
+func TestCoordinatorStartupValidatesStoredShardConfig(t *testing.T) {
+	store := newMemoryControlStore(1)
+	shards := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(shards, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	coord := mustCoordinatorWithLease(t, shards, map[int]shardClient{
+		0: &fakeShardClient{},
+		1: &fakeShardClient{},
+	}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	_ = coord
+}
+
+func TestCoordinatorStartupRejectsMismatchedStoredShardConfig(t *testing.T) {
+	store := newMemoryControlStore(1)
+	stored := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(stored, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	configured := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}
+	_, err := newCoordinatorWithLeaseConfig(configured, map[int]shardClient{
+		0: &fakeShardClient{},
+	}, store, newMemorySessionStore(), "memory", "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	if err == nil || !strings.Contains(err.Error(), "configured shard map does not match") {
+		t.Fatalf("expected shard config mismatch, got %v", err)
+	}
+}
+
 func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 	startTime := time.Unix(1200, 0).UTC()
 	leftStatus := db.StatusReply{
@@ -1181,7 +1282,10 @@ func TestCoordinatorStatusScalingDoesNotMutateRoutingOrControlStore(t *testing.T
 		1: &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ShardID: 1}},
 	}, store, defaultCoordinatorLeaseHolder, testLeaseTTL, testLeaseRenewInterval)
 
-	beforeVersion := store.ShardConfigVersion()
+	beforeConfig, beforeOK, err := store.GetShardConfig()
+	if err != nil {
+		t.Fatalf("GetShardConfig failed: %v", err)
+	}
 	beforeShard, err := coord.routeShard(db.TABLE_HEIGHT)
 	if err != nil {
 		t.Fatalf("routeShard failed before status: %v", err)
@@ -1199,8 +1303,12 @@ func TestCoordinatorStatusScalingDoesNotMutateRoutingOrControlStore(t *testing.T
 	if beforeShard.ID != afterShard.ID {
 		t.Fatalf("status changed routing: before shard %d after shard %d", beforeShard.ID, afterShard.ID)
 	}
-	if version := store.ShardConfigVersion(); version != beforeVersion {
-		t.Fatalf("status changed shard config version: before %d after %d", beforeVersion, version)
+	afterConfig, afterOK, err := store.GetShardConfig()
+	if err != nil {
+		t.Fatalf("GetShardConfig after status failed: %v", err)
+	}
+	if beforeOK != afterOK || (beforeOK && !shardConfigRecordsEqual(beforeConfig, afterConfig)) {
+		t.Fatalf("status changed shard config: before ok=%t config=%+v after ok=%t config=%+v", beforeOK, beforeConfig, afterOK, afterConfig)
 	}
 	if reply.ScalingAction != scalingActionKeep {
 		t.Fatalf("expected default scaling status to keep, got %+v", reply)

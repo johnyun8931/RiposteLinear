@@ -48,13 +48,62 @@ if [[ "$DYNAMODB_SESSION_TABLE" != "$DYNAMODB_CONTROL_TABLE" || "$(dynamodb_sess
   ensure_table "$DYNAMODB_SESSION_TABLE" "session" "$(dynamodb_session_region)"
 fi
 
-info "seeding shard config version"
+info "seeding shard config"
+shard_values="$(mktemp)"
+ROWS_PER_SHARD="$ROWS_PER_SHARD" \
+SHARD0_LEADER_ADDR="$(shard0_leader_addr)" \
+SHARD0_FOLLOWER_ADDR="$(shard0_follower_addr)" \
+SHARD1_LEADER_ADDR="$(shard1_leader_addr)" \
+SHARD1_FOLLOWER_ADDR="$(shard1_follower_addr)" \
+python3 - "$shard_values" <<'PY'
+import json
+import os
+import sys
+
+rows = int(os.environ["ROWS_PER_SHARD"])
+shards = [
+    {
+        "M": {
+            "id": {"N": "0"},
+            "start_row": {"N": "0"},
+            "end_row": {"N": str(rows)},
+            "active_leader_addr": {"S": os.environ["SHARD0_LEADER_ADDR"]},
+            "active_follower_addr": {"S": os.environ["SHARD0_FOLLOWER_ADDR"]},
+            "has_standby": {"BOOL": False},
+            "standby_leader_addr": {"S": ""},
+            "standby_follower_addr": {"S": ""},
+        }
+    },
+    {
+        "M": {
+            "id": {"N": "1"},
+            "start_row": {"N": str(rows)},
+            "end_row": {"N": str(2 * rows)},
+            "active_leader_addr": {"S": os.environ["SHARD1_LEADER_ADDR"]},
+            "active_follower_addr": {"S": os.environ["SHARD1_FOLLOWER_ADDR"]},
+            "has_standby": {"BOOL": False},
+            "standby_leader_addr": {"S": ""},
+            "standby_follower_addr": {"S": ""},
+        }
+    },
+]
+payload = {
+    ":version": {"N": "1"},
+    ":shard_count": {"N": "2"},
+    ":rows_per_shard": {"N": str(rows)},
+    ":global_table_height": {"N": str(2 * rows)},
+    ":shards": {"L": shards},
+}
+with open(sys.argv[1], "w") as fh:
+    json.dump(payload, fh)
+PY
 aws_base --region "$(dynamodb_control_region)" dynamodb update-item \
   --table-name "$DYNAMODB_CONTROL_TABLE" \
   --key '{"pk":{"S":"shard-config"}}' \
-  --update-expression 'SET #version = if_not_exists(#version, :version)' \
+  --update-expression 'SET #version = if_not_exists(#version, :version), shard_count = if_not_exists(shard_count, :shard_count), rows_per_shard = if_not_exists(rows_per_shard, :rows_per_shard), global_table_height = if_not_exists(global_table_height, :global_table_height), shards = if_not_exists(shards, :shards)' \
   --expression-attribute-names '{"#version":"version"}' \
-  --expression-attribute-values '{":version":{"N":"1"}}' >/dev/null
+  --expression-attribute-values "file://$shard_values" >/dev/null
+rm -f "$shard_values"
 
 state_tmp="$(mktemp)"
 if [[ -f "$STATE_FILE" ]]; then

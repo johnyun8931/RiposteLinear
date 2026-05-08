@@ -176,10 +176,14 @@ Then create or record the DynamoDB table:
 ```
 
 The table has one string partition key, `pk`. It stores control records
-`lease`, `epoch`, and `shard-config`; when the session store uses the same table,
-it also stores transient `session#<global_uuid>` records for coordinator-routed
-uploads that have completed `Upload1` but not yet completed `Upload3`. The
-helper records `CONTROL_STORE_BACKEND=dynamodb`, `DYNAMODB_CONTROL_TABLE`,
+`lease`, `epoch`, and `shard-config`. The `shard-config` record stores the full
+two-shard topology used by the AWS harness: shard count, rows per shard, global
+table height, and active shard addresses. Each started epoch also gets an
+immutable `shard-config#epoch#<epoch_id>` topology snapshot, and the `epoch`
+record points at it with `shard_config_key`. When the session store uses the same
+table, it also stores transient `session#<global_uuid>` records for
+coordinator-routed uploads that have completed `Upload1` but not yet completed
+`Upload3`. The helper records `CONTROL_STORE_BACKEND=dynamodb`, `DYNAMODB_CONTROL_TABLE`,
 `DYNAMODB_CONTROL_REGION`, `SESSION_STORE_BACKEND=dynamodb`,
 `DYNAMODB_SESSION_TABLE`, and `DYNAMODB_SESSION_REGION` in
 `aws-eval/.state/env.sh`.
@@ -245,11 +249,14 @@ target-health artifacts are copied under the smoke log directory.
 
 If `CONTROL_STORE_BACKEND=dynamodb`, smoke starts the coordinator with the
 DynamoDB control-store flags and captures the `lease`, `epoch`, and
-`shard-config` table records after epoch start and completion. If
+`shard-config` table records, plus the epoch-bound `epoch-shard-config.json`
+snapshot, after epoch start and completion. If
 `SESSION_STORE_BACKEND=dynamodb`, coordinator status reports that backend and
 the coordinator persists in-flight session records in DynamoDB until `Upload3`
 completes. The smoke check also verifies that the DynamoDB epoch ID and
-accepting flag match the observed coordinator lifecycle.
+accepting flag match the observed coordinator lifecycle, and that the persisted
+current and epoch-bound shard configs report two shards, `rows_per_shard=256`,
+and `global_table_height=512`.
 
 To validate coordinator lease/fencing behavior with two coordinator attempts:
 
