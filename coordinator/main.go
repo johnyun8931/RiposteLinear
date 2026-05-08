@@ -26,6 +26,7 @@ var flagAdminTarget = flag.String("admin-target", "", "Target coordinator addres
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
 var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query coordinator epoch status over admin RPC and exit")
 var flagStatus = flag.Bool("status", false, "If set, query coordinator status over admin RPC and exit")
+var flagApplyScalingRecommendation = flag.Bool("apply-scaling-recommendation", false, "If set, apply the latest scaling recommendation to the next shard config and exit")
 var flagControlStore = flag.String("control-store", "memory", "Control store backend: memory or dynamodb")
 var flagControlTable = flag.String("control-table", "", "DynamoDB table name for -control-store dynamodb")
 var flagSessionStore = flag.String("session-store", "memory", "Session store backend: memory or dynamodb")
@@ -51,7 +52,7 @@ func init() {
 func main() {
 	flag.Parse()
 
-	if *flagStartEpoch > 0 || *flagEpochStatus || *flagStatus {
+	if *flagStartEpoch > 0 || *flagEpochStatus || *flagStatus || *flagApplyScalingRecommendation {
 		if *flagAdminTarget == "" {
 			log.Fatal("Must specify -admin-target for admin RPC commands")
 		}
@@ -92,17 +93,13 @@ func main() {
 	}
 	leaseTTL := time.Duration(*flagLeaseTTLSeconds) * time.Second
 	leaseRenewInterval := time.Duration(*flagLeaseRenewSeconds) * time.Second
-	scalingConfig, err := resolveScalingPolicyConfig(
-		len(shards),
-		*flagScalingMinShards,
-		*flagScalingMaxShards,
-		*flagScalingTargetRowsPerShard,
-		*flagScalingUpDensity,
-		*flagScalingDownDensity,
-		*flagScalingMaxShardMultiplier,
-	)
-	if err != nil {
-		log.Fatal(err)
+	scalingConfig := ScalingPolicyConfig{
+		MinShards:                 *flagScalingMinShards,
+		MaxShards:                 *flagScalingMaxShards,
+		TargetRowsPerShard:        *flagScalingTargetRowsPerShard,
+		ScaleUpDensityThreshold:   *flagScalingUpDensity,
+		ScaleDownDensityThreshold: *flagScalingDownDensity,
+		MaxShardMultiplier:        *flagScalingMaxShardMultiplier,
 	}
 
 	coord, err := newCoordinatorWithStandbyAndScalingConfig(
@@ -247,6 +244,25 @@ func runAdminCommand() {
 		if err := encoder.Encode(reply); err != nil {
 			log.Fatal("Could not encode status: ", err)
 		}
+		return
+	}
+
+	if *flagApplyScalingRecommendation {
+		var reply db.ApplyScalingRecommendationReply
+		err = client.Call("Server.ApplyScalingRecommendation", &db.ApplyScalingRecommendationArgs{}, &reply)
+		if err != nil {
+			log.Fatal("Could not apply scaling recommendation: ", err)
+		}
+		log.Printf("applied=%t recommendation_epoch=%d version=%d->%d shards=%d->%d status=%s reason=%s",
+			reply.Applied,
+			reply.RecommendationEpochID,
+			reply.PreviousVersion,
+			reply.NewVersion,
+			reply.PreviousShardCount,
+			reply.NewShardCount,
+			reply.Status,
+			reply.Reason,
+		)
 		return
 	}
 	log.Fatal(errors.New("no admin command requested"))

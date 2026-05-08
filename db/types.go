@@ -266,32 +266,50 @@ type CoordinatorShardStatus struct {
 }
 
 type CoordinatorStatusReply struct {
-	Healthy                   bool                     `json:"healthy"`
-	Role                      string                   `json:"role"`
-	LeaderAddr                string                   `json:"leader_addr"`
-	SessionStoreBackend       string                   `json:"session_store_backend"`
-	GlobalTableHeight         int                      `json:"global_table_height"`
-	EpochID                   int64                    `json:"epoch_id"`
-	State                     string                   `json:"state"`
-	StartUnix                 int64                    `json:"start_unix"`
-	EndUnix                   int64                    `json:"end_unix"`
-	DurationSecs              int64                    `json:"duration_secs"`
-	Accepting                 bool                     `json:"accepting"`
-	LeaseHolder               string                   `json:"lease_holder"`
-	LeaseFencingToken         int64                    `json:"lease_fencing_token"`
-	LeaseExpiresUnixMs        int64                    `json:"lease_expires_unix_ms"`
-	LeaseActive               bool                     `json:"lease_active"`
-	ActiveHolder              string                   `json:"active_holder"`
-	CurrentShardCount         int                      `json:"current_shard_count"`
-	RecommendedNextShardCount int                      `json:"recommended_next_shard_count"`
-	TargetRowsPerShard        int                      `json:"target_rows_per_shard"`
-	ScalingAction             string                   `json:"scaling_action"`
-	ScalingReason             string                   `json:"scaling_reason"`
-	RequestDensity            float64                  `json:"request_density"`
-	ScalingEpochID            int64                    `json:"scaling_epoch_id"`
-	ScalingAcceptedRequests   int64                    `json:"scaling_accepted_requests"`
-	ScalingDurationSecs       int64                    `json:"scaling_duration_secs"`
-	Shards                    []CoordinatorShardStatus `json:"shards"`
+	Healthy                        bool                     `json:"healthy"`
+	Role                           string                   `json:"role"`
+	LeaderAddr                     string                   `json:"leader_addr"`
+	SessionStoreBackend            string                   `json:"session_store_backend"`
+	GlobalTableHeight              int                      `json:"global_table_height"`
+	EpochID                        int64                    `json:"epoch_id"`
+	State                          string                   `json:"state"`
+	StartUnix                      int64                    `json:"start_unix"`
+	EndUnix                        int64                    `json:"end_unix"`
+	DurationSecs                   int64                    `json:"duration_secs"`
+	Accepting                      bool                     `json:"accepting"`
+	LeaseHolder                    string                   `json:"lease_holder"`
+	LeaseFencingToken              int64                    `json:"lease_fencing_token"`
+	LeaseExpiresUnixMs             int64                    `json:"lease_expires_unix_ms"`
+	LeaseActive                    bool                     `json:"lease_active"`
+	ActiveHolder                   string                   `json:"active_holder"`
+	CurrentShardCount              int                      `json:"current_shard_count"`
+	RecommendedNextShardCount      int                      `json:"recommended_next_shard_count"`
+	TargetRowsPerShard             int                      `json:"target_rows_per_shard"`
+	ScalingAction                  string                   `json:"scaling_action"`
+	ScalingReason                  string                   `json:"scaling_reason"`
+	RequestDensity                 float64                  `json:"request_density"`
+	ScalingEpochID                 int64                    `json:"scaling_epoch_id"`
+	ScalingAcceptedRequests        int64                    `json:"scaling_accepted_requests"`
+	ScalingDurationSecs            int64                    `json:"scaling_duration_secs"`
+	LatestScalingEpochID           int64                    `json:"latest_scaling_epoch_id"`
+	LatestScalingAction            string                   `json:"latest_scaling_action"`
+	LatestScalingRecommendedShards int                      `json:"latest_scaling_recommended_shards"`
+	ScalingApplyStatus             string                   `json:"scaling_apply_status"`
+	ScalingApplyReason             string                   `json:"scaling_apply_reason"`
+	Shards                         []CoordinatorShardStatus `json:"shards"`
+}
+
+type ApplyScalingRecommendationArgs struct{}
+
+type ApplyScalingRecommendationReply struct {
+	Applied               bool   `json:"applied"`
+	RecommendationEpochID int64  `json:"recommendation_epoch_id"`
+	PreviousVersion       int64  `json:"previous_version"`
+	NewVersion            int64  `json:"new_version"`
+	PreviousShardCount    int    `json:"previous_shard_count"`
+	NewShardCount         int    `json:"new_shard_count"`
+	Status                string `json:"status"`
+	Reason                string `json:"reason"`
 }
 
 type AbortEpochArgs struct {

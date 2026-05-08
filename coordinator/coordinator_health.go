@@ -73,7 +73,8 @@ func pairHealthFromStatus(status db.StatusReply, err error, checkedAt time.Time)
 }
 
 func (c *Coordinator) refreshShardHealth(timeout time.Duration) {
-	shards := append([]ShardConfig(nil), c.shards...)
+	shardConfig := shardConfigForStatus(c.controlStore, c.availableShards)
+	shards := append([]ShardConfig(nil), shardConfig.Shards...)
 	clients := make(map[int]shardClient, len(c.clients))
 	maps.Copy(clients, c.clients)
 	dialStandby := c.standbyLeaderDialer
@@ -118,9 +119,11 @@ func (c *Coordinator) refreshShardHealth(timeout time.Duration) {
 }
 
 func (c *Coordinator) needsShardHealthRefresh() bool {
+	shardConfig := shardConfigForStatus(c.controlStore, c.availableShards)
+	shards := append([]ShardConfig(nil), shardConfig.Shards...)
 	needsRefresh := false
 	c.actorCall(func() {
-		for _, shard := range c.shards {
+		for _, shard := range shards {
 			health := c.health[shard.ID]
 			if health.Active.CheckedAt.IsZero() {
 				needsRefresh = true

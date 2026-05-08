@@ -247,6 +247,24 @@ func completeCoordinatorUpload(t *testing.T, coord *Coordinator, routeRow int) {
 	}
 }
 
+func testScalingRecommendation(epochID int64, shardConfigVersion int64, action string, currentShards int, recommendedShards int) ScalingRecommendationRecord {
+	return ScalingRecommendationRecord{
+		Key:                       epochScalingRecommendationKey(epochID),
+		EpochID:                   epochID,
+		AcceptedRequestCount:      int64(currentShards * db.TABLE_HEIGHT * 8),
+		DurationSeconds:           60,
+		CurrentShardCount:         currentShards,
+		RecommendedShardCount:     recommendedShards,
+		TargetRowsPerShard:        db.TABLE_HEIGHT,
+		RequestDensity:            8,
+		Action:                    action,
+		Reason:                    "test recommendation",
+		ProposedGlobalTableHeight: recommendedShards * db.TABLE_HEIGHT,
+		ShardConfigVersion:        shardConfigVersion,
+		CreatedAt:                 time.Now().UTC(),
+	}
+}
+
 func TestParseShardConfigRequiresActivePairAndAllowsMissingStandby(t *testing.T) {
 	shard, err := parseShardConfig("0,0,256,127.0.0.1:8090,127.0.0.1:8091")
 	if err != nil {
@@ -981,6 +999,173 @@ func TestCoordinatorCompleteEpochPersistsScalingRecommendation(t *testing.T) {
 	}
 }
 
+func TestCoordinatorApplyScalingRecommendationWritesNextShardConfig(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(active, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	snapshot := epochShardConfigRecord(shardConfigRecordFromShards(active, 1), 1)
+	if err := store.PutEpochShardConfig(1, snapshot); err != nil {
+		t.Fatalf("PutEpochShardConfig failed: %v", err)
+	}
+	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
+		t.Fatalf("PutScalingRecommendation failed: %v", err)
+	}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: &fakeShardClient{},
+		1: &fakeShardClient{},
+	}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	var status db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &status); err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.ScalingApplyStatus != scalingApplyStatusApplicable || status.LatestScalingEpochID != 1 || status.LatestScalingRecommendedShards != 2 {
+		t.Fatalf("expected applicable scaling status, got %+v", status)
+	}
+
+	var reply db.ApplyScalingRecommendationReply
+	if err := coord.ApplyScalingRecommendation(&db.ApplyScalingRecommendationArgs{}, &reply); err != nil {
+		t.Fatalf("ApplyScalingRecommendation failed: %v", err)
+	}
+	if !reply.Applied || reply.RecommendationEpochID != 1 || reply.PreviousVersion != 1 || reply.NewVersion != 2 || reply.PreviousShardCount != 1 || reply.NewShardCount != 2 {
+		t.Fatalf("unexpected apply reply: %+v", reply)
+	}
+	config, ok, err := store.GetShardConfig()
+	if err != nil || !ok {
+		t.Fatalf("GetShardConfig failed after apply, ok=%t err=%v", ok, err)
+	}
+	if config.Version != 2 || config.ShardCount != 2 || config.GlobalTableHeight != 2*db.TABLE_HEIGHT {
+		t.Fatalf("unexpected applied shard config: %+v", config)
+	}
+	epochSnapshot, ok, err := store.GetEpochShardConfig(1)
+	if err != nil || !ok || !shardConfigRecordsEqual(epochSnapshot, snapshot) {
+		t.Fatalf("expected epoch snapshot unchanged, ok=%t err=%v got=%+v want=%+v", ok, err, epochSnapshot, snapshot)
+	}
+}
+
+func TestCoordinatorApplyScalingRecommendationRejectsWithoutLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(active, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
+		t.Fatalf("PutScalingRecommendation failed: %v", err)
+	}
+	activeCoord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}, 1: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	_ = activeCoord
+	passive := mustStandbyCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}, 1: &fakeShardClient{}}, store, "coord-b", testLeaseTTL, testLeaseRenewInterval)
+
+	err := passive.ApplyScalingRecommendation(&db.ApplyScalingRecommendationArgs{}, &db.ApplyScalingRecommendationReply{})
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active, got %v", err)
+	}
+}
+
+func TestCoordinatorApplyScalingRecommendationRejectsBlockedStates(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(*testing.T, *memoryControlStore)
+		wantStatus string
+	}{
+		{
+			name: "missing latest",
+			setup: func(t *testing.T, store *memoryControlStore) {
+			},
+			wantStatus: scalingApplyStatusMissing,
+		},
+		{
+			name: "keep",
+			setup: func(t *testing.T, store *memoryControlStore) {
+				if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionKeep, 1, 1)); err != nil {
+					t.Fatalf("PutScalingRecommendation failed: %v", err)
+				}
+			},
+			wantStatus: scalingApplyStatusNotApplicable,
+		},
+		{
+			name: "stale recommendation",
+			setup: func(t *testing.T, store *memoryControlStore) {
+				if err := store.PutScalingRecommendation(testScalingRecommendation(1, 2, scalingActionGrow, 1, 2)); err != nil {
+					t.Fatalf("PutScalingRecommendation failed: %v", err)
+				}
+			},
+			wantStatus: scalingApplyStatusNotApplicable,
+		},
+		{
+			name: "active epoch",
+			setup: func(t *testing.T, store *memoryControlStore) {
+				if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
+					t.Fatalf("PutScalingRecommendation failed: %v", err)
+				}
+				epoch := db.EpochMeta{ID: 2, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60}
+				if err := store.StartEpoch(epoch, 1); err != nil {
+					t.Fatalf("StartEpoch failed: %v", err)
+				}
+			},
+			wantStatus: scalingApplyStatusBlockedActiveEpoch,
+		},
+		{
+			name: "missing shards",
+			setup: func(t *testing.T, store *memoryControlStore) {
+				if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
+					t.Fatalf("PutScalingRecommendation failed: %v", err)
+				}
+			},
+			wantStatus: scalingApplyStatusBlockedMissingShards,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMemoryControlStore(1)
+			active := []ShardConfig{activeOnlyShard(0, 0, db.TABLE_HEIGHT)}
+			if err := store.PutShardConfig(shardConfigRecordFromShards(active, 1)); err != nil {
+				t.Fatalf("PutShardConfig failed: %v", err)
+			}
+			tt.setup(t, store)
+			inventory := active
+			if tt.wantStatus != scalingApplyStatusBlockedMissingShards {
+				inventory = []ShardConfig{
+					activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+					activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+				}
+			}
+			coord := mustCoordinatorWithLease(t, inventory, map[int]shardClient{
+				0: &fakeShardClient{},
+				1: &fakeShardClient{},
+			}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+			var status db.CoordinatorStatusReply
+			if err := coord.Status(&db.CoordinatorStatusArgs{}, &status); err != nil {
+				t.Fatalf("Status failed: %v", err)
+			}
+			if status.ScalingApplyStatus != tt.wantStatus {
+				t.Fatalf("expected status %q, got %+v", tt.wantStatus, status)
+			}
+			err := coord.ApplyScalingRecommendation(&db.ApplyScalingRecommendationArgs{}, &db.ApplyScalingRecommendationReply{})
+			if err == nil || !strings.Contains(err.Error(), tt.wantStatus) {
+				t.Fatalf("expected apply rejection containing %q, got %v", tt.wantStatus, err)
+			}
+		})
+	}
+}
+
 func TestCoordinatorCompleteEpochSkipsStoreMutationWithStaleLease(t *testing.T) {
 	store := newMemoryControlStore(1)
 	startTime := time.Now().UTC().Truncate(time.Second)
@@ -1191,6 +1376,95 @@ func TestCoordinatorStartupValidatesStoredShardConfig(t *testing.T) {
 	_ = coord
 }
 
+func TestCoordinatorStartupAcceptsShardInventorySuperset(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(active, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	inventory := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}
+	coord := mustCoordinatorWithLease(t, inventory, map[int]shardClient{
+		0: &fakeShardClient{},
+		1: &fakeShardClient{},
+	}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	var reply db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &reply); err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if reply.CurrentShardCount != 1 || reply.GlobalTableHeight != db.TABLE_HEIGHT || len(reply.Shards) != 1 {
+		t.Fatalf("expected active topology to remain one shard, got %+v", reply)
+	}
+}
+
+func TestCoordinatorUploadsUseActiveShardConfigNotSpareInventory(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(active, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	left := &fakeShardClient{}
+	spare := &fakeShardClient{}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: left,
+		1: spare,
+	}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	setCoordinatorActiveEpoch(t, coord, db.EpochMeta{ID: 1, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60})
+
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: 0}, &db.UploadReply1{}); err != nil {
+		t.Fatalf("Upload1 to active shard failed: %v", err)
+	}
+	if err := coord.Upload1(&db.UploadArgs1{RouteRow: db.TABLE_HEIGHT}, &db.UploadReply1{}); err == nil {
+		t.Fatal("expected Upload1 to spare shard range to fail while shard is inactive")
+	}
+	if left.upload1Calls != 1 || spare.upload1Calls != 0 {
+		t.Fatalf("unexpected routing calls: active=%d spare=%d", left.upload1Calls, spare.upload1Calls)
+	}
+}
+
+func TestCoordinatorStartEpochUsesActiveShardConfigNotSpareInventory(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(active, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	startTime := time.Now().UTC().Truncate(time.Second)
+	activeClient := &fakeShardClient{startReply: db.StartEpochReply{
+		EpochID:      1,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+	}}
+	spareClient := &fakeShardClient{}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: activeClient,
+		1: spareClient,
+	}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	if err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{}); err != nil {
+		t.Fatalf("StartEpoch failed: %v", err)
+	}
+	if activeClient.startCalls != 1 || spareClient.startCalls != 0 {
+		t.Fatalf("expected only active shard to start epoch, active=%d spare=%d", activeClient.startCalls, spareClient.startCalls)
+	}
+}
+
 func TestCoordinatorStartupRejectsMismatchedStoredShardConfig(t *testing.T) {
 	store := newMemoryControlStore(1)
 	stored := []ShardConfig{
@@ -1206,7 +1480,7 @@ func TestCoordinatorStartupRejectsMismatchedStoredShardConfig(t *testing.T) {
 	_, err := newCoordinatorWithLeaseConfig(configured, map[int]shardClient{
 		0: &fakeShardClient{},
 	}, store, newMemorySessionStore(), "memory", "coord-a", testLeaseTTL, testLeaseRenewInterval)
-	if err == nil || !strings.Contains(err.Error(), "configured shard map does not match") {
+	if err == nil || !strings.Contains(err.Error(), "configured shard inventory missing active shard") {
 		t.Fatalf("expected shard config mismatch, got %v", err)
 	}
 }
@@ -1332,7 +1606,7 @@ func TestCoordinatorStatusScalingDoesNotMutateRoutingOrControlStore(t *testing.T
 	if err != nil {
 		t.Fatalf("GetShardConfig failed: %v", err)
 	}
-	beforeShard, err := coord.routeShard(db.TABLE_HEIGHT)
+	beforeShard, err := routeShard(beforeConfig.Shards, db.TABLE_HEIGHT)
 	if err != nil {
 		t.Fatalf("routeShard failed before status: %v", err)
 	}
@@ -1342,16 +1616,16 @@ func TestCoordinatorStatusScalingDoesNotMutateRoutingOrControlStore(t *testing.T
 		t.Fatalf("Coordinator.Status failed: %v", err)
 	}
 
-	afterShard, err := coord.routeShard(db.TABLE_HEIGHT)
+	afterConfig, afterOK, err := store.GetShardConfig()
+	if err != nil {
+		t.Fatalf("GetShardConfig after status failed: %v", err)
+	}
+	afterShard, err := routeShard(afterConfig.Shards, db.TABLE_HEIGHT)
 	if err != nil {
 		t.Fatalf("routeShard failed after status: %v", err)
 	}
 	if beforeShard.ID != afterShard.ID {
 		t.Fatalf("status changed routing: before shard %d after shard %d", beforeShard.ID, afterShard.ID)
-	}
-	afterConfig, afterOK, err := store.GetShardConfig()
-	if err != nil {
-		t.Fatalf("GetShardConfig after status failed: %v", err)
 	}
 	if beforeOK != afterOK || (beforeOK && !shardConfigRecordsEqual(beforeConfig, afterConfig)) {
 		t.Fatalf("status changed shard config: before ok=%t config=%+v after ok=%t config=%+v", beforeOK, beforeConfig, afterOK, afterConfig)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	"bitbucket.org/henrycg/riposte/db"
 )
@@ -106,8 +107,8 @@ func ensureShardConfig(controlStore ControlStore, shards []ShardConfig, canWrite
 		}
 		return desired, nil
 	}
-	if !shardConfigRecordsEqual(existing, desired) {
-		return ShardConfigRecord{}, errors.New("configured shard map does not match control-store shard config")
+	if err := validateShardInventoryContainsConfig(shards, existing); err != nil {
+		return ShardConfigRecord{}, err
 	}
 	return existing, nil
 }
@@ -126,4 +127,88 @@ func shardConfigForStatus(controlStore ControlStore, fallback []ShardConfig) Sha
 		return config
 	}
 	return shardConfigRecordFromShards(fallback, 1)
+}
+
+func activeShardConfig(controlStore ControlStore) (ShardConfigRecord, error) {
+	config, ok, err := controlStore.GetShardConfig()
+	if err != nil {
+		return ShardConfigRecord{}, err
+	}
+	if !ok {
+		return ShardConfigRecord{}, errors.New("shard config missing")
+	}
+	if err := validateShardConfigRecord(config); err != nil {
+		return ShardConfigRecord{}, err
+	}
+	return config, nil
+}
+
+func validateShardInventoryContainsConfig(inventory []ShardConfig, active ShardConfigRecord) error {
+	if err := validateShardConfigRecord(active); err != nil {
+		return err
+	}
+	byID := make(map[int]ShardConfig, len(inventory))
+	for _, shard := range inventory {
+		byID[shard.ID] = shard
+	}
+	for _, shard := range active.Shards {
+		available, ok := byID[shard.ID]
+		if !ok {
+			return fmt.Errorf("configured shard inventory missing active shard %d", shard.ID)
+		}
+		if !shardsEqual(available, shard) {
+			return fmt.Errorf("configured shard inventory does not match active shard %d", shard.ID)
+		}
+	}
+	return nil
+}
+
+func shardsEqual(a ShardConfig, b ShardConfig) bool {
+	if a.ID != b.ID ||
+		a.StartRow != b.StartRow ||
+		a.EndRow != b.EndRow ||
+		a.Active != b.Active {
+		return false
+	}
+	if (a.Standby == nil) != (b.Standby == nil) {
+		return false
+	}
+	if a.Standby != nil && *a.Standby != *b.Standby {
+		return false
+	}
+	return true
+}
+
+func routeShard(shards []ShardConfig, row int) (ShardConfig, error) {
+	for _, shard := range shards {
+		if row >= shard.StartRow && row < shard.EndRow {
+			return shard, nil
+		}
+	}
+	return ShardConfig{}, fmt.Errorf("row %d outside shard map", row)
+}
+
+func buildShardConfigFromInventory(inventory []ShardConfig, shardCount int, version int64) (ShardConfigRecord, error) {
+	if shardCount <= 0 {
+		return ShardConfigRecord{}, errors.New("shard count must be positive")
+	}
+	if shardCount > len(inventory) {
+		return ShardConfigRecord{}, fmt.Errorf("recommended shard count %d exceeds configured shard inventory %d", shardCount, len(inventory))
+	}
+	sorted := append([]ShardConfig(nil), inventory...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].ID < sorted[j].ID
+	})
+	shards := make([]ShardConfig, 0, shardCount)
+	for i := 0; i < shardCount; i++ {
+		shard := sorted[i]
+		shard.StartRow = i * db.TABLE_HEIGHT
+		shard.EndRow = (i + 1) * db.TABLE_HEIGHT
+		shards = append(shards, shard)
+	}
+	validated, err := validateShardMap(shards)
+	if err != nil {
+		return ShardConfigRecord{}, err
+	}
+	return shardConfigRecordFromShards(validated, version), nil
 }

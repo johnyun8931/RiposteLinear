@@ -180,13 +180,18 @@ The table has one string partition key, `pk`. It stores control records
 two-shard topology used by the AWS harness: shard count, rows per shard, global
 table height, and active shard addresses. Each started epoch also gets an
 immutable `shard-config#epoch#<epoch_id>` topology snapshot, and the `epoch`
-record points at it with `shard_config_key`. When the session store uses the same
+record points at it with `shard_config_key`. Completed epochs may also write
+`scaling#epoch#<epoch_id>` and `scaling#latest` proposal records; operators can
+apply an applicable latest recommendation with
+`coordinator -admin-target <addr> -apply-scaling-recommendation` between epochs.
+Extra `-shard` flags are spare endpoint inventory, not active topology, until a
+new `shard-config` version includes them. When the session store uses the same
 table, it also stores transient `session#<global_uuid>` records for
 coordinator-routed uploads that have completed `Upload1` but not yet completed
-`Upload3`. The helper records `CONTROL_STORE_BACKEND=dynamodb`, `DYNAMODB_CONTROL_TABLE`,
-`DYNAMODB_CONTROL_REGION`, `SESSION_STORE_BACKEND=dynamodb`,
-`DYNAMODB_SESSION_TABLE`, and `DYNAMODB_SESSION_REGION` in
-`aws-eval/.state/env.sh`.
+`Upload3`. The helper records `CONTROL_STORE_BACKEND=dynamodb`,
+`DYNAMODB_CONTROL_TABLE`, `DYNAMODB_CONTROL_REGION`,
+`SESSION_STORE_BACKEND=dynamodb`, `DYNAMODB_SESSION_TABLE`, and
+`DYNAMODB_SESSION_REGION` in `aws-eval/.state/env.sh`.
 
 The launch script creates a temporary coordinator IAM role and instance profile
 for DynamoDB runtime access. Teardown removes that role/profile with the EC2
@@ -308,7 +313,9 @@ log directory:
 
 The completed status includes `scaling_epoch_id`,
 `scaling_accepted_requests`, `scaling_duration_secs`, `request_density`,
-`scaling_action`, and `scaling_reason`.
+`scaling_action`, `scaling_reason`, `latest_scaling_epoch_id`,
+`latest_scaling_action`, `latest_scaling_recommended_shards`,
+`scaling_apply_status`, and `scaling_apply_reason`.
 
 If `PUBLIC_ENTRY_BACKEND=nlb`, sharded benchmark hammer clients target the NLB
 DNS name and each sharded phase captures NLB target-health snapshots.

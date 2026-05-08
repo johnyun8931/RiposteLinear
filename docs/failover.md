@@ -76,7 +76,8 @@ The DynamoDB table uses a single string partition key named `pk`:
 - `pk="epoch"` stores epoch metadata and accepting state.
 - `pk="shard-config"` stores the authoritative shard topology: version, shard
   count, rows per shard, global table height, and active/standby shard
-  assignments.
+  assignments. Coordinators may be started with extra `-shard` endpoint
+  inventory, but uploads and epoch start use only this active topology.
 - `pk="shard-config#epoch#<epoch_id>"` stores the immutable shard topology
   snapshot used by that epoch. The current shard config can change later for a
   future epoch, but historical reads/results should use the epoch snapshot.
@@ -84,10 +85,25 @@ The DynamoDB table uses a single string partition key named `pk`:
   `Upload1`, including epoch ID, shard ID, local UUID, hash key, global row, and
   shard-local row. The coordinator deletes this record after successful
   `Upload3`.
+- `pk="scaling#epoch#<epoch_id>"` and `pk="scaling#latest"` store completed
+  epoch scaling recommendations. These are proposals until an operator applies
+  the latest applicable recommendation between epochs.
 
 The `pk="epoch"` record also stores `shard_config_version` and
 `shard_config_key`, where the key points at the epoch-bound shard-config
 snapshot.
+
+Manual scaling apply is exposed as an admin RPC through:
+
+```bash
+coordinator -admin-target <addr> -apply-scaling-recommendation
+```
+
+Only the current lease holder can apply a recommendation. The apply step rejects
+active or accepting epochs, missing/stale/`keep` recommendations, and
+recommendations that require shard IDs not present in the configured endpoint
+inventory. Successful apply writes a new version of `pk="shard-config"` only;
+epoch-bound shard-config snapshots remain immutable.
 
 Use `aws-eval/07-create-control-table.sh` to create the minimal table when
 testing the DynamoDB backends. The helper records the selected table and region

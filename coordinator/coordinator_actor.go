@@ -201,7 +201,7 @@ func (c *Coordinator) startEpochDecision(args *db.StartEpochArgs, latestEpochID 
 	return decision
 }
 
-func (c *Coordinator) commitStartedEpoch(epoch db.EpochMeta) {
+func (c *Coordinator) commitStartedEpoch(epoch db.EpochMeta, shardCount int) {
 	c.actorCall(func() {
 		if c.epochTimer != nil {
 			c.epochTimer.Stop()
@@ -212,7 +212,7 @@ func (c *Coordinator) commitStartedEpoch(epoch db.EpochMeta) {
 		}
 		c.activeScalingMetrics = EpochScalingMetrics{
 			EpochID:           epoch.ID,
-			CurrentShardCount: len(c.shards),
+			CurrentShardCount: shardCount,
 			DurationSeconds:   epoch.DurationSeconds,
 		}
 		c.hasActiveScalingMetrics = true
@@ -273,7 +273,7 @@ func (c *Coordinator) scalingStatusSnapshot(currentShardCount int) (EpochScaling
 	}, rec
 }
 
-func (c *Coordinator) coordinatorStatusSnapshot() statusSnapshot {
+func (c *Coordinator) coordinatorStatusSnapshot(currentShardCount int) statusSnapshot {
 	snapshot := statusSnapshot{
 		health: make(map[int]shardHealthSnapshot),
 	}
@@ -283,7 +283,7 @@ func (c *Coordinator) coordinatorStatusSnapshot() statusSnapshot {
 		snapshot.role = c.role
 		snapshot.health = make(map[int]shardHealthSnapshot, len(c.health))
 		maps.Copy(snapshot.health, c.health)
-		snapshot.scalingMetrics, snapshot.scaling = c.scalingStatusSnapshot(len(c.shards))
+		snapshot.scalingMetrics, snapshot.scaling = c.scalingStatusSnapshot(currentShardCount)
 	})
 	return snapshot
 }

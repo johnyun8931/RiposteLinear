@@ -52,6 +52,20 @@ pk = scaling#latest
 These records are proposals only. They do not update `pk="shard-config"`, do
 not provision new shard machines, and do not change routing.
 
+The manual apply path promotes a valid `scaling#latest` proposal into
+`pk="shard-config"` only when no epoch is active or accepting:
+
+```bash
+coordinator -admin-target <addr> -apply-scaling-recommendation
+```
+
+Applying a recommendation only changes the next authoritative shard topology.
+It does not modify historical `shard-config#epoch#<epoch_id>` snapshots and it
+does not create new machines. Extra `-shard` flags are treated as spare endpoint
+inventory; they are inactive until a manually applied shard config includes
+them. Upload routing and epoch start use the active `pk="shard-config"` record,
+not every endpoint listed on the command line.
+
 ## Initial Policy Shape
 
 Use hysteresis so shard count does not flap between epochs:
@@ -108,12 +122,13 @@ The coordinator exposes policy knobs for local/AWS experiments:
 -scaling-max-shard-multiplier
 ```
 
-By default, min/max shards both equal the current configured shard count, so the
-policy remains budget-safe unless a larger cap is explicitly configured.
+By default, min/max shards both equal the current active shard count from the
+control store, so the policy remains budget-safe unless a larger cap is
+explicitly configured.
 
 ## Current Boundary
 
-Existing per-shard table dimensions are compile-time constants, runtime local
-table resizing is not implemented, and persisted recommendations are not applied
-to the coordinator shard map yet. Applying a new shard count at epoch boundaries
-remains future work.
+Existing per-shard table dimensions are compile-time constants and runtime local
+table resizing is not implemented. Persisted recommendations can now be applied
+manually between epochs, but automatic provisioning and automatic topology
+changes remain future work.
