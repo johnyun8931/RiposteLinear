@@ -1,107 +1,47 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"time"
-
-	"bitbucket.org/henrycg/riposte/db"
+	"bitbucket.org/henrycg/riposte/controlstore"
 )
 
 var (
-	errLeaseHeld      = errors.New("coordinator lease is held")
-	errLeaseNotHeld   = errors.New("coordinator lease is not held")
-	errStaleFence     = errors.New("stale coordinator fencing token")
-	errEpochMismatch  = errors.New("epoch mismatch")
-	errSessionExists  = errors.New("coordinator session already exists")
-	errSessionMissing = errors.New("coordinator session is missing")
+	errLeaseHeld      = controlstore.ErrLeaseHeld
+	errLeaseNotHeld   = controlstore.ErrLeaseNotHeld
+	errStaleFence     = controlstore.ErrStaleFence
+	errEpochMismatch  = controlstore.ErrEpochMismatch
+	errSessionExists  = controlstore.ErrSessionExists
+	errSessionMissing = controlstore.ErrSessionMissing
 )
 
-type CoordinatorLease struct {
-	Holder       string
-	FencingToken int64
-	ExpiresAt    time.Time
+type CoordinatorLease = controlstore.CoordinatorLease
+type ControlStore = controlstore.ControlStore
+type ShardConfigRecord = controlstore.ShardConfigRecord
+type ShardConfig = controlstore.ShardConfig
+type PairConfig = controlstore.PairConfig
+type ScalingRecommendationRecord = controlstore.ScalingRecommendationRecord
+type IngestionMessage = controlstore.IngestionMessage
+type QueuedIngestionMessage = controlstore.QueuedIngestionMessage
+type IngestionQueue = controlstore.IngestionQueue
+type SessionRecord = controlstore.SessionRecord
+type SessionStore = controlstore.SessionStore
+
+type memoryControlStore = controlstore.MemoryControlStore
+type memorySessionStore = controlstore.MemorySessionStore
+type dynamoDBControlStore = controlstore.DynamoDBStore
+type dynamoDBControlClient = controlstore.DynamoDBClient
+
+func newMemoryControlStore(shardConfigVersion int64) *memoryControlStore {
+	return controlstore.NewMemoryControlStore(shardConfigVersion)
 }
 
-type ControlStore interface {
-	AcquireLease(now time.Time, holder string, ttl time.Duration) (CoordinatorLease, error)
-	RenewLease(now time.Time, holder string, fencingToken int64, ttl time.Duration) (CoordinatorLease, error)
-	CurrentLease(now time.Time) (CoordinatorLease, bool)
-	StartEpoch(epoch db.EpochMeta, shardConfigVersion int64) error
-	CompleteEpoch(epochID int64) (db.EpochMeta, error)
-	CurrentEpoch() (db.EpochMeta, bool)
-	SetAccepting(epochID int64, accepting bool) error
-	Accepting(epochID int64) (bool, error)
-	GetShardConfig() (ShardConfigRecord, bool, error)
-	PutShardConfig(config ShardConfigRecord) error
-	GetEpochShardConfig(epochID int64) (ShardConfigRecord, bool, error)
-	PutEpochShardConfig(epochID int64, config ShardConfigRecord) error
-	PutScalingRecommendation(record ScalingRecommendationRecord) error
-	GetLatestScalingRecommendation() (ScalingRecommendationRecord, bool, error)
-	GetEpochScalingRecommendation(epochID int64) (ScalingRecommendationRecord, bool, error)
+func newMemorySessionStore() *memorySessionStore {
+	return controlstore.NewMemorySessionStore()
 }
 
-type ShardConfigRecord struct {
-	Key               string
-	Version           int64
-	ShardCount        int
-	RowsPerShard      int
-	GlobalTableHeight int
-	Shards            []ShardConfig
+func newDynamoDBControlStore(client dynamoDBControlClient, table string) (*dynamoDBControlStore, error) {
+	return controlstore.NewDynamoDBStore(client, table)
 }
 
-type ScalingRecommendationRecord struct {
-	Key                       string
-	EpochID                   int64
-	AcceptedRequestCount      int64
-	DurationSeconds           int64
-	CurrentShardCount         int
-	RecommendedShardCount     int
-	TargetRowsPerShard        int
-	RequestDensity            float64
-	Action                    string
-	Reason                    string
-	ProposedGlobalTableHeight int
-	ShardConfigVersion        int64
-	CreatedAt                 time.Time
-}
-
-type IngestionMessage struct {
-	ID         string
-	EpochID    int64
-	ShardID    int
-	GlobalUUID int64
-	LocalUUID  int64
-	HashKey    [32]byte
-	RouteRow   int
-	EnqueuedAt time.Time
-}
-
-type QueuedIngestionMessage struct {
-	Message       IngestionMessage
-	ReceiptHandle string
-}
-
-type IngestionQueue interface {
-	Enqueue(ctx context.Context, message IngestionMessage) (string, error)
-	Receive(ctx context.Context, maxMessages int) ([]QueuedIngestionMessage, error)
-	Ack(ctx context.Context, receiptHandle string) error
-}
-
-type SessionRecord struct {
-	EpochID       int64
-	ShardID       int
-	GlobalUUID    int64
-	LocalUUID     int64
-	HashKey       [32]byte
-	GlobalRow     int
-	LocalRow      int
-	ShardStartRow int
-	CreatedAt     time.Time
-}
-
-type SessionStore interface {
-	PutSession(ctx context.Context, session SessionRecord) error
-	GetSession(ctx context.Context, globalUUID int64) (SessionRecord, error)
-	DeleteSession(ctx context.Context, globalUUID int64) error
+func dynamoDBControlStoreConfigError(name string) error {
+	return controlstore.DynamoDBStoreConfigError(name)
 }

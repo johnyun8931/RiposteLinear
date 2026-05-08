@@ -69,6 +69,57 @@ until a manually applied shard config includes them. Upload routing and epoch
 start use the active `pk="shard-config"` record, not every endpoint listed on
 the command line.
 
+An AWS-side `autoscaler` process can run the same dry-run/apply sequence from
+inside the eval environment:
+
+```bash
+autoscaler -coordinator <addr> -control-table <table> -once
+autoscaler -coordinator <addr> -control-table <table> -once -apply
+```
+
+Without `-apply`, it only dry-runs and logs the decision. With `-apply`, it
+promotes an applicable recommendation through the coordinator RPC. It does not
+provision machines; shard endpoint inventory must already exist.
+
+## Autoscaler And Topology Ownership
+
+The autoscaler does not write `pk="shard-config"` directly. It reads DynamoDB to
+decide whether work is worth attempting, then asks the coordinator to dry-run or
+apply the recommendation through `ApplyScalingRecommendation`.
+
+Current apply ownership is:
+
+1. The autoscaler reads `scaling#latest`, `shard-config`, and `epoch`.
+2. The autoscaler skips missing, stale, `keep`, active, or accepting cases.
+3. The autoscaler calls coordinator `ApplyScalingRecommendation(DryRun=true)`.
+4. If dry-run is applicable and `-apply` is set, the autoscaler calls
+   `ApplyScalingRecommendation(DryRun=false)`.
+5. The coordinator verifies it still holds the lease, repeats the safety checks,
+   and performs the `pk="shard-config"` write.
+
+This duplication of checks is intentional. The autoscaler check is a cheap
+preflight and log signal. The coordinator check is the authoritative guard
+before mutation. If the epoch opens or the lease changes between autoscaler
+preflight and apply, the coordinator rejects the write.
+
+The alternative design is to let the autoscaler write `pk="shard-config"`
+directly. That is more powerful, but it would make the autoscaler a second
+topology writer. It would need the same lease/fencing checks, epoch-safety
+checks, shard inventory validation, version conditions, and historical snapshot
+rules as the coordinator. Until that ownership model is explicit, direct
+autoscaler writes would increase split-brain and drift risk.
+
+Therefore, the current rule is:
+
+- coordinator owns epoch/control mutations and current topology writes
+- autoscaler observes recommendations and requests dry-run/apply
+- shard servers remain workers and never change topology
+
+If future work makes the autoscaler the topology owner, first move all topology
+mutation logic into a shared package or service with one writer policy. Do not
+let coordinator and autoscaler independently implement different mutation
+rules.
+
 Local validation is available with:
 
 ```bash

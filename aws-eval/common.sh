@@ -493,7 +493,7 @@ shard1_follower_addr() {
 
 kill_remote_processes() {
   local host="$1"
-  remote_cmd "$host" "pkill -TERM -x server >/dev/null 2>&1 || true; pkill -TERM -x coordinator >/dev/null 2>&1 || true; pkill -TERM -x client >/dev/null 2>&1 || true; sleep 2; pkill -KILL -x server >/dev/null 2>&1 || true; pkill -KILL -x coordinator >/dev/null 2>&1 || true; pkill -KILL -x client >/dev/null 2>&1 || true"
+  remote_cmd "$host" "pkill -TERM -x server >/dev/null 2>&1 || true; pkill -TERM -x coordinator >/dev/null 2>&1 || true; pkill -TERM -x client >/dev/null 2>&1 || true; pkill -TERM -x autoscaler >/dev/null 2>&1 || true; sleep 2; pkill -KILL -x server >/dev/null 2>&1 || true; pkill -KILL -x coordinator >/dev/null 2>&1 || true; pkill -KILL -x client >/dev/null 2>&1 || true; pkill -KILL -x autoscaler >/dev/null 2>&1 || true"
 }
 
 kill_all_remote_processes() {
@@ -630,6 +630,18 @@ start_remote_coordinator() {
   else
     remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args$session_args$seed_args $COORDINATOR_EXTRA_ARGS > '${log_path}.nohup' 2>&1 &"
   fi
+}
+
+run_remote_autoscaler_once() {
+  local host="$1"
+  local coordinator_target="$2"
+  local log_path="$3"
+  local apply="${4:-0}"
+  local apply_arg=""
+  if [[ "$apply" == "1" || "$apply" == "true" ]]; then
+    apply_arg=" -apply"
+  fi
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")'; ~/autoscaler -coordinator '$coordinator_target' -control-table '$(dynamodb_control_table)' -aws-region '$(dynamodb_control_region)' -once$apply_arg -log '$log_path'"
 }
 
 start_remote_hammer_client() {

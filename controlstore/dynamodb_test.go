@@ -1,4 +1,4 @@
-package main
+package controlstore
 
 import (
 	"context"
@@ -135,9 +135,9 @@ func TestDynamoDBControlStoreAcquireLeaseUsesConditionalUpdate(t *testing.T) {
 			return &dynamodb.UpdateItemOutput{Attributes: leaseItem("coord-a", 1, now.Add(time.Minute))}, nil
 		},
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 
 	lease, err := store.AcquireLease(now, "coord-a", time.Minute)
@@ -156,9 +156,9 @@ func TestDynamoDBControlStoreAcquireLeaseReturnsHeldForActiveOtherHolder(t *test
 			return &dynamodb.GetItemOutput{Item: leaseItem("coord-b", 1, now.Add(time.Minute))}, nil
 		},
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 
 	_, err = store.AcquireLease(now, "coord-a", time.Minute)
@@ -181,9 +181,9 @@ func TestDynamoDBControlStoreRenewLeaseMapsConditionalFailure(t *testing.T) {
 			return &dynamodb.GetItemOutput{Item: leaseItem("coord-b", 2, now.Add(time.Minute))}, nil
 		},
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 
 	_, err = store.RenewLease(now, "coord-a", 1, time.Minute)
@@ -234,9 +234,9 @@ func TestDynamoDBControlStoreEpochOperations(t *testing.T) {
 		}
 		return &dynamodb.GetItemOutput{}, nil
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 
 	if err := store.StartEpoch(epoch, 3); err != nil {
@@ -294,9 +294,9 @@ func TestDynamoDBControlStoreEpochShardConfigSnapshot(t *testing.T) {
 		}
 		return &dynamodb.GetItemOutput{Item: shardConfigItem(epochShardConfigRecord(config, 7))}, nil
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 
 	if err := store.PutEpochShardConfig(7, epochShardConfigRecord(config, 7)); err != nil {
@@ -315,9 +315,9 @@ func TestDynamoDBControlStoreEpochShardConfigRejectsDifferentRewrite(t *testing.
 			return nil, conditionalErr
 		},
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 
 	err = store.PutEpochShardConfig(7, epochShardConfigRecord(shardConfigRecordFromShards([]ShardConfig{
@@ -331,8 +331,8 @@ func TestDynamoDBControlStoreEpochShardConfigRejectsDifferentRewrite(t *testing.
 func TestDynamoDBControlStoreScalingRecommendation(t *testing.T) {
 	created := time.Unix(4000, 0).UTC()
 	record := scalingRecommendationRecord(
-		EpochScalingMetrics{EpochID: 7, CurrentShardCount: 2, AcceptedRequestCount: 2048, DurationSeconds: 60},
-		ScalingRecommendation{CurrentShardCount: 2, RecommendedShardCount: 4, TargetRowsPerShard: db.TABLE_HEIGHT, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
+		testEpochScalingMetrics{EpochID: 7, CurrentShardCount: 2, AcceptedRequestCount: 2048, DurationSeconds: 60},
+		testScalingRecommendation{RecommendedShardCount: 4, TargetRowsPerShard: db.TABLE_HEIGHT, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
 		5,
 		created,
 	)
@@ -362,9 +362,9 @@ func TestDynamoDBControlStoreScalingRecommendation(t *testing.T) {
 		item[dynamoControlPKName] = &ddbtypes.AttributeValueMemberS{Value: pk}
 		return &dynamodb.GetItemOutput{Item: item}, nil
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 
 	if err := store.PutScalingRecommendation(record); err != nil {
@@ -395,13 +395,13 @@ func TestDynamoDBControlStoreScalingRecommendationRejectsDifferentRewrite(t *tes
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 	record := scalingRecommendationRecord(
-		EpochScalingMetrics{EpochID: 7, CurrentShardCount: 1, AcceptedRequestCount: 8, DurationSeconds: 60},
-		ScalingRecommendation{CurrentShardCount: 1, RecommendedShardCount: 2, TargetRowsPerShard: 2, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
+		testEpochScalingMetrics{EpochID: 7, CurrentShardCount: 1, AcceptedRequestCount: 8, DurationSeconds: 60},
+		testScalingRecommendation{RecommendedShardCount: 2, TargetRowsPerShard: 2, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
 		1,
 		time.Unix(4000, 0).UTC(),
 	)
@@ -422,13 +422,13 @@ func TestDynamoDBControlStoreScalingRecommendationIgnoresOlderLatest(t *testing.
 			return &dynamodb.UpdateItemOutput{}, nil
 		},
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 	record := scalingRecommendationRecord(
-		EpochScalingMetrics{EpochID: 7, CurrentShardCount: 1, AcceptedRequestCount: 8, DurationSeconds: 60},
-		ScalingRecommendation{CurrentShardCount: 1, RecommendedShardCount: 2, TargetRowsPerShard: 2, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
+		testEpochScalingMetrics{EpochID: 7, CurrentShardCount: 1, AcceptedRequestCount: 8, DurationSeconds: 60},
+		testScalingRecommendation{RecommendedShardCount: 2, TargetRowsPerShard: 2, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
 		1,
 		time.Unix(4000, 0).UTC(),
 	)
@@ -478,9 +478,9 @@ func TestDynamoDBControlStoreSessionOperations(t *testing.T) {
 		}
 		return &dynamodb.DeleteItemOutput{}, nil
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 
 	if err := store.PutSession(context.Background(), session); err != nil {
@@ -508,9 +508,9 @@ func TestDynamoDBControlStoreSessionConditionalFailures(t *testing.T) {
 			return nil, conditionalErr
 		},
 	}
-	store, err := newDynamoDBControlStore(fake, "control")
+	store, err := NewDynamoDBStore(fake, "control")
 	if err != nil {
-		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+		t.Fatalf("NewDynamoDBStore failed: %v", err)
 	}
 
 	err = store.PutSession(context.Background(), SessionRecord{EpochID: 1, GlobalUUID: 1, LocalUUID: 1})

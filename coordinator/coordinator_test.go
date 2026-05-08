@@ -451,8 +451,8 @@ func TestCoordinatorUpload1DeletesPersistedSessionOnShardFailure(t *testing.T) {
 	if err == nil || err.Error() != "shard down" {
 		t.Fatalf("expected shard error, got %v", err)
 	}
-	if len(store.sessions) != 0 {
-		t.Fatalf("expected persisted session cleanup after shard failure, got %+v", store.sessions)
+	if store.Len() != 0 {
+		t.Fatalf("expected persisted session cleanup after shard failure, got %d session(s)", store.Len())
 	}
 }
 

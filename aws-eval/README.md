@@ -308,6 +308,18 @@ endpoints configured, generates a real `grow` recommendation, validates it with
 `256` to shard 1. Dry-run, apply, status, and DynamoDB artifacts are written under
 `aws-eval/.state/scaling-apply/`.
 
+To validate the in-cloud autoscaler-driven apply path instead of direct local
+admin apply:
+
+```bash
+CONTROL_STORE_BACKEND=dynamodb SESSION_STORE_BACKEND=dynamodb \
+APPLY_WITH_AUTOSCALER=1 ./aws-eval/10-validate-scaling-apply.sh
+```
+
+This runs `~/autoscaler -once -apply` on the coordinator EC2 instance. The
+autoscaler still uses preconfigured spare shard inventory; it does not create or
+terminate EC2 instances.
+
 ### 5. Benchmark
 
 ```bash

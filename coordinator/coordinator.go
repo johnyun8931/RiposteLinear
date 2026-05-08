@@ -28,19 +28,6 @@ func (s *shardListType) Set(value string) error {
 	return nil
 }
 
-type ShardConfig struct {
-	ID       int
-	StartRow int
-	EndRow   int
-	Active   PairConfig
-	Standby  *PairConfig
-}
-
-type PairConfig struct {
-	LeaderAddr   string
-	FollowerAddr string
-}
-
 type shardClient interface {
 	Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error
 	Upload2(args *db.UploadArgs2, reply *db.UploadReply2) error

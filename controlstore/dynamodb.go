@@ -1,4 +1,4 @@
-package main
+package controlstore
 
 import (
 	"context"
@@ -23,37 +23,37 @@ const (
 	defaultDynamoOperationTimeout = 5 * time.Second
 )
 
-type dynamoDBControlClient interface {
+type DynamoDBClient interface {
 	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
-type dynamoDBControlStore struct {
-	client  dynamoDBControlClient
+type DynamoDBStore struct {
+	client  DynamoDBClient
 	table   string
 	timeout time.Duration
 }
 
-func newDynamoDBControlStore(client dynamoDBControlClient, table string) (*dynamoDBControlStore, error) {
+func NewDynamoDBStore(client DynamoDBClient, table string) (*DynamoDBStore, error) {
 	if client == nil {
 		return nil, errors.New("dynamodb client is required")
 	}
 	if table == "" {
 		return nil, errors.New("dynamodb control table is required")
 	}
-	return &dynamoDBControlStore{
+	return &DynamoDBStore{
 		client:  client,
 		table:   table,
 		timeout: defaultDynamoOperationTimeout,
 	}, nil
 }
 
-func (s *dynamoDBControlStore) operationContext() (context.Context, context.CancelFunc) {
+func (s *DynamoDBStore) operationContext() (context.Context, context.CancelFunc) {
 	return s.operationContextFrom(context.Background())
 }
 
-func (s *dynamoDBControlStore) operationContextFrom(parent context.Context) (context.Context, context.CancelFunc) {
+func (s *DynamoDBStore) operationContextFrom(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -129,11 +129,11 @@ func leaseFromItem(item map[string]ddbtypes.AttributeValue) CoordinatorLease {
 	}
 }
 
-func (s *dynamoDBControlStore) getItem(pk string) (map[string]ddbtypes.AttributeValue, bool, error) {
+func (s *DynamoDBStore) getItem(pk string) (map[string]ddbtypes.AttributeValue, bool, error) {
 	return s.getItemWithContext(context.Background(), pk)
 }
 
-func (s *dynamoDBControlStore) getItemWithContext(parent context.Context, pk string) (map[string]ddbtypes.AttributeValue, bool, error) {
+func (s *DynamoDBStore) getItemWithContext(parent context.Context, pk string) (map[string]ddbtypes.AttributeValue, bool, error) {
 	ctx, cancel := s.operationContextFrom(parent)
 	defer cancel()
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
@@ -149,7 +149,7 @@ func (s *dynamoDBControlStore) getItemWithContext(parent context.Context, pk str
 	return out.Item, true, nil
 }
 
-func (s *dynamoDBControlStore) AcquireLease(now time.Time, holder string, ttl time.Duration) (CoordinatorLease, error) {
+func (s *DynamoDBStore) AcquireLease(now time.Time, holder string, ttl time.Duration) (CoordinatorLease, error) {
 	if holder == "" {
 		return CoordinatorLease{}, errors.New("lease holder is required")
 	}
@@ -194,7 +194,7 @@ func (s *dynamoDBControlStore) AcquireLease(now time.Time, holder string, ttl ti
 	return leaseFromItem(out.Attributes), nil
 }
 
-func (s *dynamoDBControlStore) RenewLease(now time.Time, holder string, fencingToken int64, ttl time.Duration) (CoordinatorLease, error) {
+func (s *DynamoDBStore) RenewLease(now time.Time, holder string, fencingToken int64, ttl time.Duration) (CoordinatorLease, error) {
 	if ttl <= 0 {
 		return CoordinatorLease{}, errors.New("lease ttl must be positive")
 	}
@@ -225,7 +225,7 @@ func (s *dynamoDBControlStore) RenewLease(now time.Time, holder string, fencingT
 	return leaseFromItem(out.Attributes), nil
 }
 
-func (s *dynamoDBControlStore) CurrentLease(now time.Time) (CoordinatorLease, bool) {
+func (s *DynamoDBStore) CurrentLease(now time.Time) (CoordinatorLease, bool) {
 	item, ok, err := s.getItem(dynamoControlLeasePK)
 	if err != nil || !ok {
 		return CoordinatorLease{}, false
@@ -276,7 +276,7 @@ func parseEpochStateName(state string) db.DbState {
 	}
 }
 
-func (s *dynamoDBControlStore) StartEpoch(epoch db.EpochMeta, shardConfigVersion int64) error {
+func (s *DynamoDBStore) StartEpoch(epoch db.EpochMeta, shardConfigVersion int64) error {
 	if epoch.ID <= 0 {
 		return errors.New("epoch id must be positive")
 	}
@@ -301,7 +301,7 @@ func (s *dynamoDBControlStore) StartEpoch(epoch db.EpochMeta, shardConfigVersion
 	return nil
 }
 
-func (s *dynamoDBControlStore) CompleteEpoch(epochID int64) (db.EpochMeta, error) {
+func (s *DynamoDBStore) CompleteEpoch(epochID int64) (db.EpochMeta, error) {
 	ctx, cancel := s.operationContext()
 	defer cancel()
 	out, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
@@ -328,7 +328,7 @@ func (s *dynamoDBControlStore) CompleteEpoch(epochID int64) (db.EpochMeta, error
 	return epochFromItem(out.Attributes), nil
 }
 
-func (s *dynamoDBControlStore) CurrentEpoch() (db.EpochMeta, bool) {
+func (s *DynamoDBStore) CurrentEpoch() (db.EpochMeta, bool) {
 	item, ok, err := s.getItem(dynamoControlEpochPK)
 	if err != nil || !ok {
 		return db.EpochMeta{}, false
@@ -336,7 +336,7 @@ func (s *dynamoDBControlStore) CurrentEpoch() (db.EpochMeta, bool) {
 	return epochFromItem(item), true
 }
 
-func (s *dynamoDBControlStore) SetAccepting(epochID int64, accepting bool) error {
+func (s *DynamoDBStore) SetAccepting(epochID int64, accepting bool) error {
 	ctx, cancel := s.operationContext()
 	defer cancel()
 	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
@@ -358,7 +358,7 @@ func (s *dynamoDBControlStore) SetAccepting(epochID int64, accepting bool) error
 	return nil
 }
 
-func (s *dynamoDBControlStore) Accepting(epochID int64) (bool, error) {
+func (s *DynamoDBStore) Accepting(epochID int64) (bool, error) {
 	item, ok, err := s.getItem(dynamoControlEpochPK)
 	if err != nil {
 		return false, err
@@ -436,7 +436,7 @@ func shardConfigFromItem(item map[string]ddbtypes.AttributeValue) (ShardConfigRe
 	return config, true
 }
 
-func (s *dynamoDBControlStore) GetShardConfig() (ShardConfigRecord, bool, error) {
+func (s *DynamoDBStore) GetShardConfig() (ShardConfigRecord, bool, error) {
 	item, ok, err := s.getItem(dynamoControlShardConfigPK)
 	if err != nil || !ok {
 		return ShardConfigRecord{}, false, err
@@ -451,12 +451,12 @@ func (s *dynamoDBControlStore) GetShardConfig() (ShardConfigRecord, bool, error)
 	return config, true, nil
 }
 
-func (s *dynamoDBControlStore) PutShardConfig(config ShardConfigRecord) error {
+func (s *DynamoDBStore) PutShardConfig(config ShardConfigRecord) error {
 	config.Key = dynamoControlShardConfigPK
 	return s.putShardConfigAtKey(dynamoControlShardConfigPK, config, false)
 }
 
-func (s *dynamoDBControlStore) GetEpochShardConfig(epochID int64) (ShardConfigRecord, bool, error) {
+func (s *DynamoDBStore) GetEpochShardConfig(epochID int64) (ShardConfigRecord, bool, error) {
 	item, ok, err := s.getItem(epochShardConfigKey(epochID))
 	if err != nil || !ok {
 		return ShardConfigRecord{}, false, err
@@ -471,7 +471,7 @@ func (s *dynamoDBControlStore) GetEpochShardConfig(epochID int64) (ShardConfigRe
 	return config, true, nil
 }
 
-func (s *dynamoDBControlStore) PutEpochShardConfig(epochID int64, config ShardConfigRecord) error {
+func (s *DynamoDBStore) PutEpochShardConfig(epochID int64, config ShardConfigRecord) error {
 	if epochID <= 0 {
 		return errors.New("epoch id must be positive")
 	}
@@ -479,7 +479,7 @@ func (s *dynamoDBControlStore) PutEpochShardConfig(epochID int64, config ShardCo
 	return s.putShardConfigAtKey(config.Key, config, true)
 }
 
-func (s *dynamoDBControlStore) putShardConfigAtKey(pk string, config ShardConfigRecord, immutable bool) error {
+func (s *DynamoDBStore) putShardConfigAtKey(pk string, config ShardConfigRecord, immutable bool) error {
 	if err := validateShardConfigRecord(config); err != nil {
 		return err
 	}
@@ -545,7 +545,7 @@ func scalingRecommendationFromItem(item map[string]ddbtypes.AttributeValue) Scal
 	}
 }
 
-func (s *dynamoDBControlStore) PutScalingRecommendation(record ScalingRecommendationRecord) error {
+func (s *DynamoDBStore) PutScalingRecommendation(record ScalingRecommendationRecord) error {
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
@@ -561,15 +561,15 @@ func (s *dynamoDBControlStore) PutScalingRecommendation(record ScalingRecommenda
 	return s.putScalingRecommendationAtKey(latestScalingRecommendationKey, latest, false)
 }
 
-func (s *dynamoDBControlStore) GetLatestScalingRecommendation() (ScalingRecommendationRecord, bool, error) {
+func (s *DynamoDBStore) GetLatestScalingRecommendation() (ScalingRecommendationRecord, bool, error) {
 	return s.getScalingRecommendation(latestScalingRecommendationKey)
 }
 
-func (s *dynamoDBControlStore) GetEpochScalingRecommendation(epochID int64) (ScalingRecommendationRecord, bool, error) {
+func (s *DynamoDBStore) GetEpochScalingRecommendation(epochID int64) (ScalingRecommendationRecord, bool, error) {
 	return s.getScalingRecommendation(epochScalingRecommendationKey(epochID))
 }
 
-func (s *dynamoDBControlStore) getScalingRecommendation(pk string) (ScalingRecommendationRecord, bool, error) {
+func (s *DynamoDBStore) getScalingRecommendation(pk string) (ScalingRecommendationRecord, bool, error) {
 	item, ok, err := s.getItem(pk)
 	if err != nil || !ok {
 		return ScalingRecommendationRecord{}, false, err
@@ -581,7 +581,7 @@ func (s *dynamoDBControlStore) getScalingRecommendation(pk string) (ScalingRecom
 	return record, true, nil
 }
 
-func (s *dynamoDBControlStore) putScalingRecommendationAtKey(pk string, record ScalingRecommendationRecord, immutable bool) error {
+func (s *DynamoDBStore) putScalingRecommendationAtKey(pk string, record ScalingRecommendationRecord, immutable bool) error {
 	ctx, cancel := s.operationContext()
 	defer cancel()
 	condition := "attribute_not_exists(pk) OR epoch_id <= :epoch_id"
@@ -609,7 +609,7 @@ func (s *dynamoDBControlStore) putScalingRecommendationAtKey(pk string, record S
 	return err
 }
 
-func dynamoDBControlStoreConfigError(name string) error {
+func DynamoDBStoreConfigError(name string) error {
 	return fmt.Errorf("%s is required for dynamodb store", name)
 }
 
@@ -650,7 +650,7 @@ func sessionFromItem(item map[string]ddbtypes.AttributeValue) SessionRecord {
 	}
 }
 
-func (s *dynamoDBControlStore) PutSession(ctx context.Context, session SessionRecord) error {
+func (s *DynamoDBStore) PutSession(ctx context.Context, session SessionRecord) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -684,7 +684,7 @@ func (s *dynamoDBControlStore) PutSession(ctx context.Context, session SessionRe
 	return nil
 }
 
-func (s *dynamoDBControlStore) GetSession(ctx context.Context, globalUUID int64) (SessionRecord, error) {
+func (s *DynamoDBStore) GetSession(ctx context.Context, globalUUID int64) (SessionRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return SessionRecord{}, err
 	}
@@ -698,7 +698,7 @@ func (s *dynamoDBControlStore) GetSession(ctx context.Context, globalUUID int64)
 	return sessionFromItem(item), nil
 }
 
-func (s *dynamoDBControlStore) DeleteSession(ctx context.Context, globalUUID int64) error {
+func (s *DynamoDBStore) DeleteSession(ctx context.Context, globalUUID int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

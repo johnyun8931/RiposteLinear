@@ -1,4 +1,4 @@
-package main
+package controlstore
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"bitbucket.org/henrycg/riposte/db"
 )
 
-type memoryControlStore struct {
+type MemoryControlStore struct {
 	mu               sync.Mutex
 	lease            CoordinatorLease
 	hasLease         bool
@@ -26,14 +26,14 @@ type memoryControlStore struct {
 	hasLatestScaling bool
 }
 
-func newMemoryControlStore(shardConfigVersion int64) *memoryControlStore {
-	return &memoryControlStore{
+func NewMemoryControlStore(shardConfigVersion int64) *MemoryControlStore {
+	return &MemoryControlStore{
 		epochShardConfig: make(map[int64]ShardConfigRecord),
 		scalingByEpoch:   make(map[int64]ScalingRecommendationRecord),
 	}
 }
 
-func (s *memoryControlStore) AcquireLease(now time.Time, holder string, ttl time.Duration) (CoordinatorLease, error) {
+func (s *MemoryControlStore) AcquireLease(now time.Time, holder string, ttl time.Duration) (CoordinatorLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if holder == "" {
@@ -59,7 +59,7 @@ func (s *memoryControlStore) AcquireLease(now time.Time, holder string, ttl time
 	return s.lease, nil
 }
 
-func (s *memoryControlStore) RenewLease(now time.Time, holder string, fencingToken int64, ttl time.Duration) (CoordinatorLease, error) {
+func (s *MemoryControlStore) RenewLease(now time.Time, holder string, fencingToken int64, ttl time.Duration) (CoordinatorLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ttl <= 0 {
@@ -75,7 +75,7 @@ func (s *memoryControlStore) RenewLease(now time.Time, holder string, fencingTok
 	return s.lease, nil
 }
 
-func (s *memoryControlStore) CurrentLease(now time.Time) (CoordinatorLease, bool) {
+func (s *MemoryControlStore) CurrentLease(now time.Time) (CoordinatorLease, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasLease || !now.Before(s.lease.ExpiresAt) {
@@ -84,7 +84,7 @@ func (s *memoryControlStore) CurrentLease(now time.Time) (CoordinatorLease, bool
 	return s.lease, true
 }
 
-func (s *memoryControlStore) StartEpoch(epoch db.EpochMeta, shardConfigVersion int64) error {
+func (s *MemoryControlStore) StartEpoch(epoch db.EpochMeta, shardConfigVersion int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if epoch.ID <= 0 {
@@ -99,7 +99,7 @@ func (s *memoryControlStore) StartEpoch(epoch db.EpochMeta, shardConfigVersion i
 	return nil
 }
 
-func (s *memoryControlStore) CompleteEpoch(epochID int64) (db.EpochMeta, error) {
+func (s *MemoryControlStore) CompleteEpoch(epochID int64) (db.EpochMeta, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasEpoch || s.epoch.ID != epochID {
@@ -110,7 +110,7 @@ func (s *memoryControlStore) CompleteEpoch(epochID int64) (db.EpochMeta, error) 
 	return s.epoch, nil
 }
 
-func (s *memoryControlStore) CurrentEpoch() (db.EpochMeta, bool) {
+func (s *MemoryControlStore) CurrentEpoch() (db.EpochMeta, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasEpoch {
@@ -119,7 +119,7 @@ func (s *memoryControlStore) CurrentEpoch() (db.EpochMeta, bool) {
 	return s.epoch, true
 }
 
-func (s *memoryControlStore) SetAccepting(epochID int64, accepting bool) error {
+func (s *MemoryControlStore) SetAccepting(epochID int64, accepting bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasEpoch || s.epoch.ID != epochID {
@@ -129,7 +129,7 @@ func (s *memoryControlStore) SetAccepting(epochID int64, accepting bool) error {
 	return nil
 }
 
-func (s *memoryControlStore) Accepting(epochID int64) (bool, error) {
+func (s *MemoryControlStore) Accepting(epochID int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasEpoch || s.epoch.ID != epochID {
@@ -138,7 +138,7 @@ func (s *memoryControlStore) Accepting(epochID int64) (bool, error) {
 	return s.accepting, nil
 }
 
-func (s *memoryControlStore) GetShardConfig() (ShardConfigRecord, bool, error) {
+func (s *MemoryControlStore) GetShardConfig() (ShardConfigRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasShardConfig {
@@ -149,7 +149,7 @@ func (s *memoryControlStore) GetShardConfig() (ShardConfigRecord, bool, error) {
 	return config, true, nil
 }
 
-func (s *memoryControlStore) PutShardConfig(config ShardConfigRecord) error {
+func (s *MemoryControlStore) PutShardConfig(config ShardConfigRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := validateShardConfigRecord(config); err != nil {
@@ -164,7 +164,7 @@ func (s *memoryControlStore) PutShardConfig(config ShardConfigRecord) error {
 	return nil
 }
 
-func (s *memoryControlStore) GetEpochShardConfig(epochID int64) (ShardConfigRecord, bool, error) {
+func (s *MemoryControlStore) GetEpochShardConfig(epochID int64) (ShardConfigRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	config, ok := s.epochShardConfig[epochID]
@@ -175,7 +175,7 @@ func (s *memoryControlStore) GetEpochShardConfig(epochID int64) (ShardConfigReco
 	return config, true, nil
 }
 
-func (s *memoryControlStore) PutEpochShardConfig(epochID int64, config ShardConfigRecord) error {
+func (s *MemoryControlStore) PutEpochShardConfig(epochID int64, config ShardConfigRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if epochID <= 0 {
@@ -196,7 +196,7 @@ func (s *memoryControlStore) PutEpochShardConfig(epochID int64, config ShardConf
 	return nil
 }
 
-func (s *memoryControlStore) PutScalingRecommendation(record ScalingRecommendationRecord) error {
+func (s *MemoryControlStore) PutScalingRecommendation(record ScalingRecommendationRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := validateScalingRecommendationRecord(record); err != nil {
@@ -222,7 +222,7 @@ func (s *memoryControlStore) PutScalingRecommendation(record ScalingRecommendati
 	return nil
 }
 
-func (s *memoryControlStore) GetLatestScalingRecommendation() (ScalingRecommendationRecord, bool, error) {
+func (s *MemoryControlStore) GetLatestScalingRecommendation() (ScalingRecommendationRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasLatestScaling {
@@ -231,7 +231,7 @@ func (s *memoryControlStore) GetLatestScalingRecommendation() (ScalingRecommenda
 	return s.latestScaling, true, nil
 }
 
-func (s *memoryControlStore) GetEpochScalingRecommendation(epochID int64) (ScalingRecommendationRecord, bool, error) {
+func (s *MemoryControlStore) GetEpochScalingRecommendation(epochID int64) (ScalingRecommendationRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.scalingByEpoch[epochID]
@@ -250,16 +250,22 @@ type memoryIngestionQueue struct {
 	inflight      map[string]string
 }
 
-type memorySessionStore struct {
+type MemorySessionStore struct {
 	mu       sync.Mutex
 	sessions map[int64]SessionRecord
 }
 
-func newMemorySessionStore() *memorySessionStore {
-	return &memorySessionStore{sessions: make(map[int64]SessionRecord)}
+func NewMemorySessionStore() *MemorySessionStore {
+	return &MemorySessionStore{sessions: make(map[int64]SessionRecord)}
 }
 
-func (s *memorySessionStore) PutSession(ctx context.Context, session SessionRecord) error {
+func (s *MemorySessionStore) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sessions)
+}
+
+func (s *MemorySessionStore) PutSession(ctx context.Context, session SessionRecord) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -284,7 +290,7 @@ func (s *memorySessionStore) PutSession(ctx context.Context, session SessionReco
 	return nil
 }
 
-func (s *memorySessionStore) GetSession(ctx context.Context, globalUUID int64) (SessionRecord, error) {
+func (s *MemorySessionStore) GetSession(ctx context.Context, globalUUID int64) (SessionRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return SessionRecord{}, err
 	}
@@ -297,7 +303,7 @@ func (s *memorySessionStore) GetSession(ctx context.Context, globalUUID int64) (
 	return session, nil
 }
 
-func (s *memorySessionStore) DeleteSession(ctx context.Context, globalUUID int64) error {
+func (s *MemorySessionStore) DeleteSession(ctx context.Context, globalUUID int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

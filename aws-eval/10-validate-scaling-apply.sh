@@ -22,6 +22,7 @@ APPLY_RESULTS_REMOTE="$APPLY_REMOTE_ROOT/results"
 APPLY_EPOCH1_SECONDS="${APPLY_EPOCH1_SECONDS:-30}"
 APPLY_EPOCH2_SECONDS="${APPLY_EPOCH2_SECONDS:-45}"
 APPLY_GROW_THRESHOLD="${APPLY_GROW_THRESHOLD:-0.001}"
+APPLY_WITH_AUTOSCALER="${APPLY_WITH_AUTOSCALER:-0}"
 
 cleanup() {
   kill_all_remote_processes
@@ -191,12 +192,20 @@ assert_json_field "$APPLY_LOCAL_DIR/status-after-dry-run.json" global_table_heig
 capture_dynamodb_snapshot after-dry-run
 assert_shard_config_count "$APPLY_LOCAL_DIR/dynamodb-after-dry-run/shard-config.json" 1 1 256
 
-info "applying latest scaling recommendation"
-remote_cmd "$COORDINATOR_PUBLIC_IP" "~/coordinator -admin-target '$(coordinator_addr)' -apply-scaling-recommendation > '$APPLY_LOGS_REMOTE/apply-output.log' 2>&1"
-copy_from_remote "$COORDINATOR_PUBLIC_IP" "$APPLY_LOGS_REMOTE/apply-output.log" "$APPLY_LOCAL_DIR/apply-output.log"
-grep -q "version=1->2" "$APPLY_LOCAL_DIR/apply-output.log" || die "apply output did not report version 1->2"
-grep -q "shards=1->2" "$APPLY_LOCAL_DIR/apply-output.log" || die "apply output did not report shards 1->2"
-grep -q "global_table_height=256->512" "$APPLY_LOCAL_DIR/apply-output.log" || die "apply output did not report global table height 256->512"
+if [[ "$APPLY_WITH_AUTOSCALER" == "1" || "$APPLY_WITH_AUTOSCALER" == "true" ]]; then
+  info "applying latest scaling recommendation through autoscaler"
+  run_remote_autoscaler_once "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$APPLY_LOGS_REMOTE/autoscaler.log" 1
+  copy_from_remote "$COORDINATOR_PUBLIC_IP" "$APPLY_LOGS_REMOTE/autoscaler.log" "$APPLY_LOCAL_DIR/autoscaler.log"
+  grep -q "decision=dry_run_applicable" "$APPLY_LOCAL_DIR/autoscaler.log" || die "autoscaler log did not report dry_run_applicable"
+  grep -q "decision=applied" "$APPLY_LOCAL_DIR/autoscaler.log" || die "autoscaler log did not report applied"
+else
+  info "applying latest scaling recommendation"
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "~/coordinator -admin-target '$(coordinator_addr)' -apply-scaling-recommendation > '$APPLY_LOGS_REMOTE/apply-output.log' 2>&1"
+  copy_from_remote "$COORDINATOR_PUBLIC_IP" "$APPLY_LOGS_REMOTE/apply-output.log" "$APPLY_LOCAL_DIR/apply-output.log"
+  grep -q "version=1->2" "$APPLY_LOCAL_DIR/apply-output.log" || die "apply output did not report version 1->2"
+  grep -q "shards=1->2" "$APPLY_LOCAL_DIR/apply-output.log" || die "apply output did not report shards 1->2"
+  grep -q "global_table_height=256->512" "$APPLY_LOCAL_DIR/apply-output.log" || die "apply output did not report global table height 256->512"
+fi
 capture_status after-apply
 assert_json_field "$APPLY_LOCAL_DIR/status-after-apply.json" current_shard_count 2
 assert_json_field "$APPLY_LOCAL_DIR/status-after-apply.json" global_table_height 512
@@ -231,5 +240,6 @@ cat <<EOF
 AWS scaling apply validation passed.
   epoch before apply: $epoch1
   epoch after apply:  $epoch2
+  autoscaler apply:   $APPLY_WITH_AUTOSCALER
   artifacts:          $APPLY_LOCAL_DIR
 EOF

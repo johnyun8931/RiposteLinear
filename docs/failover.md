@@ -96,6 +96,7 @@ snapshot.
 Manual scaling apply is exposed as an admin RPC through:
 
 ```bash
+coordinator -admin-target <addr> -dry-run-scaling-recommendation
 coordinator -admin-target <addr> -apply-scaling-recommendation
 ```
 
@@ -104,6 +105,23 @@ active or accepting epochs, missing/stale/`keep` recommendations, and
 recommendations that require shard IDs not present in the configured endpoint
 inventory. Successful apply writes a new version of `pk="shard-config"` only;
 epoch-bound shard-config snapshots remain immutable.
+
+The AWS-side autoscaler is deliberately not a direct topology writer. It reads
+the DynamoDB control records to decide whether a recommendation is worth trying,
+then calls the coordinator admin RPC to dry-run or apply it. The coordinator
+then re-checks lease authority, epoch state, recommendation freshness, and
+configured shard inventory before it writes `pk="shard-config"`.
+
+That boundary keeps one authoritative topology writer:
+
+- DynamoDB stores the truth.
+- The coordinator, guarded by the lease, writes epoch/control/topology state.
+- The autoscaler observes and requests apply.
+- Shard servers process assigned local tables and do not mutate topology.
+
+A later design could make the autoscaler the direct topology writer, but only if
+the lease/fencing and topology mutation rules move into a shared owner so the
+coordinator and autoscaler cannot diverge.
 
 Use `aws-eval/07-create-control-table.sh` to create the minimal table when
 testing the DynamoDB backends. The helper records the selected table and region

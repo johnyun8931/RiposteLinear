@@ -1,4 +1,4 @@
-package main
+package controlstore
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 )
 
 func TestMemoryControlStoreLeaseAcquireRenewAndStaleFence(t *testing.T) {
-	store := newMemoryControlStore(1)
+	store := NewMemoryControlStore(1)
 	now := time.Unix(1000, 0).UTC()
 
 	lease, err := store.AcquireLease(now, "coord-a", time.Minute)
@@ -49,7 +49,7 @@ func TestMemoryControlStoreLeaseAcquireRenewAndStaleFence(t *testing.T) {
 }
 
 func TestMemoryControlStoreEpochAndAcceptingState(t *testing.T) {
-	store := newMemoryControlStore(1)
+	store := NewMemoryControlStore(1)
 	start := time.Unix(2000, 0).UTC()
 	epoch := db.EpochMeta{
 		ID:              7,
@@ -97,7 +97,7 @@ func TestMemoryControlStoreEpochAndAcceptingState(t *testing.T) {
 }
 
 func TestMemoryControlStoreShardConfig(t *testing.T) {
-	store := newMemoryControlStore(1)
+	store := NewMemoryControlStore(1)
 	if _, ok, err := store.GetShardConfig(); err != nil || ok {
 		t.Fatalf("expected no initial shard config, ok=%t err=%v", ok, err)
 	}
@@ -119,7 +119,7 @@ func TestMemoryControlStoreShardConfig(t *testing.T) {
 }
 
 func TestMemoryControlStoreEpochShardConfigSnapshot(t *testing.T) {
-	store := newMemoryControlStore(1)
+	store := NewMemoryControlStore(1)
 	config := shardConfigRecordFromShards([]ShardConfig{
 		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
 	}, 2)
@@ -143,11 +143,11 @@ func TestMemoryControlStoreEpochShardConfigSnapshot(t *testing.T) {
 }
 
 func TestMemoryControlStoreScalingRecommendation(t *testing.T) {
-	store := newMemoryControlStore(1)
+	store := NewMemoryControlStore(1)
 	created := time.Unix(4000, 0).UTC()
 	record := scalingRecommendationRecord(
-		EpochScalingMetrics{EpochID: 2, CurrentShardCount: 1, AcceptedRequestCount: 8, DurationSeconds: 60},
-		ScalingRecommendation{CurrentShardCount: 1, RecommendedShardCount: 2, TargetRowsPerShard: 2, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
+		testEpochScalingMetrics{EpochID: 2, CurrentShardCount: 1, AcceptedRequestCount: 8, DurationSeconds: 60},
+		testScalingRecommendation{RecommendedShardCount: 2, TargetRowsPerShard: 2, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
 		3,
 		created,
 	)
@@ -175,8 +175,8 @@ func TestMemoryControlStoreScalingRecommendation(t *testing.T) {
 	}
 
 	older := scalingRecommendationRecord(
-		EpochScalingMetrics{EpochID: 1, CurrentShardCount: 1, AcceptedRequestCount: 2, DurationSeconds: 60},
-		ScalingRecommendation{CurrentShardCount: 1, RecommendedShardCount: 1, TargetRowsPerShard: 2, RequestDensity: 1, Action: scalingActionKeep, Reason: "old"},
+		testEpochScalingMetrics{EpochID: 1, CurrentShardCount: 1, AcceptedRequestCount: 2, DurationSeconds: 60},
+		testScalingRecommendation{RecommendedShardCount: 1, TargetRowsPerShard: 2, RequestDensity: 1, Action: scalingActionKeep, Reason: "old"},
 		3,
 		created.Add(-time.Minute),
 	)
@@ -261,7 +261,7 @@ func TestMemoryIngestionQueueValidationAndContextCancellation(t *testing.T) {
 }
 
 func TestMemorySessionStorePutGetDelete(t *testing.T) {
-	store := newMemorySessionStore()
+	store := NewMemorySessionStore()
 	ctx := context.Background()
 	createdAt := time.Unix(3000, 0).UTC()
 	var hashKey [32]byte
@@ -305,7 +305,7 @@ func TestMemorySessionStorePutGetDelete(t *testing.T) {
 }
 
 func TestMemorySessionStoreValidationAndContextCancellation(t *testing.T) {
-	store := newMemorySessionStore()
+	store := NewMemorySessionStore()
 	ctx := context.Background()
 
 	if err := store.PutSession(ctx, SessionRecord{}); err == nil {
