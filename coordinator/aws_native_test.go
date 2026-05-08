@@ -66,9 +66,6 @@ func TestMemoryControlStoreEpochAndAcceptingState(t *testing.T) {
 	if !ok || got.ID != epoch.ID || got.State != db.EpochStateActive {
 		t.Fatalf("unexpected current epoch ok=%t epoch=%+v", ok, got)
 	}
-	if version := store.ShardConfigVersion(); version != 3 {
-		t.Fatalf("expected shard config version 3, got %d", version)
-	}
 	accepting, err := store.Accepting(epoch.ID)
 	if err != nil || !accepting {
 		t.Fatalf("expected accepting active epoch, accepting=%t err=%v", accepting, err)
@@ -99,19 +96,49 @@ func TestMemoryControlStoreEpochAndAcceptingState(t *testing.T) {
 	}
 }
 
-func TestMemoryControlStoreShardConfigVersion(t *testing.T) {
+func TestMemoryControlStoreShardConfig(t *testing.T) {
 	store := newMemoryControlStore(1)
-	if version := store.ShardConfigVersion(); version != 1 {
-		t.Fatalf("expected initial version 1, got %d", version)
+	if _, ok, err := store.GetShardConfig(); err != nil || ok {
+		t.Fatalf("expected no initial shard config, ok=%t err=%v", ok, err)
 	}
-	if err := store.SetShardConfigVersion(4); err != nil {
-		t.Fatalf("SetShardConfigVersion failed: %v", err)
+	config := shardConfigRecordFromShards([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, 4)
+	if err := store.PutShardConfig(config); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
 	}
-	if version := store.ShardConfigVersion(); version != 4 {
-		t.Fatalf("expected version 4, got %d", version)
+	got, ok, err := store.GetShardConfig()
+	if err != nil || !ok || !shardConfigRecordsEqual(got, config) {
+		t.Fatalf("unexpected shard config ok=%t err=%v config=%+v", ok, err, got)
 	}
-	if err := store.SetShardConfigVersion(0); err == nil {
-		t.Fatal("expected non-positive shard config version to fail")
+	stale := config
+	stale.Version = 3
+	if err := store.PutShardConfig(stale); err == nil {
+		t.Fatal("expected stale shard config version to fail")
+	}
+}
+
+func TestMemoryControlStoreEpochShardConfigSnapshot(t *testing.T) {
+	store := newMemoryControlStore(1)
+	config := shardConfigRecordFromShards([]ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, 2)
+	snapshot := epochShardConfigRecord(config, 9)
+
+	if err := store.PutEpochShardConfig(9, snapshot); err != nil {
+		t.Fatalf("PutEpochShardConfig failed: %v", err)
+	}
+	got, ok, err := store.GetEpochShardConfig(9)
+	if err != nil || !ok || !shardConfigRecordsEqual(got, snapshot) {
+		t.Fatalf("unexpected epoch shard config ok=%t err=%v config=%+v", ok, err, got)
+	}
+	if err := store.PutEpochShardConfig(9, snapshot); err != nil {
+		t.Fatalf("idempotent PutEpochShardConfig failed: %v", err)
+	}
+	changed := snapshot
+	changed.Shards[0].Active.LeaderAddr = "127.0.0.1:9999"
+	if err := store.PutEpochShardConfig(9, changed); err == nil {
+		t.Fatal("expected conflicting epoch shard config snapshot to fail")
 	}
 }
 

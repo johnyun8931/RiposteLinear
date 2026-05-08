@@ -92,6 +92,10 @@ func int64Attr(item map[string]ddbtypes.AttributeValue, name string) int64 {
 	return value
 }
 
+func intAttr(item map[string]ddbtypes.AttributeValue, name string) int {
+	return int(int64Attr(item, name))
+}
+
 func numberAttr(value int64) ddbtypes.AttributeValue {
 	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(value, 10)}
 }
@@ -226,6 +230,7 @@ func epochToAttributes(epoch db.EpochMeta, shardConfigVersion int64) map[string]
 		":duration_secs":        numberAttr(epoch.DurationSeconds),
 		":accepting":            &ddbtypes.AttributeValueMemberBOOL{Value: epoch.State == db.EpochStateActive},
 		":shard_config_version": numberAttr(shardConfigVersion),
+		":shard_config_key":     &ddbtypes.AttributeValueMemberS{Value: epochShardConfigKey(epoch.ID)},
 		":active":               &ddbtypes.AttributeValueMemberS{Value: db.EpochStateActive.String()},
 	}
 }
@@ -264,7 +269,7 @@ func (s *dynamoDBControlStore) StartEpoch(epoch db.EpochMeta, shardConfigVersion
 	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           aws.String(s.table),
 		Key:                 dynamoKey(dynamoControlEpochPK),
-		UpdateExpression:    aws.String("SET epoch_id = :epoch_id, #state = :state, start_unix = :start_unix, end_unix = :end_unix, duration_secs = :duration_secs, accepting = :accepting, shard_config_version = :shard_config_version"),
+		UpdateExpression:    aws.String("SET epoch_id = :epoch_id, #state = :state, start_unix = :start_unix, end_unix = :end_unix, duration_secs = :duration_secs, accepting = :accepting, shard_config_version = :shard_config_version, shard_config_key = :shard_config_key"),
 		ConditionExpression: aws.String("attribute_not_exists(pk) OR epoch_id = :epoch_id OR #state <> :active"),
 		ExpressionAttributeNames: map[string]string{
 			"#state": "state",
@@ -348,36 +353,144 @@ func (s *dynamoDBControlStore) Accepting(epochID int64) (bool, error) {
 	return boolAttr(item, "accepting"), nil
 }
 
-func (s *dynamoDBControlStore) ShardConfigVersion() int64 {
-	item, ok, err := s.getItem(dynamoControlShardConfigPK)
-	if err != nil || !ok {
-		return 1
+func shardConfigToAttributes(config ShardConfigRecord) map[string]ddbtypes.AttributeValue {
+	shards := make([]ddbtypes.AttributeValue, 0, len(config.Shards))
+	for _, shard := range config.Shards {
+		entry := map[string]ddbtypes.AttributeValue{
+			"id":                    numberAttr(int64(shard.ID)),
+			"start_row":             numberAttr(int64(shard.StartRow)),
+			"end_row":               numberAttr(int64(shard.EndRow)),
+			"active_leader_addr":    &ddbtypes.AttributeValueMemberS{Value: shard.Active.LeaderAddr},
+			"active_follower_addr":  &ddbtypes.AttributeValueMemberS{Value: shard.Active.FollowerAddr},
+			"has_standby":           &ddbtypes.AttributeValueMemberBOOL{Value: shard.Standby != nil},
+			"standby_leader_addr":   &ddbtypes.AttributeValueMemberS{Value: ""},
+			"standby_follower_addr": &ddbtypes.AttributeValueMemberS{Value: ""},
+		}
+		if shard.Standby != nil {
+			entry["standby_leader_addr"] = &ddbtypes.AttributeValueMemberS{Value: shard.Standby.LeaderAddr}
+			entry["standby_follower_addr"] = &ddbtypes.AttributeValueMemberS{Value: shard.Standby.FollowerAddr}
+		}
+		shards = append(shards, &ddbtypes.AttributeValueMemberM{Value: entry})
 	}
-	version := int64Attr(item, "version")
-	if version <= 0 {
-		return 1
+	return map[string]ddbtypes.AttributeValue{
+		":version":             numberAttr(config.Version),
+		":shard_count":         numberAttr(int64(config.ShardCount)),
+		":rows_per_shard":      numberAttr(int64(config.RowsPerShard)),
+		":global_table_height": numberAttr(int64(config.GlobalTableHeight)),
+		":shards":              &ddbtypes.AttributeValueMemberL{Value: shards},
 	}
-	return version
 }
 
-func (s *dynamoDBControlStore) SetShardConfigVersion(version int64) error {
-	if version <= 0 {
-		return errors.New("shard config version must be positive")
+func shardConfigFromItem(item map[string]ddbtypes.AttributeValue) (ShardConfigRecord, bool) {
+	shardList, ok := item["shards"].(*ddbtypes.AttributeValueMemberL)
+	if !ok {
+		return ShardConfigRecord{}, false
+	}
+	config := ShardConfigRecord{
+		Key:               stringAttr(item, dynamoControlPKName),
+		Version:           int64Attr(item, "version"),
+		ShardCount:        intAttr(item, "shard_count"),
+		RowsPerShard:      intAttr(item, "rows_per_shard"),
+		GlobalTableHeight: intAttr(item, "global_table_height"),
+		Shards:            make([]ShardConfig, 0, len(shardList.Value)),
+	}
+	for _, attr := range shardList.Value {
+		entryAttr, ok := attr.(*ddbtypes.AttributeValueMemberM)
+		if !ok {
+			return ShardConfigRecord{}, false
+		}
+		entry := entryAttr.Value
+		shard := ShardConfig{
+			ID:       intAttr(entry, "id"),
+			StartRow: intAttr(entry, "start_row"),
+			EndRow:   intAttr(entry, "end_row"),
+			Active: PairConfig{
+				LeaderAddr:   stringAttr(entry, "active_leader_addr"),
+				FollowerAddr: stringAttr(entry, "active_follower_addr"),
+			},
+		}
+		if boolAttr(entry, "has_standby") {
+			shard.Standby = &PairConfig{
+				LeaderAddr:   stringAttr(entry, "standby_leader_addr"),
+				FollowerAddr: stringAttr(entry, "standby_follower_addr"),
+			}
+		}
+		config.Shards = append(config.Shards, shard)
+	}
+	return config, true
+}
+
+func (s *dynamoDBControlStore) GetShardConfig() (ShardConfigRecord, bool, error) {
+	item, ok, err := s.getItem(dynamoControlShardConfigPK)
+	if err != nil || !ok {
+		return ShardConfigRecord{}, false, err
+	}
+	config, ok := shardConfigFromItem(item)
+	if !ok {
+		return ShardConfigRecord{}, false, nil
+	}
+	if err := validateShardConfigRecord(config); err != nil {
+		return ShardConfigRecord{}, false, err
+	}
+	return config, true, nil
+}
+
+func (s *dynamoDBControlStore) PutShardConfig(config ShardConfigRecord) error {
+	config.Key = dynamoControlShardConfigPK
+	return s.putShardConfigAtKey(dynamoControlShardConfigPK, config, false)
+}
+
+func (s *dynamoDBControlStore) GetEpochShardConfig(epochID int64) (ShardConfigRecord, bool, error) {
+	item, ok, err := s.getItem(epochShardConfigKey(epochID))
+	if err != nil || !ok {
+		return ShardConfigRecord{}, false, err
+	}
+	config, ok := shardConfigFromItem(item)
+	if !ok {
+		return ShardConfigRecord{}, false, nil
+	}
+	if err := validateShardConfigRecord(config); err != nil {
+		return ShardConfigRecord{}, false, err
+	}
+	return config, true, nil
+}
+
+func (s *dynamoDBControlStore) PutEpochShardConfig(epochID int64, config ShardConfigRecord) error {
+	if epochID <= 0 {
+		return errors.New("epoch id must be positive")
+	}
+	config.Key = epochShardConfigKey(epochID)
+	return s.putShardConfigAtKey(config.Key, config, true)
+}
+
+func (s *dynamoDBControlStore) putShardConfigAtKey(pk string, config ShardConfigRecord, immutable bool) error {
+	if err := validateShardConfigRecord(config); err != nil {
+		return err
 	}
 	ctx, cancel := s.operationContext()
 	defer cancel()
+	condition := "attribute_not_exists(pk) OR #version <= :version"
+	if immutable {
+		condition = "attribute_not_exists(pk) OR (config_hash = :config_hash)"
+	}
+	values := shardConfigToAttributes(config)
+	values[":config_hash"] = &ddbtypes.AttributeValueMemberS{Value: shardConfigFingerprint(config)}
 	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           aws.String(s.table),
-		Key:                 dynamoKey(dynamoControlShardConfigPK),
-		UpdateExpression:    aws.String("SET #version = :version"),
-		ConditionExpression: aws.String("attribute_not_exists(pk) OR #version <= :version"),
+		Key:                 dynamoKey(pk),
+		UpdateExpression:    aws.String("SET #version = :version, shard_count = :shard_count, rows_per_shard = :rows_per_shard, global_table_height = :global_table_height, shards = :shards, config_hash = :config_hash"),
+		ConditionExpression: aws.String(condition),
 		ExpressionAttributeNames: map[string]string{
 			"#version": "version",
 		},
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":version": numberAttr(version),
-		},
+		ExpressionAttributeValues: values,
 	})
+	if err != nil && isConditionalCheckFailed(err) {
+		if immutable {
+			return errors.New("epoch shard config already exists with different config")
+		}
+		return errors.New("stale shard config version")
+	}
 	return err
 }
 

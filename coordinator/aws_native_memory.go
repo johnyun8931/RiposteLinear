@@ -11,18 +11,20 @@ import (
 )
 
 type memoryControlStore struct {
-	mu                 sync.Mutex
-	lease              CoordinatorLease
-	hasLease           bool
-	lastFencingToken   int64
-	epoch              db.EpochMeta
-	hasEpoch           bool
-	accepting          bool
-	shardConfigVersion int64
+	mu               sync.Mutex
+	lease            CoordinatorLease
+	hasLease         bool
+	lastFencingToken int64
+	epoch            db.EpochMeta
+	hasEpoch         bool
+	accepting        bool
+	shardConfig      ShardConfigRecord
+	hasShardConfig   bool
+	epochShardConfig map[int64]ShardConfigRecord
 }
 
 func newMemoryControlStore(shardConfigVersion int64) *memoryControlStore {
-	return &memoryControlStore{shardConfigVersion: shardConfigVersion}
+	return &memoryControlStore{epochShardConfig: make(map[int64]ShardConfigRecord)}
 }
 
 func (s *memoryControlStore) AcquireLease(now time.Time, holder string, ttl time.Duration) (CoordinatorLease, error) {
@@ -85,7 +87,9 @@ func (s *memoryControlStore) StartEpoch(epoch db.EpochMeta, shardConfigVersion i
 	s.epoch = epoch
 	s.hasEpoch = true
 	s.accepting = epoch.State == db.EpochStateActive
-	s.shardConfigVersion = shardConfigVersion
+	if s.hasShardConfig {
+		s.shardConfig.Version = shardConfigVersion
+	}
 	return nil
 }
 
@@ -128,19 +132,61 @@ func (s *memoryControlStore) Accepting(epochID int64) (bool, error) {
 	return s.accepting, nil
 }
 
-func (s *memoryControlStore) ShardConfigVersion() int64 {
+func (s *memoryControlStore) GetShardConfig() (ShardConfigRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.shardConfigVersion
+	if !s.hasShardConfig {
+		return ShardConfigRecord{}, false, nil
+	}
+	config := s.shardConfig
+	config.Shards = append([]ShardConfig(nil), s.shardConfig.Shards...)
+	return config, true, nil
 }
 
-func (s *memoryControlStore) SetShardConfigVersion(version int64) error {
+func (s *memoryControlStore) PutShardConfig(config ShardConfigRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if version <= 0 {
-		return errors.New("shard config version must be positive")
+	if err := validateShardConfigRecord(config); err != nil {
+		return err
 	}
-	s.shardConfigVersion = version
+	if s.hasShardConfig && config.Version < s.shardConfig.Version {
+		return errors.New("stale shard config version")
+	}
+	config.Shards = append([]ShardConfig(nil), config.Shards...)
+	s.shardConfig = config
+	s.hasShardConfig = true
+	return nil
+}
+
+func (s *memoryControlStore) GetEpochShardConfig(epochID int64) (ShardConfigRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	config, ok := s.epochShardConfig[epochID]
+	if !ok {
+		return ShardConfigRecord{}, false, nil
+	}
+	config.Shards = append([]ShardConfig(nil), config.Shards...)
+	return config, true, nil
+}
+
+func (s *memoryControlStore) PutEpochShardConfig(epochID int64, config ShardConfigRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if epochID <= 0 {
+		return errors.New("epoch id must be positive")
+	}
+	config.Key = epochShardConfigKey(epochID)
+	if err := validateShardConfigRecord(config); err != nil {
+		return err
+	}
+	if existing, ok := s.epochShardConfig[epochID]; ok {
+		if !shardConfigRecordsEqual(existing, config) {
+			return errors.New("epoch shard config already exists with different config")
+		}
+		return nil
+	}
+	config.Shards = append([]ShardConfig(nil), config.Shards...)
+	s.epochShardConfig[epochID] = config
 	return nil
 }
 

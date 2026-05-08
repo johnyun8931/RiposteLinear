@@ -150,9 +150,6 @@ func (c *Coordinator) upload1Decision() upload1Decision {
 	c.actorCall(func() {
 		decision.epoch = c.epoch
 		decision.controlStore = c.controlStore
-		if c.epoch.State != db.EpochStateActive {
-			decision.err = errCoordinatorNoActiveEpoch
-		}
 	})
 	return decision
 }
@@ -181,14 +178,18 @@ func (c *Coordinator) recordUpload3Success(session SessionRecord) {
 	})
 }
 
-func (c *Coordinator) startEpochDecision(args *db.StartEpochArgs) startEpochDecision {
+func (c *Coordinator) startEpochDecision(args *db.StartEpochArgs, latestEpochID int64) startEpochDecision {
 	var decision startEpochDecision
 	c.actorCall(func() {
 		if c.epoch.State == db.EpochStateActive {
 			decision.err = errCoordinatorEpochAlreadyActive
 			return
 		}
-		decision.nextEpochID = c.epoch.ID + 1
+		baseEpochID := c.epoch.ID
+		if latestEpochID > baseEpochID {
+			baseEpochID = latestEpochID
+		}
+		decision.nextEpochID = baseEpochID + 1
 		if args.EpochID > 0 {
 			decision.nextEpochID = args.EpochID
 		}

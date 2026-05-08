@@ -35,8 +35,10 @@ COORDINATOR_IAM_POLICY_NAME="${COORDINATOR_IAM_POLICY_NAME:-RiposteDynamoDBContr
 COORDINATOR_LEASE_TTL_SECONDS="${COORDINATOR_LEASE_TTL_SECONDS:-30}"
 COORDINATOR_LEASE_RENEW_SECONDS="${COORDINATOR_LEASE_RENEW_SECONDS:-10}"
 PUBLIC_ENTRY_BACKEND="${PUBLIC_ENTRY_BACKEND:-none}"
+PUBLIC_ENTRY_MULTI_COORDINATOR="${PUBLIC_ENTRY_MULTI_COORDINATOR:-0}"
 
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
+COORDINATOR_STANDBY_PORT="${COORDINATOR_STANDBY_PORT:-8631}"
 SHARD0_LEADER_PORT="${SHARD0_LEADER_PORT:-8610}"
 SHARD0_FOLLOWER_PORT="${SHARD0_FOLLOWER_PORT:-8611}"
 SHARD1_LEADER_PORT="${SHARD1_LEADER_PORT:-8620}"
@@ -259,8 +261,16 @@ coordinator_addr() {
   printf '%s:%s' "$COORDINATOR_PRIVATE_IP" "$COORDINATOR_PORT"
 }
 
+coordinator_standby_addr() {
+  printf '%s:%s' "$COORDINATOR_PRIVATE_IP" "$COORDINATOR_STANDBY_PORT"
+}
+
 public_entry_enabled() {
   [[ "$PUBLIC_ENTRY_BACKEND" == "nlb" ]]
+}
+
+public_entry_multi_coordinator_enabled() {
+  public_entry_enabled && [[ "$PUBLIC_ENTRY_MULTI_COORDINATOR" == "1" || "$PUBLIC_ENTRY_MULTI_COORDINATOR" == "true" ]]
 }
 
 public_coordinator_addr() {
@@ -370,6 +380,23 @@ capture_dynamodb_control_item() {
     --output json >"$output_path"
 }
 
+capture_dynamodb_epoch_shard_config() {
+  local epoch_file="$1"
+  local output_path="$2"
+  local epoch_id
+
+  epoch_id="$(python3 - "$epoch_file" <<'PY'
+import json
+import sys
+
+item = json.load(open(sys.argv[1])).get("Item", {})
+print(item.get("epoch_id", {}).get("N", ""))
+PY
+)"
+  [[ -n "$epoch_id" ]] || return 1
+  capture_dynamodb_control_item "shard-config#epoch#$epoch_id" "$output_path"
+}
+
 validate_public_entry_backend() {
   case "$PUBLIC_ENTRY_BACKEND" in
     none|nlb)
@@ -403,26 +430,28 @@ capture_nlb_artifacts() {
 }
 
 nlb_target_health_state() {
+  local port="${1:-$COORDINATOR_PORT}"
   [[ -n "${NLB_TARGET_GROUP_ARN:-}" ]] || return 1
   aws_region elbv2 describe-target-health \
     --target-group-arn "$NLB_TARGET_GROUP_ARN" \
-    --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_PORT" \
+    --targets "Id=$COORDINATOR_ID,Port=$port" \
     --query 'TargetHealthDescriptions[0].TargetHealth.State' \
     --output text
 }
 
 wait_for_nlb_target_healthy() {
   local timeout="${1:-180}"
+  local port="${2:-$COORDINATOR_PORT}"
   local deadline=$((SECONDS + timeout))
   local state
   if ! public_entry_enabled; then
     return 0
   fi
-  info "waiting for NLB target health on coordinator"
+  info "waiting for NLB target health on coordinator port $port"
   while true; do
-    state="$(nlb_target_health_state 2>/dev/null || true)"
+    state="$(nlb_target_health_state "$port" 2>/dev/null || true)"
     if [[ "$state" == "healthy" ]]; then
-      info "NLB target is healthy"
+      info "NLB target is healthy on port $port"
       return 0
     fi
     if (( SECONDS >= deadline )); then

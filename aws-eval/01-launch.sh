@@ -106,6 +106,7 @@ START_EPOCH_RETRY_INTERVAL=$(quote "$START_EPOCH_RETRY_INTERVAL")
 POST_EPOCH_FLUSH_SECONDS=$(quote "$POST_EPOCH_FLUSH_SECONDS")
 CLIENT_EXIT_GRACE_SECONDS=$(quote "$CLIENT_EXIT_GRACE_SECONDS")
 COORDINATOR_PORT=$(quote "$COORDINATOR_PORT")
+COORDINATOR_STANDBY_PORT=$(quote "$COORDINATOR_STANDBY_PORT")
 SHARD0_LEADER_PORT=$(quote "$SHARD0_LEADER_PORT")
 SHARD0_FOLLOWER_PORT=$(quote "$SHARD0_FOLLOWER_PORT")
 SHARD1_LEADER_PORT=$(quote "$SHARD1_LEADER_PORT")
@@ -127,6 +128,7 @@ COORDINATOR_IAM_ROLE_NAME=$(quote "$(coordinator_iam_role_name)")
 COORDINATOR_IAM_INSTANCE_PROFILE_NAME=$(quote "$(coordinator_iam_instance_profile_name)")
 COORDINATOR_IAM_POLICY_NAME=$(quote "$COORDINATOR_IAM_POLICY_NAME")
 PUBLIC_ENTRY_BACKEND=$(quote "$PUBLIC_ENTRY_BACKEND")
+PUBLIC_ENTRY_MULTI_COORDINATOR=$(quote "$PUBLIC_ENTRY_MULTI_COORDINATOR")
 NLB_NAME=$(quote "$NLB_NAME")
 NLB_ARN=$(quote "$NLB_ARN")
 NLB_DNS_NAME=$(quote "$NLB_DNS_NAME")
@@ -265,6 +267,12 @@ if public_entry_enabled; then
   aws_region ec2 authorize-security-group-ingress \
     --group-id "$SG_ID" \
     --ip-permissions "IpProtocol=tcp,FromPort=${COORDINATOR_PORT},ToPort=${COORDINATOR_PORT},IpRanges=[{CidrIp=0.0.0.0/0,Description='Riposte NLB public coordinator entry'}]"
+  if public_entry_multi_coordinator_enabled; then
+    info "authorizing public standby coordinator RPC ingress for NLB entry on port $COORDINATOR_STANDBY_PORT"
+    aws_region ec2 authorize-security-group-ingress \
+      --group-id "$SG_ID" \
+      --ip-permissions "IpProtocol=tcp,FromPort=${COORDINATOR_STANDBY_PORT},ToPort=${COORDINATOR_STANDBY_PORT},IpRanges=[{CidrIp=0.0.0.0/0,Description='Riposte NLB public standby coordinator entry'}]"
+  fi
 fi
 
 launch_instance() {
@@ -409,6 +417,12 @@ create_public_entry_nlb() {
   aws_region elbv2 register-targets \
     --target-group-arn "$NLB_TARGET_GROUP_ARN" \
     --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_PORT"
+  if public_entry_multi_coordinator_enabled; then
+    info "registering standby coordinator port with NLB target group"
+    aws_region elbv2 register-targets \
+      --target-group-arn "$NLB_TARGET_GROUP_ARN" \
+      --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_STANDBY_PORT"
+  fi
 
   info "creating NLB listener on TCP port $COORDINATOR_PORT"
   NLB_LISTENER_ARN="$(aws_region elbv2 create-listener \
