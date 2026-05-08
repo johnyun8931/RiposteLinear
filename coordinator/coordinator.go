@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"math"
 	"net/rpc"
 	"sort"
@@ -97,18 +96,6 @@ func (r *rpcShardClient) Close() error {
 	return r.client.Close()
 }
 
-type pairHealthSnapshot struct {
-	Reachable bool
-	Status    db.StatusReply
-	Error     string
-	CheckedAt time.Time
-}
-
-type shardHealthSnapshot struct {
-	Active  pairHealthSnapshot
-	Standby pairHealthSnapshot
-}
-
 const (
 	defaultShardStatusTimeout            = 2 * time.Second
 	defaultShardHealthInterval           = 5 * time.Second
@@ -122,6 +109,8 @@ const (
 
 type Coordinator struct {
 	mu                  sync.Mutex
+	actor               *coordinatorActor
+	closed              bool
 	shards              []ShardConfig
 	shardByID           map[int]ShardConfig
 	clients             map[int]shardClient
@@ -350,6 +339,7 @@ func newCoordinatorWithStandbyConfig(
 		role = coordinatorRolePassive
 	}
 	coord := &Coordinator{
+		actor:               newCoordinatorActor(),
 		shards:              validated,
 		shardByID:           make(map[int]ShardConfig, len(validated)),
 		clients:             make(map[int]shardClient, len(validated)),
@@ -382,63 +372,14 @@ func newCoordinatorWithStandbyConfig(
 	return coord, nil
 }
 
-func validateCoordinatorLeaseConfig(leaseHolder string, leaseTTL time.Duration, leaseRenewInterval time.Duration) error {
-	if leaseHolder == "" {
-		return errors.New("coordinator lease holder is required")
-	}
-	if leaseTTL <= 0 {
-		return errors.New("coordinator lease ttl must be positive")
-	}
-	if leaseRenewInterval <= 0 {
-		return errors.New("coordinator lease renew interval must be positive")
-	}
-	if leaseRenewInterval >= leaseTTL {
-		return errors.New("coordinator lease renew interval must be less than coordinator lease ttl")
-	}
-	return nil
-}
-
-func (c *Coordinator) startLeaseRenewal(interval time.Duration) {
-	stopCh := c.leaseStopCh
-	doneCh := c.leaseDoneCh
-	ticker := time.NewTicker(interval)
-	go func() {
-		defer close(doneCh)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := c.maintainCoordinatorLease(); err != nil {
-					log.Printf("Maintain coordinator lease failed: %v", err)
-				}
-			case <-stopCh:
-				return
-			}
-		}
-	}()
-}
-
-func (c *Coordinator) startShardHealthMonitor() {
-	stopCh := c.healthStopCh
-	doneCh := c.healthDoneCh
-	interval := c.healthInterval
-	ticker := time.NewTicker(interval)
-	go func() {
-		defer close(doneCh)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				c.refreshShardHealth(c.healthTimeout)
-			case <-stopCh:
-				return
-			}
-		}
-	}()
-}
-
 func (c *Coordinator) Close() {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	actor := c.actor
 	stopCh := c.leaseStopCh
 	doneCh := c.leaseDoneCh
 	healthStopCh := c.healthStopCh
@@ -447,10 +388,6 @@ func (c *Coordinator) Close() {
 	c.leaseDoneCh = nil
 	c.healthStopCh = nil
 	c.healthDoneCh = nil
-	if c.epochTimer != nil {
-		c.epochTimer.Stop()
-		c.epochTimer = nil
-	}
 	c.mu.Unlock()
 
 	if stopCh != nil {
@@ -461,86 +398,20 @@ func (c *Coordinator) Close() {
 		close(healthStopCh)
 		<-healthDoneCh
 	}
-}
-
-func (c *Coordinator) renewCoordinatorLease() error {
-	c.mu.Lock()
-	controlStore := c.controlStore
-	holder := c.leaseHolder
-	token := c.lease.FencingToken
-	ttl := c.leaseTTL
-	c.mu.Unlock()
-
-	lease, err := controlStore.RenewLease(time.Now().UTC(), holder, token, ttl)
-	if err != nil {
-		return err
-	}
-
-	c.mu.Lock()
-	if c.lease.FencingToken == token && c.leaseHolder == holder {
-		c.lease = lease
-		c.role = coordinatorRoleActive
-	}
-	c.mu.Unlock()
-	return nil
-}
-
-func (c *Coordinator) maintainCoordinatorLease() error {
-	c.mu.Lock()
-	role := c.role
-	c.mu.Unlock()
-
-	if role == coordinatorRoleActive {
-		if err := c.renewCoordinatorLease(); err != nil {
-			c.markCoordinatorStale()
-			return err
-		}
-		return nil
-	}
-	return c.tryAcquireCoordinatorLease()
-}
-
-func (c *Coordinator) markCoordinatorStale() {
-	c.mu.Lock()
-	if c.role == coordinatorRoleActive {
-		c.role = coordinatorRoleStale
-	}
-	c.mu.Unlock()
-}
-
-func (c *Coordinator) tryAcquireCoordinatorLease() error {
-	c.mu.Lock()
-	controlStore := c.controlStore
-	holder := c.leaseHolder
-	ttl := c.leaseTTL
-	c.mu.Unlock()
-
-	lease, err := controlStore.AcquireLease(time.Now().UTC(), holder, ttl)
-	if err != nil {
-		if errors.Is(err, errLeaseHeld) {
-			c.mu.Lock()
-			if c.role != coordinatorRoleStale {
-				c.role = coordinatorRolePassive
+	if actor != nil {
+		actor.call(func() {
+			if c.epochTimer != nil {
+				c.epochTimer.Stop()
+				c.epochTimer = nil
 			}
-			c.mu.Unlock()
-			return nil
+		})
+		c.mu.Lock()
+		if c.actor == actor {
+			c.actor = nil
 		}
-		return err
+		c.mu.Unlock()
+		actor.stop()
 	}
-
-	c.mu.Lock()
-	c.lease = lease
-	c.role = coordinatorRoleActive
-	c.mu.Unlock()
-	return nil
-}
-
-func (c *Coordinator) requireCoordinatorLease() error {
-	if err := c.renewCoordinatorLease(); err != nil {
-		c.markCoordinatorStale()
-		return fmt.Errorf("coordinator lease unavailable: %w", err)
-	}
-	return nil
 }
 
 func dialShardLeader(leaderAddr string) (shardClient, error) {
@@ -587,9 +458,7 @@ func globalTableHeightForShards(shards []ShardConfig) int {
 }
 
 func (c *Coordinator) cachedOrStoredSession(globalUUID int64) (SessionRecord, error) {
-	c.mu.Lock()
-	session, ok := c.sessions[globalUUID]
-	c.mu.Unlock()
+	session, ok := c.cachedSession(globalUUID)
 	if ok {
 		return session, nil
 	}
@@ -597,25 +466,19 @@ func (c *Coordinator) cachedOrStoredSession(globalUUID int64) (SessionRecord, er
 	if err != nil {
 		return SessionRecord{}, err
 	}
-	c.mu.Lock()
-	c.sessions[globalUUID] = session
-	c.mu.Unlock()
+	c.cacheSession(session)
 	return session, nil
 }
 
 func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
-	c.mu.Lock()
-	epoch := c.epoch
-	active := epoch.State == db.EpochStateActive
-	controlStore := c.controlStore
-	c.mu.Unlock()
-	if !active {
-		return errors.New("No active epoch")
+	decision := c.upload1Decision()
+	if decision.err != nil {
+		return decision.err
 	}
 	if err := c.requireCoordinatorLease(); err != nil {
 		return errors.New("No active epoch")
 	}
-	accepting, err := controlStore.Accepting(epoch.ID)
+	accepting, err := decision.controlStore.Accepting(decision.epoch.ID)
 	if err != nil || !accepting {
 		return errors.New("No active epoch")
 	}
@@ -646,7 +509,7 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 		var hashKey [32]byte
 		utils.RandBytes(hashKey[:])
 		session = SessionRecord{
-			EpochID:       epoch.ID,
+			EpochID:       decision.epoch.ID,
 			ShardID:       shard.ID,
 			GlobalUUID:    globalUUID,
 			LocalUUID:     globalUUID,
@@ -688,9 +551,7 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 		return errors.New("shard returned mismatched assigned session")
 	}
 
-	c.mu.Lock()
-	c.sessions[session.GlobalUUID] = session
-	c.mu.Unlock()
+	c.cacheSession(session)
 	reply.Uuid = session.GlobalUUID
 	reply.HashKey = session.HashKey
 	return nil
@@ -737,12 +598,7 @@ func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) erro
 	if err := c.sessionStore.DeleteSession(context.Background(), session.GlobalUUID); err != nil && !errors.Is(err, errSessionMissing) {
 		return err
 	}
-	c.mu.Lock()
-	delete(c.sessions, args.Uuid)
-	if c.hasActiveScalingMetrics && c.activeScalingMetrics.EpochID == session.EpochID {
-		c.activeScalingMetrics.AcceptedRequestCount++
-	}
-	c.mu.Unlock()
+	c.recordUpload3Success(session)
 	return nil
 }
 
@@ -762,25 +618,15 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 		return err
 	}
 
-	c.mu.Lock()
-	if c.epoch.State == db.EpochStateActive {
-		c.mu.Unlock()
-		return errors.New("An epoch is already in progress")
+	decision := c.startEpochDecision(args)
+	if decision.err != nil {
+		return decision.err
 	}
-	nextEpochID := c.epoch.ID + 1
-	if args.EpochID > 0 {
-		nextEpochID = args.EpochID
-	}
-	startTime := time.Now().UTC()
-	if args.StartUnix > 0 {
-		startTime = time.Unix(args.StartUnix, 0).UTC()
-	}
-	c.mu.Unlock()
 
 	startArgs := db.StartEpochArgs{
 		DurationSeconds: args.DurationSeconds,
-		EpochID:         nextEpochID,
-		StartUnix:       startTime.Unix(),
+		EpochID:         decision.nextEpochID,
+		StartUnix:       decision.startTime.Unix(),
 	}
 
 	started := make([]int, 0, len(c.shards))
@@ -788,32 +634,28 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 	for i, shard := range c.shards {
 		client := c.clients[shard.ID]
 		if client == nil {
-			c.abortStarted(started, nextEpochID)
+			c.abortStarted(started, decision.nextEpochID)
 			return fmt.Errorf("missing shard client for shard %d", shard.ID)
 		}
 		var shardReply db.StartEpochReply
 		if err := client.StartEpoch(&startArgs, &shardReply); err != nil {
-			c.abortStarted(started, nextEpochID)
+			c.abortStarted(started, decision.nextEpochID)
 			return fmt.Errorf("start epoch on shard %d: %w", shard.ID, err)
 		}
 		if i == 0 {
 			expected = shardReply
 		} else if !sameEpochReply(expected, shardReply) {
-			c.abortStarted(started, nextEpochID)
+			c.abortStarted(started, decision.nextEpochID)
 			return fmt.Errorf("shard %d returned mismatched epoch metadata", shard.ID)
 		}
 		started = append(started, shard.ID)
 	}
 
 	if err := c.requireCoordinatorLease(); err != nil {
-		c.abortStarted(started, nextEpochID)
+		c.abortStarted(started, decision.nextEpochID)
 		return err
 	}
 
-	c.mu.Lock()
-	if c.epochTimer != nil {
-		c.epochTimer.Stop()
-	}
 	epoch := db.EpochMeta{
 		ID:              expected.EpochID,
 		State:           db.EpochStateActive,
@@ -823,25 +665,13 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 	}
 	controlStore := c.controlStore
 	shardConfigVersion := controlStore.ShardConfigVersion()
-	c.mu.Unlock()
 
 	if err := controlStore.StartEpoch(epoch, shardConfigVersion); err != nil {
-		c.abortStarted(started, nextEpochID)
+		c.abortStarted(started, decision.nextEpochID)
 		return fmt.Errorf("start epoch in control store: %w", err)
 	}
 
-	c.mu.Lock()
-	c.epoch = epoch
-	c.activeScalingMetrics = EpochScalingMetrics{
-		EpochID:           epoch.ID,
-		CurrentShardCount: len(c.shards),
-		DurationSeconds:   epoch.DurationSeconds,
-	}
-	c.hasActiveScalingMetrics = true
-	c.epochTimer = time.AfterFunc(time.Until(c.epoch.EndTime), func() {
-		c.completeEpoch()
-	})
-	c.mu.Unlock()
+	c.commitStartedEpoch(epoch)
 
 	*reply = expected
 	return nil
@@ -861,45 +691,32 @@ func (c *Coordinator) abortStarted(started []int, epochID int64) {
 }
 
 func (c *Coordinator) completeEpoch() {
-	c.mu.Lock()
-	if c.epoch.State != db.EpochStateActive {
-		c.mu.Unlock()
+	decision := c.completeEpochDecision()
+	if decision.epochID == 0 {
 		return
 	}
-	epochID := c.epoch.ID
-	c.mu.Unlock()
 
 	if err := c.requireCoordinatorLease(); err != nil {
-		log.Printf("Coordinator lease unavailable; skipping epoch %d completion: %v", epochID, err)
+		log.Printf("Coordinator lease unavailable; skipping epoch %d completion: %v", decision.epochID, err)
 		return
 	}
 
-	c.mu.Lock()
-	if c.epoch.State != db.EpochStateActive || c.epoch.ID != epochID {
-		c.mu.Unlock()
-		return
-	}
-	c.epoch.State = db.EpochStateCompleted
-	c.epochTimer = nil
 	controlStore := c.controlStore
-	if c.hasActiveScalingMetrics && c.activeScalingMetrics.EpochID == epochID {
-		c.lastScalingMetrics = c.activeScalingMetrics
-		c.lastScalingRecommendation = ComputeNextDatasetScale(c.lastScalingMetrics, c.scalingConfig)
-		c.hasLastScalingMetrics = true
-		c.hasActiveScalingMetrics = false
+	if !c.commitCompletedEpoch(decision.epochID) {
+		return
 	}
-	c.mu.Unlock()
 
-	if _, err := controlStore.CompleteEpoch(epochID); err != nil {
-		log.Printf("Complete epoch %d in control store failed: %v", epochID, err)
+	if _, err := controlStore.CompleteEpoch(decision.epochID); err != nil {
+		log.Printf("Complete epoch %d in control store failed: %v", decision.epochID, err)
 	}
 }
 
 func (c *Coordinator) EpochStatus(_ *db.EpochStatusArgs, reply *db.EpochStatusReply) error {
-	c.mu.Lock()
-	epoch := c.epoch
+	var epoch db.EpochMeta
+	c.actorCall(func() {
+		epoch = c.epoch
+	})
 	controlStore := c.controlStore
-	c.mu.Unlock()
 
 	reply.EpochID = epoch.ID
 	reply.State = epoch.State.String()
@@ -941,120 +758,6 @@ func activeHolderFromControlStore(controlStore ControlStore, now time.Time) stri
 	return lease.Holder
 }
 
-func shardStatusWithTimeout(client statusClient, timeout time.Duration) (db.StatusReply, error) {
-	type statusResult struct {
-		reply db.StatusReply
-		err   error
-	}
-	resultCh := make(chan statusResult, 1)
-	go func() {
-		var reply db.StatusReply
-		err := client.Status(&db.StatusArgs{}, &reply)
-		resultCh <- statusResult{reply: reply, err: err}
-	}()
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case result := <-resultCh:
-		return result.reply, result.err
-	case <-timer.C:
-		return db.StatusReply{}, fmt.Errorf("status timeout after %s", timeout)
-	}
-}
-
-func pairHealthFromStatus(status db.StatusReply, err error, checkedAt time.Time) pairHealthSnapshot {
-	if err != nil {
-		return pairHealthSnapshot{Error: err.Error(), CheckedAt: checkedAt}
-	}
-	return pairHealthSnapshot{
-		Reachable: true,
-		Status:    status,
-		CheckedAt: checkedAt,
-	}
-}
-
-func (c *Coordinator) refreshShardHealth(timeout time.Duration) {
-	c.mu.Lock()
-	shards := append([]ShardConfig(nil), c.shards...)
-	clients := make(map[int]shardClient, len(c.clients))
-	maps.Copy(clients, c.clients)
-	dialStandby := c.standbyLeaderDialer
-	c.mu.Unlock()
-
-	results := make(map[int]shardHealthSnapshot, len(shards))
-	for _, shard := range shards {
-		checkedAt := time.Now().UTC()
-		var result shardHealthSnapshot
-		if client := clients[shard.ID]; client != nil {
-			status, err := shardStatusWithTimeout(client, timeout)
-			result.Active = pairHealthFromStatus(status, err, checkedAt)
-		} else {
-			result.Active = pairHealthSnapshot{
-				Error:     fmt.Sprintf("missing shard client for shard %d", shard.ID),
-				CheckedAt: checkedAt,
-			}
-		}
-
-		if shard.Standby != nil {
-			standbyCheckedAt := time.Now().UTC()
-			standbyClient, err := dialStandby(shard.Standby.LeaderAddr, timeout)
-			if err != nil {
-				result.Standby = pairHealthSnapshot{Error: err.Error(), CheckedAt: standbyCheckedAt}
-			} else {
-				status, statusErr := shardStatusWithTimeout(standbyClient, timeout)
-				result.Standby = pairHealthFromStatus(status, statusErr, standbyCheckedAt)
-				if closeErr := standbyClient.Close(); closeErr != nil && result.Standby.Error == "" {
-					result.Standby.Reachable = false
-					result.Standby.Error = closeErr.Error()
-				}
-			}
-		}
-
-		results[shard.ID] = result
-	}
-
-	c.mu.Lock()
-	for shardID, health := range results {
-		c.health[shardID] = health
-	}
-	c.mu.Unlock()
-}
-
-func (c *Coordinator) needsShardHealthRefresh() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, shard := range c.shards {
-		health := c.health[shard.ID]
-		if health.Active.CheckedAt.IsZero() {
-			return true
-		}
-		if shard.Standby != nil && health.Standby.CheckedAt.IsZero() {
-			return true
-		}
-	}
-	return false
-}
-
-func lastCheckedUnix(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.Unix()
-}
-
-func (c *Coordinator) scalingStatusSnapshotLocked(currentShardCount int) (EpochScalingMetrics, ScalingRecommendation) {
-	if c.hasLastScalingMetrics {
-		return c.lastScalingMetrics, c.lastScalingRecommendation
-	}
-	rec := defaultCoordinatorScalingRecommendation(currentShardCount)
-	return EpochScalingMetrics{
-		CurrentShardCount:    rec.CurrentShardCount,
-		AcceptedRequestCount: int64(rec.CurrentShardCount * rec.TargetRowsPerShard * 2),
-		DurationSeconds:      1,
-	}, rec
-}
-
 func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.CoordinatorStatusReply) error {
 	timeout := defaultShardStatusTimeout
 	if args != nil && args.ShardTimeoutMs > 0 {
@@ -1064,41 +767,34 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 		c.refreshShardHealth(timeout)
 	}
 
-	c.mu.Lock()
-	epoch := c.epoch
 	controlStore := c.controlStore
-	lease := c.lease
-	role := c.role
 	sessionStoreBackend := c.sessionStoreBackend
 	shards := append([]ShardConfig(nil), c.shards...)
-	health := make(map[int]shardHealthSnapshot, len(c.health))
-	maps.Copy(health, c.health)
-	scalingMetrics, scaling := c.scalingStatusSnapshotLocked(len(shards))
-	c.mu.Unlock()
+	snapshot := c.coordinatorStatusSnapshot()
 
 	reply.Healthy = true
-	reply.Role = role
+	reply.Role = snapshot.role
 	reply.LeaderAddr = ""
 	reply.SessionStoreBackend = sessionStoreBackend
 	reply.GlobalTableHeight = globalTableHeightForShards(shards)
-	reply.EpochID = epoch.ID
-	reply.State = epoch.State.String()
-	reply.StartUnix = epoch.StartTime.Unix()
-	reply.EndUnix = epoch.EndTime.Unix()
-	reply.DurationSecs = epoch.DurationSeconds
-	reply.Accepting = acceptingFromControlStore(controlStore, epoch)
+	reply.EpochID = snapshot.epoch.ID
+	reply.State = snapshot.epoch.State.String()
+	reply.StartUnix = snapshot.epoch.StartTime.Unix()
+	reply.EndUnix = snapshot.epoch.EndTime.Unix()
+	reply.DurationSecs = snapshot.epoch.DurationSeconds
+	reply.Accepting = acceptingFromControlStore(controlStore, snapshot.epoch)
 	now := time.Now().UTC()
-	populateCoordinatorLeaseStatus(reply, lease, now)
+	populateCoordinatorLeaseStatus(reply, snapshot.lease, now)
 	reply.ActiveHolder = activeHolderFromControlStore(controlStore, now)
-	reply.CurrentShardCount = scaling.CurrentShardCount
-	reply.RecommendedNextShardCount = scaling.RecommendedShardCount
-	reply.TargetRowsPerShard = scaling.TargetRowsPerShard
-	reply.ScalingAction = scaling.Action
-	reply.ScalingReason = scaling.Reason
-	reply.RequestDensity = scaling.RequestDensity
-	reply.ScalingEpochID = scalingMetrics.EpochID
-	reply.ScalingAcceptedRequests = scalingMetrics.AcceptedRequestCount
-	reply.ScalingDurationSecs = scalingMetrics.DurationSeconds
+	reply.CurrentShardCount = snapshot.scaling.CurrentShardCount
+	reply.RecommendedNextShardCount = snapshot.scaling.RecommendedShardCount
+	reply.TargetRowsPerShard = snapshot.scaling.TargetRowsPerShard
+	reply.ScalingAction = snapshot.scaling.Action
+	reply.ScalingReason = snapshot.scaling.Reason
+	reply.RequestDensity = snapshot.scaling.RequestDensity
+	reply.ScalingEpochID = snapshot.scalingMetrics.EpochID
+	reply.ScalingAcceptedRequests = snapshot.scalingMetrics.AcceptedRequestCount
+	reply.ScalingDurationSecs = snapshot.scalingMetrics.DurationSeconds
 	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
 
 	for i, shard := range shards {
@@ -1115,7 +811,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 			entry.StandbyFollowerAddr = shard.Standby.FollowerAddr
 		}
 
-		shardHealth := health[shard.ID]
+		shardHealth := snapshot.health[shard.ID]
 		entry.ActiveReachable = shardHealth.Active.Reachable
 		entry.ActiveStatus = shardHealth.Active.Status
 		entry.ActiveStatusError = shardHealth.Active.Error
