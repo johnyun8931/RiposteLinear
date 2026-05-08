@@ -208,10 +208,19 @@ the coordinator RPC port, and a listener on that same port. Smoke and sharded
 benchmark client traffic use the NLB DNS name when enabled. Coordinator
 administration and coordinator-to-shard traffic still use private addresses.
 
-This is a public entry layer only. The current harness registers one coordinator
-target, so it does not yet load-balance across multiple coordinator/router
-instances. Multi-router NLB traffic remains a later slice after upload routing
-is separated from leased epoch control.
+By default this registers one coordinator target. For multi-coordinator ingress
+validation, launch with:
+
+```bash
+CONTROL_STORE_BACKEND=dynamodb SESSION_STORE_BACKEND=dynamodb \
+PUBLIC_ENTRY_BACKEND=nlb PUBLIC_ENTRY_MULTI_COORDINATOR=1 \
+./aws-eval/01-launch.sh
+```
+
+This registers the coordinator instance on both `COORDINATOR_PORT` and
+`COORDINATOR_STANDBY_PORT`. The active coordinator still owns epoch/control
+mutations through the DynamoDB lease, while both coordinator processes can route
+uploads through the shared DynamoDB session store while the epoch is accepting.
 
 ### 4. Smoke
 
@@ -251,6 +260,19 @@ CONTROL_STORE_BACKEND=dynamodb ./aws-eval/08-validate-coordinator-lease.sh
 This starts coordinator A, starts coordinator B in warm standby, verifies B
 stays passive while A holds the lease, stops A, then verifies B promotes with a
 newer fencing token and starts an epoch.
+
+To validate multi-coordinator ingress through the NLB:
+
+```bash
+CONTROL_STORE_BACKEND=dynamodb SESSION_STORE_BACKEND=dynamodb \
+PUBLIC_ENTRY_BACKEND=nlb PUBLIC_ENTRY_MULTI_COORDINATOR=1 \
+./aws-eval/09-validate-multi-coordinator-ingress.sh
+```
+
+This starts coordinator A and standby coordinator B, forces NLB client traffic
+to B while A still owns the lease, verifies B can route uploads through the
+shared session store, then stops A and verifies B promotes and handles a new
+epoch.
 
 ### 5. Benchmark
 

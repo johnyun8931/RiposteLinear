@@ -470,17 +470,26 @@ func (c *Coordinator) cachedOrStoredSession(globalUUID int64) (SessionRecord, er
 	return session, nil
 }
 
-func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
-	if err := c.requireCoordinatorLease(); err != nil {
-		return coordinatorWireError(errCoordinatorNotActive)
+func acceptingEpochFromControlStore(controlStore ControlStore) (db.EpochMeta, error) {
+	epoch, ok := controlStore.CurrentEpoch()
+	if !ok || epoch.State != db.EpochStateActive {
+		return db.EpochMeta{}, errCoordinatorNoActiveEpoch
 	}
+	accepting, err := controlStore.Accepting(epoch.ID)
+	if err != nil || !accepting {
+		return db.EpochMeta{}, errCoordinatorNoActiveEpoch
+	}
+	return epoch, nil
+}
+
+func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
 	decision := c.upload1Decision()
 	if decision.err != nil {
 		return coordinatorWireError(decision.err)
 	}
-	accepting, err := decision.controlStore.Accepting(decision.epoch.ID)
-	if err != nil || !accepting {
-		return coordinatorWireError(errCoordinatorNoActiveEpoch)
+	epoch, err := acceptingEpochFromControlStore(decision.controlStore)
+	if err != nil {
+		return coordinatorWireError(err)
 	}
 
 	shard, err := c.routeShard(args.RouteRow)
@@ -509,7 +518,7 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 		var hashKey [32]byte
 		utils.RandBytes(hashKey[:])
 		session = SessionRecord{
-			EpochID:       decision.epoch.ID,
+			EpochID:       epoch.ID,
 			ShardID:       shard.ID,
 			GlobalUUID:    globalUUID,
 			LocalUUID:     globalUUID,
@@ -558,12 +567,13 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 }
 
 func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) error {
-	if err := c.requireCoordinatorLease(); err != nil {
-		return coordinatorWireError(errCoordinatorNotActive)
-	}
 	session, err := c.cachedOrStoredSession(args.Uuid)
 	if err != nil || session.HashKey != args.HashKey {
 		return coordinatorWireError(errCoordinatorBogusUUID)
+	}
+	epoch, err := acceptingEpochFromControlStore(c.controlStore)
+	if err != nil || epoch.ID != session.EpochID {
+		return coordinatorWireError(errCoordinatorNoActiveEpoch)
 	}
 
 	client := c.clients[session.ShardID]
@@ -576,12 +586,13 @@ func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) erro
 }
 
 func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error {
-	if err := c.requireCoordinatorLease(); err != nil {
-		return coordinatorWireError(errCoordinatorNotActive)
-	}
 	session, err := c.cachedOrStoredSession(args.Uuid)
 	if err != nil || session.HashKey != args.HashKey {
 		return coordinatorWireError(errCoordinatorBogusUUID)
+	}
+	epoch, err := acceptingEpochFromControlStore(c.controlStore)
+	if err != nil || epoch.ID != session.EpochID {
+		return coordinatorWireError(errCoordinatorNoActiveEpoch)
 	}
 
 	client := c.clients[session.ShardID]
@@ -618,7 +629,11 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 		return coordinatorWireError(errCoordinatorNotActive)
 	}
 
-	decision := c.startEpochDecision(args)
+	latestEpochID := int64(0)
+	if currentEpoch, ok := c.controlStore.CurrentEpoch(); ok {
+		latestEpochID = currentEpoch.ID
+	}
+	decision := c.startEpochDecision(args, latestEpochID)
 	if decision.err != nil {
 		return coordinatorWireError(decision.err)
 	}

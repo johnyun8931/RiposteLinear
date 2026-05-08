@@ -69,6 +69,7 @@ COORDINATOR_INSTANCE_TYPE="$COORDINATOR_INSTANCE_TYPE" \
 SERVER_INSTANCE_TYPE="$SERVER_INSTANCE_TYPE" \
 CLIENT_INSTANCE_TYPE="$CLIENT_INSTANCE_TYPE" \
 COORDINATOR_PORT="$COORDINATOR_PORT" \
+COORDINATOR_STANDBY_PORT="${COORDINATOR_STANDBY_PORT:-8631}" \
 SHARD0_LEADER_PORT="$SHARD0_LEADER_PORT" \
 SHARD0_FOLLOWER_PORT="$SHARD0_FOLLOWER_PORT" \
 SHARD1_LEADER_PORT="$SHARD1_LEADER_PORT" \
@@ -95,6 +96,7 @@ START_EPOCH_RETRY_INTERVAL="$START_EPOCH_RETRY_INTERVAL" \
 POST_EPOCH_FLUSH_SECONDS="$POST_EPOCH_FLUSH_SECONDS" \
 CLIENT_EXIT_GRACE_SECONDS="$CLIENT_EXIT_GRACE_SECONDS" \
 PUBLIC_ENTRY_BACKEND="$PUBLIC_ENTRY_BACKEND" \
+PUBLIC_ENTRY_MULTI_COORDINATOR="${PUBLIC_ENTRY_MULTI_COORDINATOR:-0}" \
 NLB_NAME="${NLB_NAME:-}" \
 NLB_DNS_NAME="${NLB_DNS_NAME:-}" \
 NLB_ARN="${NLB_ARN:-}" \
@@ -146,6 +148,7 @@ payload = {
     },
     "ports": {
         "coordinator": int(os.environ["COORDINATOR_PORT"]),
+        "coordinator_standby": int(os.environ["COORDINATOR_STANDBY_PORT"]),
         "shard0_leader": int(os.environ["SHARD0_LEADER_PORT"]),
         "shard0_follower": int(os.environ["SHARD0_FOLLOWER_PORT"]),
         "shard1_leader": int(os.environ["SHARD1_LEADER_PORT"]),
@@ -174,6 +177,7 @@ payload = {
         "post_epoch_flush_seconds": int(os.environ["POST_EPOCH_FLUSH_SECONDS"]),
         "client_exit_grace_seconds": int(os.environ["CLIENT_EXIT_GRACE_SECONDS"]),
         "public_entry_backend": os.environ["PUBLIC_ENTRY_BACKEND"],
+        "public_entry_multi_coordinator": os.environ["PUBLIC_ENTRY_MULTI_COORDINATOR"],
         "nlb": {
             "name": os.environ["NLB_NAME"],
             "dns_name": os.environ["NLB_DNS_NAME"],

@@ -19,6 +19,11 @@ if [[ -n "${NLB_TARGET_GROUP_ARN:-}" && -n "${COORDINATOR_ID:-}" ]]; then
   aws_region elbv2 deregister-targets \
     --target-group-arn "$NLB_TARGET_GROUP_ARN" \
     --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_PORT" >/dev/null 2>&1 || true
+  if [[ -n "${COORDINATOR_STANDBY_PORT:-}" ]]; then
+    aws_region elbv2 deregister-targets \
+      --target-group-arn "$NLB_TARGET_GROUP_ARN" \
+      --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_STANDBY_PORT" >/dev/null 2>&1 || true
+  fi
 fi
 
 if [[ -n "${NLB_ARN:-}" ]]; then
