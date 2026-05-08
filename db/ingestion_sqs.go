@@ -15,6 +15,8 @@ import (
 
 const sqsIngestionQueueBackend = "sqs"
 const completedUploadPointerSchemaVersion = 1
+const defaultSQSCompletedUploadWaitSeconds int32 = 10
+const defaultSQSCompletedUploadVisibilityTimeoutSeconds int32 = 300
 
 type SQSCompletedUploadClient interface {
 	SendMessage(context.Context, *sqs.SendMessageInput, ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
@@ -34,20 +36,34 @@ type completedUploadPointerMessage struct {
 }
 
 type sqsCompletedUploadQueue struct {
-	client       SQSCompletedUploadClient
-	payloadStore completedUploadPayloadStore
-	queueURL     string
+	client                   SQSCompletedUploadClient
+	payloadStore             completedUploadPayloadStore
+	queueURL                 string
+	waitTimeSeconds          int32
+	visibilityTimeoutSeconds int32
+}
+
+type SQSCompletedUploadQueueOptions struct {
+	WaitTimeSeconds          int32
+	VisibilityTimeoutSeconds int32
 }
 
 func NewSQSCompletedUploadQueue(sqsClient SQSCompletedUploadClient, s3Client S3CompletedUploadPayloadClient, queueURL string, payloadBucket string) (completedUploadQueue, error) {
+	return NewSQSCompletedUploadQueueWithOptions(sqsClient, s3Client, queueURL, payloadBucket, SQSCompletedUploadQueueOptions{
+		WaitTimeSeconds:          defaultSQSCompletedUploadWaitSeconds,
+		VisibilityTimeoutSeconds: defaultSQSCompletedUploadVisibilityTimeoutSeconds,
+	})
+}
+
+func NewSQSCompletedUploadQueueWithOptions(sqsClient SQSCompletedUploadClient, s3Client S3CompletedUploadPayloadClient, queueURL string, payloadBucket string, options SQSCompletedUploadQueueOptions) (completedUploadQueue, error) {
 	payloadStore, err := newS3CompletedUploadPayloadStore(s3Client, payloadBucket)
 	if err != nil {
 		return nil, err
 	}
-	return newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, queueURL)
+	return newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, queueURL, options)
 }
 
-func newSQSCompletedUploadQueueWithPayloadStore(sqsClient SQSCompletedUploadClient, payloadStore completedUploadPayloadStore, queueURL string) (completedUploadQueue, error) {
+func newSQSCompletedUploadQueueWithPayloadStore(sqsClient SQSCompletedUploadClient, payloadStore completedUploadPayloadStore, queueURL string, options SQSCompletedUploadQueueOptions) (completedUploadQueue, error) {
 	if sqsClient == nil {
 		return nil, errors.New("sqs completed upload client is required")
 	}
@@ -57,10 +73,21 @@ func newSQSCompletedUploadQueueWithPayloadStore(sqsClient SQSCompletedUploadClie
 	if queueURL == "" {
 		return nil, errors.New("sqs completed upload queue url is required")
 	}
+	if options.VisibilityTimeoutSeconds == 0 {
+		options.VisibilityTimeoutSeconds = defaultSQSCompletedUploadVisibilityTimeoutSeconds
+	}
+	if options.WaitTimeSeconds < 0 || options.WaitTimeSeconds > 20 {
+		return nil, errors.New("sqs completed upload wait seconds must be between 0 and 20")
+	}
+	if options.VisibilityTimeoutSeconds <= 0 {
+		return nil, errors.New("sqs completed upload visibility timeout seconds must be positive")
+	}
 	return &sqsCompletedUploadQueue{
-		client:       sqsClient,
-		payloadStore: payloadStore,
-		queueURL:     queueURL,
+		client:                   sqsClient,
+		payloadStore:             payloadStore,
+		queueURL:                 queueURL,
+		waitTimeSeconds:          options.WaitTimeSeconds,
+		visibilityTimeoutSeconds: options.VisibilityTimeoutSeconds,
 	}, nil
 }
 
@@ -165,7 +192,8 @@ func (q *sqsCompletedUploadQueue) Receive(ctx context.Context, maxMessages int) 
 	out, err := q.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 		QueueUrl:            aws.String(q.queueURL),
 		MaxNumberOfMessages: int32(maxMessages),
-		WaitTimeSeconds:     10,
+		WaitTimeSeconds:     q.waitTimeSeconds,
+		VisibilityTimeout:   q.visibilityTimeoutSeconds,
 	})
 	if err != nil {
 		return nil, err

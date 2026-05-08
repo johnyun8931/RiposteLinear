@@ -26,6 +26,9 @@ const READY_BUFFER_SIZE = 400
 // Number of server-side requests to allow in flight
 const WORKER_THREADS = 16
 
+const defaultIngestionReceiveBatchSize = 1
+const defaultIngestionWorkerErrorBackoff = 250 * time.Millisecond
+
 func (t *Server) isLeader() bool {
 	return (t.ServerIdx == 0)
 }
@@ -391,6 +394,47 @@ func (t *Server) ingestionQueueStats() IngestionQueueStats {
 	return t.ingestionQueue.Stats()
 }
 
+func (t *Server) recordIngestionProcessed() {
+	t.ingestionDiagnostics.mu.Lock()
+	defer t.ingestionDiagnostics.mu.Unlock()
+	t.ingestionDiagnostics.processedCount++
+}
+
+func (t *Server) recordIngestionAck() {
+	t.ingestionDiagnostics.mu.Lock()
+	defer t.ingestionDiagnostics.mu.Unlock()
+	t.ingestionDiagnostics.ackCount++
+}
+
+func (t *Server) recordIngestionError(kind string, err error) {
+	t.ingestionDiagnostics.mu.Lock()
+	defer t.ingestionDiagnostics.mu.Unlock()
+	switch kind {
+	case "receive":
+		t.ingestionDiagnostics.receiveErrorCount++
+	case "process":
+		t.ingestionDiagnostics.processErrorCount++
+	case "ack":
+		t.ingestionDiagnostics.ackErrorCount++
+	}
+	t.ingestionDiagnostics.lastError = err.Error()
+	t.ingestionDiagnostics.lastErrorTime = time.Now().UTC()
+}
+
+func (t *Server) ingestionDiagnosticsSnapshot() ingestionDiagnostics {
+	t.ingestionDiagnostics.mu.Lock()
+	defer t.ingestionDiagnostics.mu.Unlock()
+	return ingestionDiagnostics{
+		processedCount:    t.ingestionDiagnostics.processedCount,
+		ackCount:          t.ingestionDiagnostics.ackCount,
+		receiveErrorCount: t.ingestionDiagnostics.receiveErrorCount,
+		processErrorCount: t.ingestionDiagnostics.processErrorCount,
+		ackErrorCount:     t.ingestionDiagnostics.ackErrorCount,
+		lastError:         t.ingestionDiagnostics.lastError,
+		lastErrorTime:     t.ingestionDiagnostics.lastErrorTime,
+	}
+}
+
 func (t *Server) ingestionQueueDrained() bool {
 	stats := t.ingestionQueueStats()
 	return stats.Depth == 0 && stats.Inflight == 0
@@ -408,9 +452,11 @@ func (t *Server) notifyIngestionQueueDrained() {
 // Do everything
 func (t *Server) processRequest() {
 	for {
-		items, err := t.ingestionQueue.Receive(context.Background(), 1)
+		items, err := t.ingestionQueue.Receive(context.Background(), t.ingestionBatchSize)
 		if err != nil {
 			log.Printf("Error receiving ingestion work: %v", err)
+			t.recordIngestionError("receive", err)
+			time.Sleep(t.ingestionErrorBackoff)
 			continue
 		}
 		for _, item := range items {
@@ -431,16 +477,21 @@ func (t *Server) processIngestionJob(item QueuedCompletedUploadMessage) {
 	shouldCommit, err := t.processUploadFn(msg)
 	if err != nil {
 		log.Printf("Error preparing uuid %d: %v", msg.Uuid, err)
+		t.recordIngestionError("process", err)
 		return
 	}
 	if err := t.commitUploadFn(msg.Uuid, shouldCommit); err != nil {
 		log.Printf("Error committing uuid %d: %v", msg.Uuid, err)
+		t.recordIngestionError("process", err)
 		return
 	}
+	t.recordIngestionProcessed()
 	if err := t.ingestionQueue.Ack(context.Background(), item.ReceiptHandle); err != nil {
 		log.Printf("Error acking ingestion uuid %d: %v", msg.Uuid, err)
+		t.recordIngestionError("ack", err)
 		return
 	}
+	t.recordIngestionAck()
 	t.notifyIngestionQueueDrained()
 }
 
@@ -785,6 +836,16 @@ func (t *Server) Status(_ *StatusArgs, reply *StatusReply) error {
 	stats := t.ingestionQueueStats()
 	reply.IngestionQueueDepth = stats.Depth
 	reply.IngestionInflightCount = stats.Inflight
+	diagnostics := t.ingestionDiagnosticsSnapshot()
+	reply.IngestionProcessedCount = diagnostics.processedCount
+	reply.IngestionAckCount = diagnostics.ackCount
+	reply.IngestionReceiveErrors = diagnostics.receiveErrorCount
+	reply.IngestionProcessErrors = diagnostics.processErrorCount
+	reply.IngestionAckErrors = diagnostics.ackErrorCount
+	reply.IngestionLastError = diagnostics.lastError
+	if !diagnostics.lastErrorTime.IsZero() {
+		reply.IngestionLastErrorUnix = diagnostics.lastErrorTime.Unix()
+	}
 	if !t.isLeader() {
 		reply.State = EpochStateNoActive.String()
 		reply.PeerState = "not_applicable"
@@ -972,6 +1033,8 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 		return t.sendMergeRequest()
 	}
 	t.SetIngestionQueueBackend(memoryIngestionQueueBackend)
+	t.ingestionBatchSize = defaultIngestionReceiveBatchSize
+	t.ingestionErrorBackoff = defaultIngestionWorkerErrorBackoff
 	t.processUploadFn = t.submitPrepares
 	t.commitUploadFn = t.submitCommits
 	if t.isLeader() {
@@ -1001,6 +1064,18 @@ func (t *Server) SetCompletedUploadQueue(queue CompletedUploadQueue) error {
 	}
 	t.ingestionQueue = queue
 	t.ingestionQueueBackend = queue.Backend()
+	return nil
+}
+
+func (t *Server) SetIngestionWorkerConfig(receiveBatchSize int, errorBackoff time.Duration) error {
+	if receiveBatchSize < 1 || receiveBatchSize > 10 {
+		return errors.New("ingestion receive batch size must be between 1 and 10")
+	}
+	if errorBackoff <= 0 {
+		return errors.New("ingestion worker error backoff must be positive")
+	}
+	t.ingestionBatchSize = receiveBatchSize
+	t.ingestionErrorBackoff = errorBackoff
 	return nil
 }
 

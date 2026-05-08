@@ -59,10 +59,11 @@ type fakeSQSMessage struct {
 }
 
 type fakeSQSClient struct {
-	mu       sync.Mutex
-	nextID   int
-	messages []fakeSQSMessage
-	deleted  []string
+	mu           sync.Mutex
+	nextID       int
+	messages     []fakeSQSMessage
+	deleted      []string
+	receiveInput *sqs.ReceiveMessageInput
 }
 
 func (c *fakeSQSClient) SendMessage(_ context.Context, input *sqs.SendMessageInput, _ ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
@@ -84,9 +85,10 @@ func (c *fakeSQSClient) SendMessage(_ context.Context, input *sqs.SendMessageInp
 	return &sqs.SendMessageOutput{MessageId: aws.String(id)}, nil
 }
 
-func (c *fakeSQSClient) ReceiveMessage(_ context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+func (c *fakeSQSClient) ReceiveMessage(_ context.Context, input *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.receiveInput = input
 	for i := range c.messages {
 		if !c.messages[i].visible {
 			continue
@@ -231,7 +233,7 @@ func TestCompletedUploadPointerRoundTripAndValidation(t *testing.T) {
 func TestSQSCompletedUploadQueueEnqueueWritesPayloadBeforePointer(t *testing.T) {
 	payloadStore := newFakePayloadStore()
 	sqsClient := &fakeSQSClient{}
-	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url")
+	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url", SQSCompletedUploadQueueOptions{})
 	if err != nil {
 		t.Fatalf("queue create failed: %v", err)
 	}
@@ -253,7 +255,10 @@ func TestSQSCompletedUploadQueueEnqueueWritesPayloadBeforePointer(t *testing.T) 
 func TestSQSCompletedUploadQueueReceiveLoadsPayloadAndAckDeletesMessage(t *testing.T) {
 	payloadStore := newFakePayloadStore()
 	sqsClient := &fakeSQSClient{}
-	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url")
+	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url", SQSCompletedUploadQueueOptions{
+		WaitTimeSeconds:          7,
+		VisibilityTimeoutSeconds: 42,
+	})
 	if err != nil {
 		t.Fatalf("queue create failed: %v", err)
 	}
@@ -267,6 +272,9 @@ func TestSQSCompletedUploadQueueReceiveLoadsPayloadAndAckDeletesMessage(t *testi
 	if len(items) != 1 || items[0].Message.Uuid != 8 || items[0].ReceiptHandle == "" {
 		t.Fatalf("unexpected items: %+v", items)
 	}
+	if sqsClient.receiveInput == nil || sqsClient.receiveInput.MaxNumberOfMessages != 1 || sqsClient.receiveInput.WaitTimeSeconds != 7 || sqsClient.receiveInput.VisibilityTimeout != 42 {
+		t.Fatalf("unexpected receive input: %+v", sqsClient.receiveInput)
+	}
 	if err := queue.Ack(context.Background(), items[0].ReceiptHandle); err != nil {
 		t.Fatalf("ack failed: %v", err)
 	}
@@ -275,10 +283,86 @@ func TestSQSCompletedUploadQueueReceiveLoadsPayloadAndAckDeletesMessage(t *testi
 	}
 }
 
+func TestSQSCompletedUploadQueueRejectsInvalidOptions(t *testing.T) {
+	payloadStore := newFakePayloadStore()
+	tests := []SQSCompletedUploadQueueOptions{
+		{WaitTimeSeconds: -1},
+		{WaitTimeSeconds: 21},
+		{VisibilityTimeoutSeconds: -1},
+	}
+	for _, options := range tests {
+		if _, err := newSQSCompletedUploadQueueWithPayloadStore(&fakeSQSClient{}, payloadStore, "queue-url", options); err == nil {
+			t.Fatalf("expected invalid options to fail: %+v", options)
+		}
+	}
+}
+
+func TestSQSCompletedUploadQueueMalformedPointerRemainsUnacked(t *testing.T) {
+	payloadStore := newFakePayloadStore()
+	sqsClient := &fakeSQSClient{
+		messages: []fakeSQSMessage{{
+			id:      "msg-1",
+			body:    "{bad-json",
+			receipt: "receipt-1",
+			visible: true,
+		}},
+	}
+	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url", SQSCompletedUploadQueueOptions{})
+	if err != nil {
+		t.Fatalf("queue create failed: %v", err)
+	}
+	if _, err := queue.Receive(context.Background(), 1); err == nil {
+		t.Fatal("expected malformed pointer to fail")
+	}
+	if len(sqsClient.deleted) != 0 {
+		t.Fatalf("expected malformed pointer to remain unacked, deleted=%+v", sqsClient.deleted)
+	}
+	stats := queue.Stats()
+	if stats.Inflight != 1 {
+		t.Fatalf("expected malformed pointer to stay in flight, got %+v", stats)
+	}
+}
+
+func TestSQSCompletedUploadQueueMissingPayloadRemainsUnacked(t *testing.T) {
+	payloadStore := newFakePayloadStore()
+	body, err := encodeCompletedUploadPointer(completedUploadPointerMessage{
+		EpochID: 1,
+		ShardID: 0,
+		Uuid:    7,
+		Bucket:  "payload-bucket",
+		Key:     "missing-key",
+	})
+	if err != nil {
+		t.Fatalf("encode pointer failed: %v", err)
+	}
+	sqsClient := &fakeSQSClient{
+		messages: []fakeSQSMessage{{
+			id:      "msg-1",
+			body:    body,
+			receipt: "receipt-1",
+			visible: true,
+		}},
+	}
+	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url", SQSCompletedUploadQueueOptions{})
+	if err != nil {
+		t.Fatalf("queue create failed: %v", err)
+	}
+	if _, err := queue.Receive(context.Background(), 1); err == nil {
+		t.Fatal("expected missing payload to fail")
+	}
+	if len(sqsClient.deleted) != 0 {
+		t.Fatalf("expected missing payload to remain unacked, deleted=%+v", sqsClient.deleted)
+	}
+	stats := queue.Stats()
+	if stats.Inflight != 1 {
+		t.Fatalf("expected missing payload pointer to stay in flight, got %+v", stats)
+	}
+}
+
 func TestIngestionWorkerLeavesSQSMessageUnackedOnFailure(t *testing.T) {
 	payloadStore := newFakePayloadStore()
 	sqsClient := &fakeSQSClient{}
-	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url")
+	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url", SQSCompletedUploadQueueOptions{})
 	if err != nil {
 		t.Fatalf("queue create failed: %v", err)
 	}
@@ -313,7 +397,7 @@ func TestIngestionWorkerLeavesSQSMessageUnackedOnFailure(t *testing.T) {
 func TestUpload3WithSQSBackendEnqueuesCompletedPayload(t *testing.T) {
 	payloadStore := newFakePayloadStore()
 	sqsClient := &fakeSQSClient{}
-	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url")
+	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "queue-url", SQSCompletedUploadQueueOptions{})
 	if err != nil {
 		t.Fatalf("queue create failed: %v", err)
 	}
@@ -358,7 +442,7 @@ func TestSQSStatsParseLargeCounts(t *testing.T) {
 
 func TestSQSReceiveRejectsEmptyQueueImmediatelyFromFake(t *testing.T) {
 	payloadStore := newFakePayloadStore()
-	queue, err := newSQSCompletedUploadQueueWithPayloadStore(&fakeSQSClient{}, payloadStore, "queue-url")
+	queue, err := newSQSCompletedUploadQueueWithPayloadStore(&fakeSQSClient{}, payloadStore, "queue-url", SQSCompletedUploadQueueOptions{})
 	if err != nil {
 		t.Fatalf("queue create failed: %v", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strings"
+	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -33,6 +34,10 @@ var flagGlobalRowStart = flag.Int("global-row-start", 0, "First global row repre
 var flagIngestionQueue = flag.String("ingestion-queue", "memory", "Completed upload ingestion queue backend")
 var flagIngestionSQSQueueURL = flag.String("ingestion-sqs-queue-url", "", "SQS queue URL for -ingestion-queue sqs")
 var flagIngestionS3Bucket = flag.String("ingestion-s3-bucket", "", "S3 bucket for -ingestion-queue sqs completed upload payloads")
+var flagIngestionReceiveBatchSize = flag.Int("ingestion-receive-batch-size", 1, "Completed upload ingestion receive batch size")
+var flagIngestionSQSWaitSeconds = flag.Int("ingestion-sqs-wait-seconds", 10, "SQS long-poll wait seconds for completed upload ingestion")
+var flagIngestionSQSVisibilityTimeoutSeconds = flag.Int("ingestion-sqs-visibility-timeout-seconds", 300, "SQS visibility timeout seconds for completed upload ingestion")
+var flagIngestionWorkerErrorBackoffMs = flag.Int("ingestion-worker-error-backoff-ms", 250, "Worker backoff in milliseconds after ingestion receive errors")
 var flagAWSRegion = flag.String("aws-region", "", "AWS SDK region override")
 var flagAdminTarget = flag.String("admin-target", "", "Target leader address for admin RPC commands")
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
@@ -133,7 +138,13 @@ func main() {
 	if err := slotTable.SetGlobalRowStart(*flagGlobalRowStart); err != nil {
 		log.Fatal(err)
 	}
+	if err := validateIngestionFlags(); err != nil {
+		log.Fatal(err)
+	}
 	configureIngestionQueue(slotTable)
+	if err := slotTable.SetIngestionWorkerConfig(*flagIngestionReceiveBatchSize, time.Duration(*flagIngestionWorkerErrorBackoffMs)*time.Millisecond); err != nil {
+		log.Fatal(err)
+	}
 	slotTable.SetResultsDir(*flagResultsDir)
 	slotTable.Initialize(&a, &a)
 	rpc.Register(slotTable)
@@ -150,6 +161,16 @@ func main() {
 	log.Printf("Server %d is listening at %s", idx, serverList[idx])
 
 	//http.ListenAndServe(addr, nil)
+}
+
+func validateIngestionFlags() error {
+	if *flagIngestionSQSWaitSeconds < 0 || *flagIngestionSQSWaitSeconds > 20 {
+		return errors.New("-ingestion-sqs-wait-seconds must be between 0 and 20")
+	}
+	if *flagIngestionSQSVisibilityTimeoutSeconds <= 0 {
+		return errors.New("-ingestion-sqs-visibility-timeout-seconds must be positive")
+	}
+	return nil
 }
 
 func configureIngestionQueue(slotTable *db.Server) {
@@ -173,7 +194,10 @@ func configureIngestionQueue(slotTable *db.Server) {
 		if err != nil {
 			log.Fatal("Could not load AWS config for SQS ingestion queue: ", err)
 		}
-		queue, err := db.NewSQSCompletedUploadQueue(sqs.NewFromConfig(cfg), s3.NewFromConfig(cfg), *flagIngestionSQSQueueURL, *flagIngestionS3Bucket)
+		queue, err := db.NewSQSCompletedUploadQueueWithOptions(sqs.NewFromConfig(cfg), s3.NewFromConfig(cfg), *flagIngestionSQSQueueURL, *flagIngestionS3Bucket, db.SQSCompletedUploadQueueOptions{
+			WaitTimeSeconds:          int32(*flagIngestionSQSWaitSeconds),
+			VisibilityTimeoutSeconds: int32(*flagIngestionSQSVisibilityTimeoutSeconds),
+		})
 		if err != nil {
 			log.Fatal(err)
 		}

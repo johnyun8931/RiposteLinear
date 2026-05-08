@@ -259,9 +259,19 @@ payloads. Shard leaders write the full completed-upload job to S3, enqueue a
 small SQS pointer, and delete the SQS message only after prepare/commit
 succeeds. S3 payloads are retained after ack for debugging and replay audit.
 
+Operational knobs default to conservative smoke-safe values:
+
+```bash
+INGESTION_RECEIVE_BATCH_SIZE=1
+INGESTION_SQS_WAIT_SECONDS=10
+INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS=300
+INGESTION_WORKER_ERROR_BACKOFF_MS=250
+```
+
 Smoke captures SQS queue attributes and S3 payload listings under
 `smoke/run/logs/ingestion-completed/`. `05-collect-logs.sh` also copies current
-ingestion artifacts under `aws/ingestion/`.
+ingestion artifacts under `aws/ingestion/`. Completed shard status JSON includes
+processed, acked, and ingestion error counters.
 
 ### 4. Smoke
 

@@ -70,6 +70,30 @@ func ackQueuedIngestion(t *testing.T, s *Server) {
 	s.notifyIngestionQueueDrained()
 }
 
+type ackFailingCompletedUploadQueue struct {
+	item QueuedCompletedUploadMessage
+}
+
+func (q *ackFailingCompletedUploadQueue) Backend() string {
+	return "ack-failing"
+}
+
+func (q *ackFailingCompletedUploadQueue) Enqueue(context.Context, CompletedUploadMessage) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (q *ackFailingCompletedUploadQueue) Receive(context.Context, int) ([]QueuedCompletedUploadMessage, error) {
+	return []QueuedCompletedUploadMessage{q.item}, nil
+}
+
+func (q *ackFailingCompletedUploadQueue) Ack(context.Context, string) error {
+	return errors.New("ack failed")
+}
+
+func (q *ackFailingCompletedUploadQueue) Stats() IngestionQueueStats {
+	return IngestionQueueStats{Inflight: 1}
+}
+
 func TestUploadRejectedWithoutActiveEpoch(t *testing.T) {
 	s := newTestLeaderServer()
 
@@ -653,6 +677,13 @@ func TestIngestionWorkerAcksAfterSuccessfulProcessing(t *testing.T) {
 	if stats.Depth != 0 || stats.Inflight != 0 {
 		t.Fatalf("expected successful processing to ack queue item, got %+v", stats)
 	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionProcessedCount != 1 || status.IngestionAckCount != 1 || status.IngestionProcessErrors != 0 || status.IngestionAckErrors != 0 {
+		t.Fatalf("unexpected successful ingestion diagnostics: %+v", status)
+	}
 }
 
 func TestIngestionWorkerLeavesFailedProcessingUnacked(t *testing.T) {
@@ -674,6 +705,70 @@ func TestIngestionWorkerLeavesFailedProcessingUnacked(t *testing.T) {
 	stats := s.ingestionQueueStats()
 	if stats.Depth != 0 || stats.Inflight != 1 {
 		t.Fatalf("expected failed processing to leave item in flight, got %+v", stats)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionProcessedCount != 0 || status.IngestionAckCount != 0 || status.IngestionProcessErrors != 1 || status.IngestionLastError == "" || status.IngestionLastErrorUnix == 0 {
+		t.Fatalf("unexpected failed ingestion diagnostics: %+v", status)
+	}
+}
+
+func TestIngestionWorkerRecordsAckErrors(t *testing.T) {
+	s := newTestLeaderServer()
+	queue := &ackFailingCompletedUploadQueue{
+		item: QueuedCompletedUploadMessage{
+			Message:       CompletedUploadMessage{EpochID: 1, Uuid: 9},
+			ReceiptHandle: "receipt",
+		},
+	}
+	if err := s.SetCompletedUploadQueue(queue); err != nil {
+		t.Fatalf("set queue failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		return nil
+	}
+
+	s.processIngestionJob(queue.item)
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionProcessedCount != 1 || status.IngestionAckCount != 0 || status.IngestionAckErrors != 1 || status.IngestionLastError != "ack failed" {
+		t.Fatalf("unexpected ack error diagnostics: %+v", status)
+	}
+}
+
+func TestIngestionDiagnosticsRecordReceiveError(t *testing.T) {
+	s := newTestLeaderServer()
+	s.recordIngestionError("receive", errors.New("receive failed"))
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionReceiveErrors != 1 || status.IngestionLastError != "receive failed" || status.IngestionLastErrorUnix == 0 {
+		t.Fatalf("unexpected receive error diagnostics: %+v", status)
+	}
+}
+
+func TestSetIngestionWorkerConfigValidatesValues(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetIngestionWorkerConfig(10, time.Millisecond); err != nil {
+		t.Fatalf("valid config failed: %v", err)
+	}
+	for _, batchSize := range []int{0, 11} {
+		if err := s.SetIngestionWorkerConfig(batchSize, time.Millisecond); err == nil {
+			t.Fatalf("expected invalid batch size %d to fail", batchSize)
+		}
+	}
+	if err := s.SetIngestionWorkerConfig(1, 0); err == nil {
+		t.Fatal("expected zero backoff to fail")
 	}
 }
 

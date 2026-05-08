@@ -95,6 +95,10 @@ output "state_env" {
 
     INGESTION_QUEUE_BACKEND                    = var.ingestion_queue_backend
     INGESTION_S3_BUCKET                        = local.ingestion_sqs_enabled ? aws_s3_bucket.ingestion_payloads[0].bucket : ""
+    INGESTION_RECEIVE_BATCH_SIZE               = var.ingestion_receive_batch_size
+    INGESTION_SQS_WAIT_SECONDS                 = var.ingestion_sqs_wait_seconds
+    INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS   = var.ingestion_sqs_visibility_timeout_seconds
+    INGESTION_WORKER_ERROR_BACKOFF_MS          = var.ingestion_worker_error_backoff_ms
     INGESTION_SQS_SHARD0_QUEUE_URL             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard0[0].url : ""
     INGESTION_SQS_SHARD0_QUEUE_ARN             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard0[0].arn : ""
     INGESTION_SQS_SHARD1_QUEUE_URL             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard1[0].url : ""

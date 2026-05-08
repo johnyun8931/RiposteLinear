@@ -102,6 +102,10 @@ PUBLIC_ENTRY_BACKEND="$PUBLIC_ENTRY_BACKEND" \
 PUBLIC_ENTRY_MULTI_COORDINATOR="${PUBLIC_ENTRY_MULTI_COORDINATOR:-0}" \
 INGESTION_QUEUE_BACKEND="$INGESTION_QUEUE_BACKEND" \
 INGESTION_S3_BUCKET="${INGESTION_S3_BUCKET:-}" \
+INGESTION_RECEIVE_BATCH_SIZE="$INGESTION_RECEIVE_BATCH_SIZE" \
+INGESTION_SQS_WAIT_SECONDS="$INGESTION_SQS_WAIT_SECONDS" \
+INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS="$INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS" \
+INGESTION_WORKER_ERROR_BACKOFF_MS="$INGESTION_WORKER_ERROR_BACKOFF_MS" \
 INGESTION_SQS_SHARD0_QUEUE_URL="${INGESTION_SQS_SHARD0_QUEUE_URL:-}" \
 INGESTION_SQS_SHARD1_QUEUE_URL="${INGESTION_SQS_SHARD1_QUEUE_URL:-}" \
 NLB_NAME="${NLB_NAME:-}" \
@@ -187,6 +191,10 @@ payload = {
         "public_entry_multi_coordinator": os.environ["PUBLIC_ENTRY_MULTI_COORDINATOR"],
         "ingestion_queue_backend": os.environ["INGESTION_QUEUE_BACKEND"],
         "ingestion_s3_bucket": os.environ["INGESTION_S3_BUCKET"],
+        "ingestion_receive_batch_size": int(os.environ["INGESTION_RECEIVE_BATCH_SIZE"]),
+        "ingestion_sqs_wait_seconds": int(os.environ["INGESTION_SQS_WAIT_SECONDS"]),
+        "ingestion_sqs_visibility_timeout_seconds": int(os.environ["INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS"]),
+        "ingestion_worker_error_backoff_ms": int(os.environ["INGESTION_WORKER_ERROR_BACKOFF_MS"]),
         "ingestion_sqs_shard0_queue_url": os.environ["INGESTION_SQS_SHARD0_QUEUE_URL"],
         "ingestion_sqs_shard1_queue_url": os.environ["INGESTION_SQS_SHARD1_QUEUE_URL"],
         "nlb": {

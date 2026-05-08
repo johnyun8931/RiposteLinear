@@ -188,6 +188,34 @@ if len([key for key in keys if key.startswith("completed-uploads/")]) < 2:
 PY
 }
 
+assert_remote_ingestion_status() {
+  local host="$1"
+  local path="$2"
+  if ! sqs_ingestion_enabled; then
+    return 0
+  fi
+  remote_cmd "$host" "python3 - '$path' <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    status = json.load(open(path))
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f\"{path}: invalid JSON: {err}\")
+
+if status.get('ingestion_queue_backend') != 'sqs':
+    raise SystemExit(f\"{path}: expected sqs ingestion backend, got {status.get('ingestion_queue_backend')}\")
+if int(status.get('ingestion_processed_count', 0)) < 1:
+    raise SystemExit(f\"{path}: expected at least one processed upload, got {status.get('ingestion_processed_count')}\")
+if int(status.get('ingestion_ack_count', 0)) < 1:
+    raise SystemExit(f\"{path}: expected at least one acked upload, got {status.get('ingestion_ack_count')}\")
+for key in ('ingestion_receive_error_count', 'ingestion_process_error_count', 'ingestion_ack_error_count'):
+    if int(status.get(key, 0)) != 0:
+        raise SystemExit(f\"{path}: expected {key}=0, got {status.get(key)} last_error={status.get('ingestion_last_error')}\")
+PY"
+}
+
 cleanup() {
   kill_all_remote_processes
 }
@@ -240,6 +268,8 @@ wait_for_sqs_ingestion_drain 120
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
+assert_remote_ingestion_status "$SHARD0_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
+assert_remote_ingestion_status "$SHARD1_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
 assert_remote_scaling_status "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json" "$epoch_id" 2 512
 if public_entry_enabled; then
   capture_nlb_artifacts "$SMOKE_LOCAL_DIR/nlb-completed"

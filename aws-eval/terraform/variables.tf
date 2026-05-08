@@ -228,6 +228,26 @@ variable "ingestion_s3_bucket" {
   default = ""
 }
 
+variable "ingestion_receive_batch_size" {
+  type    = number
+  default = 1
+}
+
+variable "ingestion_sqs_wait_seconds" {
+  type    = number
+  default = 10
+}
+
+variable "ingestion_sqs_visibility_timeout_seconds" {
+  type    = number
+  default = 300
+}
+
+variable "ingestion_worker_error_backoff_ms" {
+  type    = number
+  default = 250
+}
+
 variable "server_ingestion_iam_role_name" {
   type    = string
   default = "riposte-server-ingestion"

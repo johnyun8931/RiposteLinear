@@ -215,10 +215,29 @@ The opt-in AWS ingestion backend uses SQS plus S3:
 - failed prepare/commit leaves the SQS message unacked for redelivery after the
   queue visibility timeout.
 
+The server exposes operational controls for SQS wait time, visibility timeout,
+receive batch size, and worker error backoff. Shard status reports processed,
+acked, receive-error, process-error, and ack-error counters plus the last
+ingestion error. These counters are diagnostics only; this slice does not add a
+durable processed-upload ledger.
+
 The S3 payload is retained after ack for debugging and replay audit. This gives
 active/passive shard promotion a durable replay boundary for uploads that
 successfully reached `Upload3`. Partial shard-side `Upload1`/`Upload2` sessions
 are still not durable at the shard layer.
+
+Future slices can close the partial-upload gap in increasing order of
+complexity:
+
+- Retry from `Upload1`: if a shard dies mid-session, the client abandons that
+  session and starts the upload again. This is the simplest path and avoids
+  persisting shard partial state.
+- Persist shard partial sessions: store shard-side `Upload1`/`Upload2` state in
+  a durable store so a promoted standby can continue an existing session through
+  `Upload2` or `Upload3`.
+- Durable protocol log: record each upload step as a durable event and rebuild
+  shard state from the log. This gives the strongest replay model, but requires
+  the largest protocol and worker refactor.
 
 ## Current Boundary
 

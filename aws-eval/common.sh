@@ -40,6 +40,10 @@ PUBLIC_ENTRY_BACKEND="${PUBLIC_ENTRY_BACKEND:-none}"
 PUBLIC_ENTRY_MULTI_COORDINATOR="${PUBLIC_ENTRY_MULTI_COORDINATOR:-0}"
 INGESTION_QUEUE_BACKEND="${INGESTION_QUEUE_BACKEND:-memory}"
 INGESTION_S3_BUCKET="${INGESTION_S3_BUCKET:-}"
+INGESTION_RECEIVE_BATCH_SIZE="${INGESTION_RECEIVE_BATCH_SIZE:-1}"
+INGESTION_SQS_WAIT_SECONDS="${INGESTION_SQS_WAIT_SECONDS:-10}"
+INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS="${INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS:-300}"
+INGESTION_WORKER_ERROR_BACKOFF_MS="${INGESTION_WORKER_ERROR_BACKOFF_MS:-250}"
 SERVER_INGESTION_IAM_POLICY_NAME="${SERVER_INGESTION_IAM_POLICY_NAME:-RiposteCompletedUploadIngestion}"
 
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
@@ -490,18 +494,25 @@ ingestion_queue_url_for_shard() {
 }
 
 server_ingestion_queue_args() {
-  local shard_id="$1"
-  case "$INGESTION_QUEUE_BACKEND" in
-    memory)
-      return 0
-      ;;
-    sqs)
-      [[ -n "${INGESTION_S3_BUCKET:-}" ]] || die "INGESTION_S3_BUCKET is required when INGESTION_QUEUE_BACKEND=sqs"
-      printf -- " -ingestion-queue sqs -ingestion-sqs-queue-url %s -ingestion-s3-bucket %s -aws-region %s" \
-        "$(quote "$(ingestion_queue_url_for_shard "$shard_id")")" \
-        "$(quote "$INGESTION_S3_BUCKET")" \
-        "$(quote "$AWS_REGION")"
-      ;;
+	local shard_id="$1"
+	local worker_args
+	worker_args="$(printf -- " -ingestion-receive-batch-size %s -ingestion-worker-error-backoff-ms %s" \
+		"$(quote "$INGESTION_RECEIVE_BATCH_SIZE")" \
+		"$(quote "$INGESTION_WORKER_ERROR_BACKOFF_MS")")"
+	case "$INGESTION_QUEUE_BACKEND" in
+	memory)
+		printf '%s' "$worker_args"
+		;;
+	sqs)
+		[[ -n "${INGESTION_S3_BUCKET:-}" ]] || die "INGESTION_S3_BUCKET is required when INGESTION_QUEUE_BACKEND=sqs"
+		printf -- "%s -ingestion-queue sqs -ingestion-sqs-queue-url %s -ingestion-s3-bucket %s -aws-region %s -ingestion-sqs-wait-seconds %s -ingestion-sqs-visibility-timeout-seconds %s" \
+			"$worker_args" \
+			"$(quote "$(ingestion_queue_url_for_shard "$shard_id")")" \
+			"$(quote "$INGESTION_S3_BUCKET")" \
+			"$(quote "$AWS_REGION")" \
+			"$(quote "$INGESTION_SQS_WAIT_SECONDS")" \
+			"$(quote "$INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS")"
+		;;
     *)
       die "unknown INGESTION_QUEUE_BACKEND: $INGESTION_QUEUE_BACKEND"
       ;;
