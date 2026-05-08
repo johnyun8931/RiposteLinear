@@ -137,10 +137,11 @@ func (l *dynamoDBCompletedUploadLedger) BeginProcessing(ctx context.Context, mes
 	_, err := l.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           aws.String(l.table),
 		Key:                 dynamoCompletedUploadLedgerKey(key),
-		UpdateExpression:    aws.String("SET shard_id = :shard_id, epoch_id = :epoch_id, uuid = :uuid, #state = :processing, attempt_id = :attempt_id, processing_expires_unix_ms = :expires, updated_unix_ms = :updated"),
+		UpdateExpression:    aws.String("SET shard_id = :shard_id, epoch_id = :epoch_id, #uuid = :uuid, #state = :processing, attempt_id = :attempt_id, processing_expires_unix_ms = :expires, updated_unix_ms = :updated"),
 		ConditionExpression: aws.String("attribute_not_exists(pk) OR (#state <> :committed AND (attribute_not_exists(processing_expires_unix_ms) OR processing_expires_unix_ms <= :now))"),
 		ExpressionAttributeNames: map[string]string{
 			"#state": "state",
+			"#uuid":  "uuid",
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":shard_id":   dynamoCompletedUploadLedgerNumberAttr(int64(message.ShardID)),
