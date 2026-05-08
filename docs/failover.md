@@ -241,6 +241,14 @@ queue depth, server status, and replica-specific ledger records. Standby shard
 processes consume their own queue with `-replica-id standby`; they do not
 accept direct client uploads in this slice.
 
+Coordinator status computes a read-only hot-standby promotion-readiness signal
+from live active and standby status. A standby is marked promotable only when it
+is reachable, reports `replica_id=standby`, has zero queue depth and in-flight
+work, has no ingestion or ledger errors, and has committed at least as many
+completed uploads as the active replica. This is a conservative live signal for
+operators and validation; it is not a durable proof after a process restart and
+it does not promote or mutate shard routing.
+
 Shard server flags for this boundary:
 
 - `-ingestion-queue memory|sqs`, default `memory`

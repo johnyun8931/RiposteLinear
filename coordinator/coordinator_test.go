@@ -1849,7 +1849,7 @@ func TestCoordinatorStatusIncludesConfiguredShardsAndShardStatus(t *testing.T) {
 
 func TestCoordinatorStatusIncludesStandbyHealthWhenConfigured(t *testing.T) {
 	active := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, IsLeader: true, ShardID: 0}}
-	standby := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, IsLeader: true, ShardID: 0, PeerState: db.PeerConnectionsReady.String()}}
+	standby := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, IsLeader: true, ShardID: 0, PeerState: db.PeerConnectionsReady.String(), ReplicaID: db.CompletedUploadReplicaStandby}}
 	coord := mustCoordinator(t, []ShardConfig{
 		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
 	}, map[int]shardClient{0: active})
@@ -1873,6 +1873,132 @@ func TestCoordinatorStatusIncludesStandbyHealthWhenConfigured(t *testing.T) {
 	}
 	if standby.statusCalls != 1 || standby.closeCalls != 1 {
 		t.Fatalf("expected standby status and close calls, got status=%d close=%d", standby.statusCalls, standby.closeCalls)
+	}
+	if !shard.StandbyPromotable || shard.StandbyPromotionStatus != standbyPromotionStatusPromotable {
+		t.Fatalf("expected promotable standby, got %+v", shard)
+	}
+}
+
+func TestStandbyPromotionReadinessStatuses(t *testing.T) {
+	promotable := db.CoordinatorShardStatus{
+		HasStandby:       true,
+		ActiveReachable:  true,
+		StandbyReachable: true,
+		ActiveStatus: db.StatusReply{
+			CompletedUploadCommittedCount: 3,
+		},
+		StandbyStatus: db.StatusReply{
+			ReplicaID:                     db.CompletedUploadReplicaStandby,
+			CompletedUploadCommittedCount: 3,
+		},
+	}
+
+	tests := []struct {
+		name           string
+		update         func(*db.CoordinatorShardStatus)
+		wantStatus     string
+		wantPromotable bool
+	}{
+		{
+			name:           "promotable",
+			wantStatus:     standbyPromotionStatusPromotable,
+			wantPromotable: true,
+		},
+		{
+			name: "missing standby",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.HasStandby = false
+			},
+			wantStatus: standbyPromotionStatusMissingStandby,
+		},
+		{
+			name: "active unreachable",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.ActiveReachable = false
+			},
+			wantStatus: standbyPromotionStatusUnknownActiveUnreachable,
+		},
+		{
+			name: "standby unreachable",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.StandbyReachable = false
+			},
+			wantStatus: standbyPromotionStatusStandbyUnreachable,
+		},
+		{
+			name: "standby is active replica",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.StandbyStatus.ReplicaID = db.CompletedUploadReplicaActive
+			},
+			wantStatus: standbyPromotionStatusStandbyNotReplica,
+		},
+		{
+			name: "standby replica id empty",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.StandbyStatus.ReplicaID = ""
+			},
+			wantStatus: standbyPromotionStatusStandbyNotReplica,
+		},
+		{
+			name: "standby queue not drained",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.StandbyStatus.IngestionQueueDepth = 1
+			},
+			wantStatus: standbyPromotionStatusStandbyQueueNotDrained,
+		},
+		{
+			name: "standby inflight not drained",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.StandbyStatus.IngestionInflightCount = 1
+			},
+			wantStatus: standbyPromotionStatusStandbyQueueNotDrained,
+		},
+		{
+			name: "standby ingestion errors",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.StandbyStatus.IngestionProcessErrors = 1
+			},
+			wantStatus: standbyPromotionStatusStandbyErrors,
+		},
+		{
+			name: "standby ledger errors",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.StandbyStatus.CompletedUploadLedgerCompleteErrors = 1
+			},
+			wantStatus: standbyPromotionStatusStandbyErrors,
+		},
+		{
+			name: "standby behind",
+			update: func(entry *db.CoordinatorShardStatus) {
+				entry.StandbyStatus.CompletedUploadCommittedCount = 2
+			},
+			wantStatus: standbyPromotionStatusStandbyBehind,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			entry := promotable
+			if test.update != nil {
+				test.update(&entry)
+			}
+			populateStandbyPromotionReadiness(&entry)
+			if entry.StandbyPromotionStatus != test.wantStatus || entry.StandbyPromotable != test.wantPromotable {
+				t.Fatalf("unexpected readiness: got status=%q promotable=%t reason=%q", entry.StandbyPromotionStatus, entry.StandbyPromotable, entry.StandbyPromotionReason)
+			}
+			if entry.ActiveCompletedUploadCommittedCount != entry.ActiveStatus.CompletedUploadCommittedCount {
+				t.Fatalf("active committed count was not copied: %+v", entry)
+			}
+			if entry.StandbyCompletedUploadCommittedCount != entry.StandbyStatus.CompletedUploadCommittedCount {
+				t.Fatalf("standby committed count was not copied: %+v", entry)
+			}
+			if entry.StandbyIngestionQueueDepth != entry.StandbyStatus.IngestionQueueDepth {
+				t.Fatalf("standby queue depth was not copied: %+v", entry)
+			}
+			if entry.StandbyIngestionInflightCount != entry.StandbyStatus.IngestionInflightCount {
+				t.Fatalf("standby inflight count was not copied: %+v", entry)
+			}
+		})
 	}
 }
 

@@ -1026,6 +1026,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 		entry.StandbyStatus = shardHealth.Standby.Status
 		entry.StandbyStatusError = shardHealth.Standby.Error
 		entry.StandbyLastChecked = lastCheckedUnix(shardHealth.Standby.CheckedAt)
+		populateStandbyPromotionReadiness(&entry)
 		entry.Reachable = entry.ActiveReachable
 		entry.Status = entry.ActiveStatus
 		entry.StatusError = entry.ActiveStatusError

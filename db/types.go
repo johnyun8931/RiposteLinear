@@ -263,25 +263,32 @@ type CoordinatorStatusArgs struct {
 }
 
 type CoordinatorShardStatus struct {
-	ID                  int         `json:"id"`
-	StartRow            int         `json:"start_row"`
-	EndRow              int         `json:"end_row"`
-	ActiveLeaderAddr    string      `json:"active_leader_addr"`
-	ActiveFollowerAddr  string      `json:"active_follower_addr"`
-	HasStandby          bool        `json:"has_standby"`
-	StandbyLeaderAddr   string      `json:"standby_leader_addr"`
-	StandbyFollowerAddr string      `json:"standby_follower_addr"`
-	Reachable           bool        `json:"reachable"`
-	Status              StatusReply `json:"status"`
-	StatusError         string      `json:"status_error"`
-	ActiveReachable     bool        `json:"active_reachable"`
-	ActiveStatus        StatusReply `json:"active_status"`
-	ActiveStatusError   string      `json:"active_status_error"`
-	ActiveLastChecked   int64       `json:"active_last_checked_unix"`
-	StandbyReachable    bool        `json:"standby_reachable"`
-	StandbyStatus       StatusReply `json:"standby_status"`
-	StandbyStatusError  string      `json:"standby_status_error"`
-	StandbyLastChecked  int64       `json:"standby_last_checked_unix"`
+	ID                                   int         `json:"id"`
+	StartRow                             int         `json:"start_row"`
+	EndRow                               int         `json:"end_row"`
+	ActiveLeaderAddr                     string      `json:"active_leader_addr"`
+	ActiveFollowerAddr                   string      `json:"active_follower_addr"`
+	HasStandby                           bool        `json:"has_standby"`
+	StandbyLeaderAddr                    string      `json:"standby_leader_addr"`
+	StandbyFollowerAddr                  string      `json:"standby_follower_addr"`
+	Reachable                            bool        `json:"reachable"`
+	Status                               StatusReply `json:"status"`
+	StatusError                          string      `json:"status_error"`
+	ActiveReachable                      bool        `json:"active_reachable"`
+	ActiveStatus                         StatusReply `json:"active_status"`
+	ActiveStatusError                    string      `json:"active_status_error"`
+	ActiveLastChecked                    int64       `json:"active_last_checked_unix"`
+	StandbyReachable                     bool        `json:"standby_reachable"`
+	StandbyStatus                        StatusReply `json:"standby_status"`
+	StandbyStatusError                   string      `json:"standby_status_error"`
+	StandbyLastChecked                   int64       `json:"standby_last_checked_unix"`
+	StandbyPromotable                    bool        `json:"standby_promotable"`
+	StandbyPromotionStatus               string      `json:"standby_promotion_status"`
+	StandbyPromotionReason               string      `json:"standby_promotion_reason"`
+	ActiveCompletedUploadCommittedCount  int64       `json:"active_completed_upload_committed_count"`
+	StandbyCompletedUploadCommittedCount int64       `json:"standby_completed_upload_committed_count"`
+	StandbyIngestionQueueDepth           int         `json:"standby_ingestion_queue_depth"`
+	StandbyIngestionInflightCount        int         `json:"standby_ingestion_inflight_count"`
 }
 
 type CoordinatorStatusReply struct {

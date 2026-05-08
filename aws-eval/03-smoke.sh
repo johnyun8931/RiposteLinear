@@ -254,6 +254,77 @@ if status.get('completed_upload_ledger_backend') == 'dynamodb':
 PY"
 }
 
+wait_for_remote_standby_promotion_readiness() {
+  local host="$1"
+  local addr="$2"
+  local timeout="${3:-60}"
+  if ! hot_standby_ingestion_enabled; then
+    return 0
+  fi
+  remote_cmd "$host" "python3 - '$addr' '$timeout' <<'PY'
+import json
+import os
+import subprocess
+import sys
+import time
+
+addr, timeout = sys.argv[1], int(sys.argv[2])
+deadline = time.time() + timeout
+last = None
+while time.time() < deadline:
+    proc = subprocess.run([os.path.expanduser('~/coordinator'), '-admin-target', addr, '-status'], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode == 0:
+        try:
+            status = json.loads(proc.stdout)
+        except json.JSONDecodeError as err:
+            last = f'invalid JSON: {err}: {proc.stdout}'
+        else:
+            blocked = []
+            for shard in status.get('shards', []):
+                if not shard.get('has_standby'):
+                    continue
+                if not shard.get('standby_promotable'):
+                    blocked.append({
+                        'id': shard.get('id'),
+                        'status': shard.get('standby_promotion_status'),
+                        'reason': shard.get('standby_promotion_reason'),
+                    })
+            if not blocked:
+                raise SystemExit(0)
+            last = json.dumps(blocked)
+    else:
+        last = proc.stderr.strip() or proc.stdout.strip()
+    time.sleep(2)
+raise SystemExit(f'standby promotion readiness did not become promotable: {last}')
+PY"
+}
+
+assert_remote_standby_promotion_readiness() {
+  local host="$1"
+  local path="$2"
+  if ! hot_standby_ingestion_enabled; then
+    return 0
+  fi
+  remote_cmd "$host" "python3 - '$path' <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    status = json.load(open(path))
+except (OSError, json.JSONDecodeError) as err:
+    raise SystemExit(f\"{path}: invalid JSON: {err}\")
+
+for shard in status.get('shards', []):
+    if not shard.get('has_standby'):
+        continue
+    if not shard.get('standby_promotable'):
+        raise SystemExit(f\"{path}: shard {shard.get('id')} not promotable: status={shard.get('standby_promotion_status')} reason={shard.get('standby_promotion_reason')}\")
+    if shard.get('standby_promotion_status') != 'promotable':
+        raise SystemExit(f\"{path}: shard {shard.get('id')} unexpected promotion status {shard.get('standby_promotion_status')}\")
+PY"
+}
+
 cleanup() {
   kill_all_remote_processes
 }
@@ -319,9 +390,11 @@ wait_for_epoch_complete coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr
 wait_for_epoch_complete server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" 120
 wait_for_epoch_complete server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" 120
 wait_for_sqs_ingestion_drain 120
+wait_for_remote_standby_promotion_readiness "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" 60
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
+assert_remote_standby_promotion_readiness "$COORDINATOR_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
 assert_remote_ingestion_status "$SHARD0_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json" active "$(hot_standby_ingestion_enabled && printf true || printf false)"
 assert_remote_ingestion_status "$SHARD1_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json" active "$(hot_standby_ingestion_enabled && printf true || printf false)"
 if hot_standby_ingestion_enabled; then

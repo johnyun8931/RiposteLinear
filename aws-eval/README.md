@@ -339,7 +339,10 @@ committed completed-upload ledger records.
 If `HOT_STANDBY_INGESTION=1`, smoke also starts standby shard processes on the
 standby ports, waits for the standby queues to drain, captures standby queue
 attributes, and verifies DynamoDB ledger records exist for both `active` and
-`standby` replicas.
+`standby` replicas. Completed coordinator status also reports per-shard
+`standby_promotable`, `standby_promotion_status`, and promotion-readiness
+counter fields; smoke asserts configured hot standbys become `promotable` after
+the deterministic writes drain.
 
 To validate coordinator lease/fencing behavior with two coordinator attempts:
 
