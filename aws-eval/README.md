@@ -189,7 +189,8 @@ table height, and active shard addresses. Each started epoch also gets an
 immutable `shard-config#epoch#<epoch_id>` topology snapshot, and the `epoch`
 record points at it with `shard_config_key`. Completed epochs may also write
 `scaling#epoch#<epoch_id>` and `scaling#latest` proposal records; operators can
-apply an applicable latest recommendation with
+dry-run or apply an applicable latest recommendation with
+`coordinator -admin-target <addr> -dry-run-scaling-recommendation` or
 `coordinator -admin-target <addr> -apply-scaling-recommendation` between epochs.
 Extra `-shard` flags are spare endpoint inventory, not active topology, until a
 new `shard-config` version includes them. When the session store uses the same
@@ -301,9 +302,10 @@ CONTROL_STORE_BACKEND=dynamodb SESSION_STORE_BACKEND=dynamodb \
 ```
 
 This seeds `pk="shard-config"` with one active shard while keeping both shard
-endpoints configured, generates a real `grow` recommendation, applies it with
+endpoints configured, generates a real `grow` recommendation, validates it with
+`-dry-run-scaling-recommendation`, applies it with
 `-apply-scaling-recommendation`, and verifies the next epoch routes global row
-`256` to shard 1. Artifacts are written under
+`256` to shard 1. Dry-run, apply, status, and DynamoDB artifacts are written under
 `aws-eval/.state/scaling-apply/`.
 
 ### 5. Benchmark

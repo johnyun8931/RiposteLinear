@@ -1037,6 +1037,9 @@ func TestCoordinatorApplyScalingRecommendationWritesNextShardConfig(t *testing.T
 	if !reply.Applied || reply.RecommendationEpochID != 1 || reply.PreviousVersion != 1 || reply.NewVersion != 2 || reply.PreviousShardCount != 1 || reply.NewShardCount != 2 {
 		t.Fatalf("unexpected apply reply: %+v", reply)
 	}
+	if reply.PreviousGlobalTableHeight != db.TABLE_HEIGHT || reply.NewGlobalTableHeight != 2*db.TABLE_HEIGHT {
+		t.Fatalf("unexpected apply global heights: %+v", reply)
+	}
 	config, ok, err := store.GetShardConfig()
 	if err != nil || !ok {
 		t.Fatalf("GetShardConfig failed after apply, ok=%t err=%v", ok, err)
@@ -1047,6 +1050,45 @@ func TestCoordinatorApplyScalingRecommendationWritesNextShardConfig(t *testing.T
 	epochSnapshot, ok, err := store.GetEpochShardConfig(1)
 	if err != nil || !ok || !shardConfigRecordsEqual(epochSnapshot, snapshot) {
 		t.Fatalf("expected epoch snapshot unchanged, ok=%t err=%v got=%+v want=%+v", ok, err, epochSnapshot, snapshot)
+	}
+}
+
+func TestCoordinatorDryRunScalingRecommendationDoesNotWriteNextShardConfig(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}
+	initialConfig := shardConfigRecordFromShards(active, 1)
+	if err := store.PutShardConfig(initialConfig); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
+		t.Fatalf("PutScalingRecommendation failed: %v", err)
+	}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{
+		0: &fakeShardClient{},
+		1: &fakeShardClient{},
+	}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	var reply db.ApplyScalingRecommendationReply
+	if err := coord.ApplyScalingRecommendation(&db.ApplyScalingRecommendationArgs{DryRun: true}, &reply); err != nil {
+		t.Fatalf("dry-run ApplyScalingRecommendation failed: %v", err)
+	}
+	if reply.Applied || reply.RecommendationEpochID != 1 || reply.PreviousVersion != 1 || reply.NewVersion != 2 || reply.PreviousShardCount != 1 || reply.NewShardCount != 2 {
+		t.Fatalf("unexpected dry-run reply: %+v", reply)
+	}
+	if reply.PreviousGlobalTableHeight != db.TABLE_HEIGHT || reply.NewGlobalTableHeight != 2*db.TABLE_HEIGHT {
+		t.Fatalf("unexpected dry-run global heights: %+v", reply)
+	}
+	config, ok, err := store.GetShardConfig()
+	if err != nil || !ok {
+		t.Fatalf("GetShardConfig failed after dry-run, ok=%t err=%v", ok, err)
+	}
+	if !shardConfigRecordsEqual(config, initialConfig) {
+		t.Fatalf("dry-run mutated shard config: got %+v want %+v", config, initialConfig)
 	}
 }
 
@@ -1074,6 +1116,13 @@ func TestCoordinatorApplyScalingRecommendationRejectsWithoutLease(t *testing.T) 
 	err := passive.ApplyScalingRecommendation(&db.ApplyScalingRecommendationArgs{}, &db.ApplyScalingRecommendationReply{})
 	if err == nil || err.Error() != coordinatorWireNotActive {
 		t.Fatalf("expected coordinator not active, got %v", err)
+	}
+}
+
+func TestValidateAdminFlagsRejectsApplyAndDryRunTogether(t *testing.T) {
+	err := validateAdminFlags(0, false, false, true, true, "127.0.0.1:7000")
+	if err == nil || !strings.Contains(err.Error(), "-apply-scaling-recommendation") {
+		t.Fatalf("expected mutually exclusive apply flags error, got %v", err)
 	}
 }
 

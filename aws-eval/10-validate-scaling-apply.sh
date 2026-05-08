@@ -168,6 +168,7 @@ fi
 
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$APPLY_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 1 -y 0 -payload epoch1-row0 -threads '$CLIENT_THREADS' -log '$APPLY_LOGS_REMOTE/client-epoch1-row0.log'"
 wait_for_epoch_complete coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" 120
+wait_for_epoch_complete server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" 120
 capture_status before-apply
 assert_json_field "$APPLY_LOCAL_DIR/status-before-apply.json" current_shard_count 1
 assert_json_field "$APPLY_LOCAL_DIR/status-before-apply.json" latest_scaling_action grow
@@ -176,11 +177,26 @@ assert_json_field "$APPLY_LOCAL_DIR/status-before-apply.json" scaling_apply_stat
 capture_dynamodb_snapshot before-apply
 assert_shard_config_count "$APPLY_LOCAL_DIR/dynamodb-before-apply/epoch-shard-config.json" 1 1 256
 
+info "dry-running latest scaling recommendation"
+remote_cmd "$COORDINATOR_PUBLIC_IP" "~/coordinator -admin-target '$(coordinator_addr)' -dry-run-scaling-recommendation > '$APPLY_LOGS_REMOTE/dry-run-output.log' 2>&1"
+copy_from_remote "$COORDINATOR_PUBLIC_IP" "$APPLY_LOGS_REMOTE/dry-run-output.log" "$APPLY_LOCAL_DIR/dry-run-output.log"
+grep -q "applied=false" "$APPLY_LOCAL_DIR/dry-run-output.log" || die "dry-run output did not report applied=false"
+grep -q "dry_run=true" "$APPLY_LOCAL_DIR/dry-run-output.log" || die "dry-run output did not report dry_run=true"
+grep -q "version=1->2" "$APPLY_LOCAL_DIR/dry-run-output.log" || die "dry-run output did not report version 1->2"
+grep -q "shards=1->2" "$APPLY_LOCAL_DIR/dry-run-output.log" || die "dry-run output did not report shards 1->2"
+grep -q "global_table_height=256->512" "$APPLY_LOCAL_DIR/dry-run-output.log" || die "dry-run output did not report global table height 256->512"
+capture_status after-dry-run
+assert_json_field "$APPLY_LOCAL_DIR/status-after-dry-run.json" current_shard_count 1
+assert_json_field "$APPLY_LOCAL_DIR/status-after-dry-run.json" global_table_height 256
+capture_dynamodb_snapshot after-dry-run
+assert_shard_config_count "$APPLY_LOCAL_DIR/dynamodb-after-dry-run/shard-config.json" 1 1 256
+
 info "applying latest scaling recommendation"
 remote_cmd "$COORDINATOR_PUBLIC_IP" "~/coordinator -admin-target '$(coordinator_addr)' -apply-scaling-recommendation > '$APPLY_LOGS_REMOTE/apply-output.log' 2>&1"
 copy_from_remote "$COORDINATOR_PUBLIC_IP" "$APPLY_LOGS_REMOTE/apply-output.log" "$APPLY_LOCAL_DIR/apply-output.log"
 grep -q "version=1->2" "$APPLY_LOCAL_DIR/apply-output.log" || die "apply output did not report version 1->2"
 grep -q "shards=1->2" "$APPLY_LOCAL_DIR/apply-output.log" || die "apply output did not report shards 1->2"
+grep -q "global_table_height=256->512" "$APPLY_LOCAL_DIR/apply-output.log" || die "apply output did not report global table height 256->512"
 capture_status after-apply
 assert_json_field "$APPLY_LOCAL_DIR/status-after-apply.json" current_shard_count 2
 assert_json_field "$APPLY_LOCAL_DIR/status-after-apply.json" global_table_height 512
@@ -198,6 +214,8 @@ assert_json_field "$APPLY_LOCAL_DIR/status-epoch2-active.json" current_shard_cou
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$APPLY_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 7 -y 0 -payload epoch2-row0 -threads '$CLIENT_THREADS' -log '$APPLY_LOGS_REMOTE/client-epoch2-row0.log'"
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$APPLY_LOGS_REMOTE'; ~/client -coordinator '$(coordinator_addr)' -x 8 -y 256 -payload epoch2-row256 -threads '$CLIENT_THREADS' -log '$APPLY_LOGS_REMOTE/client-epoch2-row256.log'"
 wait_for_epoch_complete coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" 120
+wait_for_epoch_complete server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" 120
+wait_for_epoch_complete server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" 120
 capture_status epoch2-completed
 capture_dynamodb_snapshot epoch2-completed
 assert_shard_config_count "$APPLY_LOCAL_DIR/dynamodb-epoch2-completed/epoch-shard-config.json" 2 2 512

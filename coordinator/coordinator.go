@@ -837,7 +837,20 @@ func populateScalingApplyStatus(reply *db.CoordinatorStatusReply, evaluation sca
 	reply.ScalingApplyReason = evaluation.reason
 }
 
-func (c *Coordinator) ApplyScalingRecommendation(_ *db.ApplyScalingRecommendationArgs, reply *db.ApplyScalingRecommendationReply) error {
+func populateApplyScalingRecommendationReply(reply *db.ApplyScalingRecommendationReply, evaluation scalingApplyEvaluation, applied bool) {
+	reply.Applied = applied
+	reply.RecommendationEpochID = evaluation.recommendation.EpochID
+	reply.PreviousVersion = evaluation.current.Version
+	reply.NewVersion = evaluation.proposed.Version
+	reply.PreviousShardCount = evaluation.current.ShardCount
+	reply.NewShardCount = evaluation.proposed.ShardCount
+	reply.PreviousGlobalTableHeight = evaluation.current.GlobalTableHeight
+	reply.NewGlobalTableHeight = evaluation.proposed.GlobalTableHeight
+	reply.Status = evaluation.status
+	reply.Reason = evaluation.reason
+}
+
+func (c *Coordinator) ApplyScalingRecommendation(args *db.ApplyScalingRecommendationArgs, reply *db.ApplyScalingRecommendationReply) error {
 	if err := c.requireCoordinatorLease(); err != nil {
 		return coordinatorWireError(errCoordinatorNotActive)
 	}
@@ -848,17 +861,14 @@ func (c *Coordinator) ApplyScalingRecommendation(_ *db.ApplyScalingRecommendatio
 	if err := requireScalingApplyApplicable(evaluation); err != nil {
 		return err
 	}
+	if args != nil && args.DryRun {
+		populateApplyScalingRecommendationReply(reply, evaluation, false)
+		return nil
+	}
 	if err := c.controlStore.PutShardConfig(evaluation.proposed); err != nil {
 		return err
 	}
-	reply.Applied = true
-	reply.RecommendationEpochID = evaluation.recommendation.EpochID
-	reply.PreviousVersion = evaluation.current.Version
-	reply.NewVersion = evaluation.proposed.Version
-	reply.PreviousShardCount = evaluation.current.ShardCount
-	reply.NewShardCount = evaluation.proposed.ShardCount
-	reply.Status = evaluation.status
-	reply.Reason = evaluation.reason
+	populateApplyScalingRecommendationReply(reply, evaluation, true)
 	return nil
 }
 

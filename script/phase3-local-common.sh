@@ -290,6 +290,13 @@ apply_scaling_recommendation() {
 	printf '%s\n' "$out" | tail -n1
 }
 
+dry_run_scaling_recommendation() {
+	local addr="$1"
+	local out
+	out="$("$COORDINATOR_BIN" -admin-target "$addr" -dry-run-scaling-recommendation 2>&1)"
+	printf '%s\n' "$out" | tail -n1
+}
+
 run_client() {
 	"$CLIENT_BIN" "$@"
 }

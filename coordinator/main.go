@@ -27,6 +27,7 @@ var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admi
 var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query coordinator epoch status over admin RPC and exit")
 var flagStatus = flag.Bool("status", false, "If set, query coordinator status over admin RPC and exit")
 var flagApplyScalingRecommendation = flag.Bool("apply-scaling-recommendation", false, "If set, apply the latest scaling recommendation to the next shard config and exit")
+var flagDryRunScalingRecommendation = flag.Bool("dry-run-scaling-recommendation", false, "If set, validate the latest scaling recommendation without updating the next shard config and exit")
 var flagControlStore = flag.String("control-store", "memory", "Control store backend: memory or dynamodb")
 var flagControlTable = flag.String("control-table", "", "DynamoDB table name for -control-store dynamodb")
 var flagSessionStore = flag.String("session-store", "memory", "Session store backend: memory or dynamodb")
@@ -53,9 +54,9 @@ func init() {
 func main() {
 	flag.Parse()
 
-	if *flagStartEpoch > 0 || *flagEpochStatus || *flagStatus || *flagApplyScalingRecommendation {
-		if *flagAdminTarget == "" {
-			log.Fatal("Must specify -admin-target for admin RPC commands")
+	if adminCommandRequested(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation) {
+		if err := validateAdminFlags(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation, *flagAdminTarget); err != nil {
+			log.Fatal(err)
 		}
 		runAdminCommand()
 		return
@@ -206,6 +207,23 @@ func buildSessionStore() (SessionStore, string, error) {
 	}
 }
 
+func adminCommandRequested(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool) bool {
+	return startEpochSeconds > 0 || epochStatus || status || applyScaling || dryRunScaling
+}
+
+func validateAdminFlags(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool, adminTarget string) error {
+	if !adminCommandRequested(startEpochSeconds, epochStatus, status, applyScaling, dryRunScaling) {
+		return nil
+	}
+	if adminTarget == "" {
+		return errors.New("Must specify -admin-target for admin RPC commands")
+	}
+	if applyScaling && dryRunScaling {
+		return errors.New("must specify only one of -apply-scaling-recommendation or -dry-run-scaling-recommendation")
+	}
+	return nil
+}
+
 func runAdminCommand() {
 	certs := make([]tls.Certificate, 1)
 	certs[0] = utils.LeaderCertificate
@@ -249,19 +267,25 @@ func runAdminCommand() {
 		return
 	}
 
-	if *flagApplyScalingRecommendation {
+	if *flagApplyScalingRecommendation || *flagDryRunScalingRecommendation {
 		var reply db.ApplyScalingRecommendationReply
-		err = client.Call("Server.ApplyScalingRecommendation", &db.ApplyScalingRecommendationArgs{}, &reply)
+		err = client.Call("Server.ApplyScalingRecommendation", &db.ApplyScalingRecommendationArgs{DryRun: *flagDryRunScalingRecommendation}, &reply)
 		if err != nil {
+			if *flagDryRunScalingRecommendation {
+				log.Fatal("Could not dry-run scaling recommendation: ", err)
+			}
 			log.Fatal("Could not apply scaling recommendation: ", err)
 		}
-		log.Printf("applied=%t recommendation_epoch=%d version=%d->%d shards=%d->%d status=%s reason=%s",
+		log.Printf("applied=%t dry_run=%t recommendation_epoch=%d version=%d->%d shards=%d->%d global_table_height=%d->%d status=%s reason=%s",
 			reply.Applied,
+			*flagDryRunScalingRecommendation,
 			reply.RecommendationEpochID,
 			reply.PreviousVersion,
 			reply.NewVersion,
 			reply.PreviousShardCount,
 			reply.NewShardCount,
+			reply.PreviousGlobalTableHeight,
+			reply.NewGlobalTableHeight,
 			reply.Status,
 			reply.Reason,
 		)

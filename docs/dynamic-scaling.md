@@ -56,15 +56,18 @@ The manual apply path promotes a valid `scaling#latest` proposal into
 `pk="shard-config"` only when no epoch is active or accepting:
 
 ```bash
+coordinator -admin-target <addr> -dry-run-scaling-recommendation
 coordinator -admin-target <addr> -apply-scaling-recommendation
 ```
 
-Applying a recommendation only changes the next authoritative shard topology.
-It does not modify historical `shard-config#epoch#<epoch_id>` snapshots and it
-does not create new machines. Extra `-shard` flags are treated as spare endpoint
-inventory; they are inactive until a manually applied shard config includes
-them. Upload routing and epoch start use the active `pk="shard-config"` record,
-not every endpoint listed on the command line.
+Dry-run performs the same applicability checks and proposal build without
+writing `pk="shard-config"`. Applying a recommendation only changes the next
+authoritative shard topology. It does not modify historical
+`shard-config#epoch#<epoch_id>` snapshots and it does not create new machines.
+Extra `-shard` flags are treated as spare endpoint inventory; they are inactive
+until a manually applied shard config includes them. Upload routing and epoch
+start use the active `pk="shard-config"` record, not every endpoint listed on
+the command line.
 
 Local validation is available with:
 

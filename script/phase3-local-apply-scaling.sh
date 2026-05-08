@@ -81,6 +81,7 @@ echo "PASS: row 256 is rejected before scaling apply"
 
 run_client -coordinator "$COORDINATOR_ADDR" -x 1 -y 0 -payload epoch1-row0 -log "$EPOCH1_ROW0_LOG"
 wait_for_status_state coordinator "$COORDINATOR_ADDR" completed 20 >/dev/null || die "epoch 1 did not complete"
+wait_for_status_state server "$SHARD0_LEADER_ADDR" completed 20 >/dev/null || die "shard 0 did not complete epoch 1"
 status_json coordinator "$COORDINATOR_ADDR" >"$APPLY_DIR/status-before-apply.json"
 assert_status_field "$APPLY_DIR/status-before-apply.json" current_shard_count 1
 assert_status_field "$APPLY_DIR/status-before-apply.json" latest_scaling_action grow
@@ -88,11 +89,25 @@ assert_status_field "$APPLY_DIR/status-before-apply.json" latest_scaling_recomme
 assert_status_field "$APPLY_DIR/status-before-apply.json" scaling_apply_status applicable
 echo "PASS: epoch 1 persisted an applicable grow recommendation"
 
+info "Dry-running latest scaling recommendation"
+dry_run_line="$(dry_run_scaling_recommendation "$COORDINATOR_ADDR")"
+printf '%s\n' "$dry_run_line" >"$APPLY_DIR/dry-run-output.log"
+grep -q "applied=false" "$APPLY_DIR/dry-run-output.log" || die "dry-run output did not report applied=false: $dry_run_line"
+grep -q "dry_run=true" "$APPLY_DIR/dry-run-output.log" || die "dry-run output did not report dry_run=true: $dry_run_line"
+grep -q "version=1->2" "$APPLY_DIR/dry-run-output.log" || die "dry-run output did not report version 1->2: $dry_run_line"
+grep -q "shards=1->2" "$APPLY_DIR/dry-run-output.log" || die "dry-run output did not report shards 1->2: $dry_run_line"
+grep -q "global_table_height=256->512" "$APPLY_DIR/dry-run-output.log" || die "dry-run output did not report global table height 256->512: $dry_run_line"
+status_json coordinator "$COORDINATOR_ADDR" >"$APPLY_DIR/status-after-dry-run.json"
+assert_status_field "$APPLY_DIR/status-after-dry-run.json" current_shard_count 1
+assert_status_field "$APPLY_DIR/status-after-dry-run.json" global_table_height 256
+echo "PASS: dry-run validates the proposal without changing the active shard config"
+
 info "Applying latest scaling recommendation"
 apply_line="$(apply_scaling_recommendation "$COORDINATOR_ADDR")"
 printf '%s\n' "$apply_line" >"$APPLY_DIR/apply-output.log"
 grep -q "version=1->2" "$APPLY_DIR/apply-output.log" || die "apply output did not report version 1->2: $apply_line"
 grep -q "shards=1->2" "$APPLY_DIR/apply-output.log" || die "apply output did not report shards 1->2: $apply_line"
+grep -q "global_table_height=256->512" "$APPLY_DIR/apply-output.log" || die "apply output did not report global table height 256->512: $apply_line"
 status_json coordinator "$COORDINATOR_ADDR" >"$APPLY_DIR/status-after-apply.json"
 assert_status_field "$APPLY_DIR/status-after-apply.json" current_shard_count 2
 assert_status_field "$APPLY_DIR/status-after-apply.json" global_table_height 512
@@ -112,6 +127,8 @@ assert_status_field "$APPLY_DIR/status-epoch2-active.json" current_shard_count 2
 run_client -coordinator "$COORDINATOR_ADDR" -x 7 -y 0 -payload epoch2-row0 -log "$EPOCH2_ROW0_LOG"
 run_client -coordinator "$COORDINATOR_ADDR" -x 8 -y 256 -payload epoch2-row256 -log "$EPOCH2_ROW256_LOG"
 wait_for_status_state coordinator "$COORDINATOR_ADDR" completed 20 >/dev/null || die "epoch 2 did not complete"
+wait_for_status_state server "$SHARD0_LEADER_ADDR" completed 20 >/dev/null || die "shard 0 did not complete epoch 2"
+wait_for_status_state server "$SHARD1_LEADER_ADDR" completed 20 >/dev/null || die "shard 1 did not complete epoch 2"
 status_json coordinator "$COORDINATOR_ADDR" >"$APPLY_DIR/status-epoch2-completed.json"
 
 result_s0="$(latest_result_file "$RESULTS_S0_DIR" "$epoch2" 0)"

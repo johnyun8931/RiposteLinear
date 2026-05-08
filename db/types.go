@@ -299,17 +299,21 @@ type CoordinatorStatusReply struct {
 	Shards                         []CoordinatorShardStatus `json:"shards"`
 }
 
-type ApplyScalingRecommendationArgs struct{}
+type ApplyScalingRecommendationArgs struct {
+	DryRun bool `json:"dry_run"`
+}
 
 type ApplyScalingRecommendationReply struct {
-	Applied               bool   `json:"applied"`
-	RecommendationEpochID int64  `json:"recommendation_epoch_id"`
-	PreviousVersion       int64  `json:"previous_version"`
-	NewVersion            int64  `json:"new_version"`
-	PreviousShardCount    int    `json:"previous_shard_count"`
-	NewShardCount         int    `json:"new_shard_count"`
-	Status                string `json:"status"`
-	Reason                string `json:"reason"`
+	Applied                   bool   `json:"applied"`
+	RecommendationEpochID     int64  `json:"recommendation_epoch_id"`
+	PreviousVersion           int64  `json:"previous_version"`
+	NewVersion                int64  `json:"new_version"`
+	PreviousShardCount        int    `json:"previous_shard_count"`
+	NewShardCount             int    `json:"new_shard_count"`
+	PreviousGlobalTableHeight int    `json:"previous_global_table_height"`
+	NewGlobalTableHeight      int    `json:"new_global_table_height"`
+	Status                    string `json:"status"`
+	Reason                    string `json:"reason"`
 }
 
 type AbortEpochArgs struct {
