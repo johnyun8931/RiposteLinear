@@ -58,6 +58,11 @@ SHARD0_LEADER_ADDR="$(shard0_leader_addr)" \
 SHARD0_FOLLOWER_ADDR="$(shard0_follower_addr)" \
 SHARD1_LEADER_ADDR="$(shard1_leader_addr)" \
 SHARD1_FOLLOWER_ADDR="$(shard1_follower_addr)" \
+SHARD0_STANDBY_LEADER_ADDR="$(shard0_standby_leader_addr)" \
+SHARD0_STANDBY_FOLLOWER_ADDR="$(shard0_standby_follower_addr)" \
+SHARD1_STANDBY_LEADER_ADDR="$(shard1_standby_leader_addr)" \
+SHARD1_STANDBY_FOLLOWER_ADDR="$(shard1_standby_follower_addr)" \
+HOT_STANDBY_INGESTION="$HOT_STANDBY_INGESTION" \
 python3 - "$shard_values" <<'PY'
 import json
 import os
@@ -65,6 +70,7 @@ import sys
 
 rows = int(os.environ["ROWS_PER_SHARD"])
 active_count = int(os.environ["ACTIVE_SHARD_COUNT"])
+hot_standby = os.environ["HOT_STANDBY_INGESTION"] in ("1", "true")
 all_shards = [
     {
         "M": {
@@ -73,9 +79,9 @@ all_shards = [
             "end_row": {"N": str(rows)},
             "active_leader_addr": {"S": os.environ["SHARD0_LEADER_ADDR"]},
             "active_follower_addr": {"S": os.environ["SHARD0_FOLLOWER_ADDR"]},
-            "has_standby": {"BOOL": False},
-            "standby_leader_addr": {"S": ""},
-            "standby_follower_addr": {"S": ""},
+            "has_standby": {"BOOL": hot_standby},
+            "standby_leader_addr": {"S": os.environ["SHARD0_STANDBY_LEADER_ADDR"] if hot_standby else ""},
+            "standby_follower_addr": {"S": os.environ["SHARD0_STANDBY_FOLLOWER_ADDR"] if hot_standby else ""},
         }
     },
     {
@@ -85,9 +91,9 @@ all_shards = [
             "end_row": {"N": str(2 * rows)},
             "active_leader_addr": {"S": os.environ["SHARD1_LEADER_ADDR"]},
             "active_follower_addr": {"S": os.environ["SHARD1_FOLLOWER_ADDR"]},
-            "has_standby": {"BOOL": False},
-            "standby_leader_addr": {"S": ""},
-            "standby_follower_addr": {"S": ""},
+            "has_standby": {"BOOL": hot_standby},
+            "standby_leader_addr": {"S": os.environ["SHARD1_STANDBY_LEADER_ADDR"] if hot_standby else ""},
+            "standby_follower_addr": {"S": os.environ["SHARD1_STANDBY_FOLLOWER_ADDR"] if hot_standby else ""},
         }
     },
 ]

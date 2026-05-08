@@ -39,6 +39,7 @@ type sqsCompletedUploadQueue struct {
 	client                   SQSCompletedUploadClient
 	payloadStore             completedUploadPayloadStore
 	queueURL                 string
+	standbyQueueURL          string
 	waitTimeSeconds          int32
 	visibilityTimeoutSeconds int32
 }
@@ -46,6 +47,7 @@ type sqsCompletedUploadQueue struct {
 type SQSCompletedUploadQueueOptions struct {
 	WaitTimeSeconds          int32
 	VisibilityTimeoutSeconds int32
+	StandbyQueueURL          string
 }
 
 func NewSQSCompletedUploadQueue(sqsClient SQSCompletedUploadClient, s3Client S3CompletedUploadPayloadClient, queueURL string, payloadBucket string) (completedUploadQueue, error) {
@@ -86,6 +88,7 @@ func newSQSCompletedUploadQueueWithPayloadStore(sqsClient SQSCompletedUploadClie
 		client:                   sqsClient,
 		payloadStore:             payloadStore,
 		queueURL:                 queueURL,
+		standbyQueueURL:          options.StandbyQueueURL,
 		waitTimeSeconds:          options.WaitTimeSeconds,
 		visibilityTimeoutSeconds: options.VisibilityTimeoutSeconds,
 	}, nil
@@ -169,10 +172,12 @@ func (q *sqsCompletedUploadQueue) Enqueue(ctx context.Context, message Completed
 	if err != nil {
 		return "", err
 	}
-	out, err := q.client.SendMessage(ctx, &sqs.SendMessageInput{
-		QueueUrl:    aws.String(q.queueURL),
-		MessageBody: aws.String(body),
-	})
+	if q.standbyQueueURL != "" {
+		if _, err := q.sendPointer(ctx, q.standbyQueueURL, body); err != nil {
+			return "", err
+		}
+	}
+	out, err := q.sendPointer(ctx, q.queueURL, body)
 	if err != nil {
 		return "", err
 	}
@@ -180,6 +185,13 @@ func (q *sqsCompletedUploadQueue) Enqueue(ctx context.Context, message Completed
 		return "", nil
 	}
 	return *out.MessageId, nil
+}
+
+func (q *sqsCompletedUploadQueue) sendPointer(ctx context.Context, queueURL string, body string) (*sqs.SendMessageOutput, error) {
+	return q.client.SendMessage(ctx, &sqs.SendMessageInput{
+		QueueUrl:    aws.String(queueURL),
+		MessageBody: aws.String(body),
+	})
 }
 
 func (q *sqsCompletedUploadQueue) Receive(ctx context.Context, maxMessages int) ([]QueuedCompletedUploadMessage, error) {

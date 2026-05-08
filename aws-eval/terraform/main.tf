@@ -26,12 +26,18 @@ locals {
   nlb_name                   = substr("riposte-${local.nlb_suffix}", 0, 32)
   nlb_target_group_name      = substr("riposte-tg-${local.nlb_suffix}", 0, 32)
   ingestion_sqs_enabled      = var.ingestion_queue_backend == "sqs"
+  hot_standby_ingestion      = local.ingestion_sqs_enabled && contains(["1", "true"], lower(var.hot_standby_ingestion))
   server_aws_runtime_enabled = local.ingestion_sqs_enabled || local.completed_upload_ledger_dynamodb_enabled
   ingestion_bucket_name      = var.ingestion_s3_bucket != "" ? var.ingestion_s3_bucket : lower(substr("${var.project_tag}-${var.run_id}-ingestion", 0, 63))
-  ingestion_sqs_queue_arns = local.ingestion_sqs_enabled ? [
+  ingestion_sqs_queue_arns = local.ingestion_sqs_enabled ? concat([
     aws_sqs_queue.ingestion_shard0[0].arn,
     aws_sqs_queue.ingestion_shard1[0].arn,
-  ] : []
+    ],
+    local.hot_standby_ingestion ? [
+      aws_sqs_queue.ingestion_shard0_standby[0].arn,
+      aws_sqs_queue.ingestion_shard1_standby[0].arn,
+    ] : []
+  ) : []
   ingestion_s3_object_arns = local.ingestion_sqs_enabled ? ["${aws_s3_bucket.ingestion_payloads[0].arn}/*"] : []
   ingestion_s3_bucket_arns = local.ingestion_sqs_enabled ? [aws_s3_bucket.ingestion_payloads[0].arn] : []
   server_ingestion_policy_statements = concat(
@@ -247,6 +253,30 @@ resource "aws_sqs_queue" "ingestion_shard1" {
 
   tags = merge(local.common_tags, {
     Role = "ingestion-shard1"
+  })
+}
+
+resource "aws_sqs_queue" "ingestion_shard0_standby" {
+  count = local.hot_standby_ingestion ? 1 : 0
+
+  name                       = substr("${var.project_tag}-${local.nlb_suffix}-ingestion-shard0-standby", 0, 80)
+  visibility_timeout_seconds = 300
+  message_retention_seconds  = 1209600
+
+  tags = merge(local.common_tags, {
+    Role = "ingestion-shard0-standby"
+  })
+}
+
+resource "aws_sqs_queue" "ingestion_shard1_standby" {
+  count = local.hot_standby_ingestion ? 1 : 0
+
+  name                       = substr("${var.project_tag}-${local.nlb_suffix}-ingestion-shard1-standby", 0, 80)
+  visibility_timeout_seconds = 300
+  message_retention_seconds  = 1209600
+
+  tags = merge(local.common_tags, {
+    Role = "ingestion-shard1-standby"
   })
 }
 

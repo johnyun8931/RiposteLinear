@@ -59,16 +59,25 @@ type fakeSQSMessage struct {
 }
 
 type fakeSQSClient struct {
-	mu           sync.Mutex
-	nextID       int
-	messages     []fakeSQSMessage
-	deleted      []string
-	receiveInput *sqs.ReceiveMessageInput
+	mu            sync.Mutex
+	nextID        int
+	messages      []fakeSQSMessage
+	sendQueueURLs []string
+	sendErrByURL  map[string]error
+	deleted       []string
+	receiveInput  *sqs.ReceiveMessageInput
 }
 
 func (c *fakeSQSClient) SendMessage(_ context.Context, input *sqs.SendMessageInput, _ ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	queueURL := aws.ToString(input.QueueUrl)
+	c.sendQueueURLs = append(c.sendQueueURLs, queueURL)
+	if c.sendErrByURL != nil {
+		if err := c.sendErrByURL[queueURL]; err != nil {
+			return nil, err
+		}
+	}
 	c.nextID++
 	id := "msg-1"
 	receipt := "receipt-1"
@@ -249,6 +258,56 @@ func TestSQSCompletedUploadQueueEnqueueWritesPayloadBeforePointer(t *testing.T) 
 	}
 	if len(sqsClient.messages) != 1 {
 		t.Fatalf("expected one sqs message, got %d", len(sqsClient.messages))
+	}
+}
+
+func TestSQSCompletedUploadQueueFanoutWritesOnePayloadAndTwoPointers(t *testing.T) {
+	payloadStore := newFakePayloadStore()
+	sqsClient := &fakeSQSClient{}
+	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "active-queue", SQSCompletedUploadQueueOptions{
+		StandbyQueueURL: "standby-queue",
+	})
+	if err != nil {
+		t.Fatalf("queue create failed: %v", err)
+	}
+	id, err := queue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 7})
+	if err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	if id != "msg-next" {
+		t.Fatalf("unexpected message id %q", id)
+	}
+	if len(payloadStore.puts) != 1 {
+		t.Fatalf("expected one payload write, got %d", len(payloadStore.puts))
+	}
+	if got := sqsClient.sendQueueURLs; len(got) != 2 || got[0] != "standby-queue" || got[1] != "active-queue" {
+		t.Fatalf("unexpected queue fanout: %+v", got)
+	}
+	if len(sqsClient.messages) != 2 {
+		t.Fatalf("expected two sqs messages, got %d", len(sqsClient.messages))
+	}
+}
+
+func TestSQSCompletedUploadQueueFanoutReturnsStandbySendFailure(t *testing.T) {
+	payloadStore := newFakePayloadStore()
+	sqsClient := &fakeSQSClient{sendErrByURL: map[string]error{"standby-queue": errors.New("standby send failed")}}
+	queue, err := newSQSCompletedUploadQueueWithPayloadStore(sqsClient, payloadStore, "active-queue", SQSCompletedUploadQueueOptions{
+		StandbyQueueURL: "standby-queue",
+	})
+	if err != nil {
+		t.Fatalf("queue create failed: %v", err)
+	}
+	if _, err := queue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 7}); err == nil {
+		t.Fatal("expected standby send failure")
+	}
+	if len(payloadStore.puts) != 1 {
+		t.Fatalf("expected one payload write, got %d", len(payloadStore.puts))
+	}
+	if got := sqsClient.sendQueueURLs; len(got) != 1 || got[0] != "standby-queue" {
+		t.Fatalf("unexpected queue fanout: %+v", got)
+	}
+	if len(sqsClient.messages) != 0 {
+		t.Fatalf("standby send failure should not enqueue active pointer, got %d messages", len(sqsClient.messages))
 	}
 }
 

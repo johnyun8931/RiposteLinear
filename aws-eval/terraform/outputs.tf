@@ -58,12 +58,16 @@ output "state_env" {
     POST_EPOCH_FLUSH_SECONDS           = var.post_epoch_flush_seconds
     CLIENT_EXIT_GRACE_SECONDS          = var.client_exit_grace_seconds
 
-    COORDINATOR_PORT         = var.coordinator_port
-    COORDINATOR_STANDBY_PORT = var.coordinator_standby_port
-    SHARD0_LEADER_PORT       = var.shard0_leader_port
-    SHARD0_FOLLOWER_PORT     = var.shard0_follower_port
-    SHARD1_LEADER_PORT       = var.shard1_leader_port
-    SHARD1_FOLLOWER_PORT     = var.shard1_follower_port
+    COORDINATOR_PORT             = var.coordinator_port
+    COORDINATOR_STANDBY_PORT     = var.coordinator_standby_port
+    SHARD0_LEADER_PORT           = var.shard0_leader_port
+    SHARD0_FOLLOWER_PORT         = var.shard0_follower_port
+    SHARD1_LEADER_PORT           = var.shard1_leader_port
+    SHARD1_FOLLOWER_PORT         = var.shard1_follower_port
+    SHARD0_STANDBY_LEADER_PORT   = var.shard0_standby_leader_port
+    SHARD0_STANDBY_FOLLOWER_PORT = var.shard0_standby_follower_port
+    SHARD1_STANDBY_LEADER_PORT   = var.shard1_standby_leader_port
+    SHARD1_STANDBY_FOLLOWER_PORT = var.shard1_standby_follower_port
 
     REMOTE_ROOT       = var.remote_root
     REMOTE_BIN_DIR    = var.remote_bin_dir
@@ -94,6 +98,7 @@ output "state_env" {
     NLB_LISTENER_ARN               = local.public_entry_enabled ? aws_lb_listener.coordinator[0].arn : ""
 
     INGESTION_QUEUE_BACKEND                    = var.ingestion_queue_backend
+    HOT_STANDBY_INGESTION                      = var.hot_standby_ingestion
     INGESTION_S3_BUCKET                        = local.ingestion_sqs_enabled ? aws_s3_bucket.ingestion_payloads[0].bucket : ""
     INGESTION_RECEIVE_BATCH_SIZE               = var.ingestion_receive_batch_size
     INGESTION_SQS_WAIT_SECONDS                 = var.ingestion_sqs_wait_seconds
@@ -103,6 +108,10 @@ output "state_env" {
     INGESTION_SQS_SHARD0_QUEUE_ARN             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard0[0].arn : ""
     INGESTION_SQS_SHARD1_QUEUE_URL             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard1[0].url : ""
     INGESTION_SQS_SHARD1_QUEUE_ARN             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard1[0].arn : ""
+    INGESTION_SQS_SHARD0_STANDBY_QUEUE_URL     = local.hot_standby_ingestion ? aws_sqs_queue.ingestion_shard0_standby[0].url : ""
+    INGESTION_SQS_SHARD0_STANDBY_QUEUE_ARN     = local.hot_standby_ingestion ? aws_sqs_queue.ingestion_shard0_standby[0].arn : ""
+    INGESTION_SQS_SHARD1_STANDBY_QUEUE_URL     = local.hot_standby_ingestion ? aws_sqs_queue.ingestion_shard1_standby[0].url : ""
+    INGESTION_SQS_SHARD1_STANDBY_QUEUE_ARN     = local.hot_standby_ingestion ? aws_sqs_queue.ingestion_shard1_standby[0].arn : ""
     COMPLETED_UPLOAD_LEDGER_BACKEND            = var.completed_upload_ledger_backend
     COMPLETED_UPLOAD_LEDGER_TABLE              = local.completed_upload_ledger_table_name
     COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS    = var.completed_upload_processing_ttl_seconds

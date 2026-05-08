@@ -162,11 +162,12 @@ assert_ingestion_smoke_artifacts() {
   if ! sqs_ingestion_enabled; then
     return 0
   fi
-  python3 - "$dir/shard0-queue-attributes.json" "$dir/shard1-queue-attributes.json" "$dir/s3-payloads.json" "$dir/completed-upload-ledger.json" "$COMPLETED_UPLOAD_LEDGER_BACKEND" <<'PY'
+  python3 - "$dir" "$COMPLETED_UPLOAD_LEDGER_BACKEND" "$HOT_STANDBY_INGESTION" <<'PY'
 import json
+import os
 import sys
 
-shard0_path, shard1_path, payloads_path, ledger_path, ledger_backend = sys.argv[1:]
+base_dir, ledger_backend, hot_standby = sys.argv[1:]
 
 def load(path):
     try:
@@ -174,23 +175,41 @@ def load(path):
     except (OSError, json.JSONDecodeError) as err:
         raise SystemExit(f"{path}: invalid JSON: {err}")
 
-for path in (shard0_path, shard1_path):
+queue_files = [
+    "shard0-queue-attributes.json",
+    "shard1-queue-attributes.json",
+]
+if hot_standby in ("1", "true"):
+    queue_files.extend([
+        "shard0-standby-queue-attributes.json",
+        "shard1-standby-queue-attributes.json",
+    ])
+
+for name in queue_files:
+    path = os.path.join(base_dir, name)
     attrs = load(path).get("Attributes", {})
     visible = int(attrs.get("ApproximateNumberOfMessages", "0"))
     inflight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", "0"))
     if visible != 0 or inflight != 0:
         raise SystemExit(f"{path}: expected drained queue, got visible={visible} inflight={inflight}")
 
+payloads_path = os.path.join(base_dir, "s3-payloads.json")
 payloads = load(payloads_path).get("Contents", [])
 keys = [item.get("Key", "") for item in payloads]
 if len([key for key in keys if key.startswith("completed-uploads/")]) < 2:
     raise SystemExit(f"expected at least two completed-upload S3 payloads, got {keys}")
 
 if ledger_backend == "dynamodb":
+    ledger_path = os.path.join(base_dir, "completed-upload-ledger.json")
     items = load(ledger_path).get("Items", [])
     committed = [item for item in items if item.get("state", {}).get("S") == "committed"]
-    if len(committed) < 2:
-        raise SystemExit(f"expected at least two committed completed-upload ledger records, got {items}")
+    expected = 4 if hot_standby in ("1", "true") else 2
+    if len(committed) < expected:
+        raise SystemExit(f"expected at least {expected} committed completed-upload ledger records, got {items}")
+    if hot_standby in ("1", "true"):
+        replicas = {item.get("replica_id", {}).get("S") for item in committed}
+        if not {"active", "standby"}.issubset(replicas):
+            raise SystemExit(f"expected active and standby committed ledger records, got replicas={replicas} items={items}")
 PY
 }
 
@@ -200,16 +219,23 @@ assert_remote_ingestion_status() {
   if ! sqs_ingestion_enabled; then
     return 0
   fi
-  remote_cmd "$host" "python3 - '$path' <<'PY'
+  local expected_replica="${3:-active}"
+  local expected_fanout="${4:-false}"
+  remote_cmd "$host" "python3 - '$path' '$expected_replica' '$expected_fanout' <<'PY'
 import json
 import sys
 
-path = sys.argv[1]
+path, expected_replica, expected_fanout = sys.argv[1:]
 try:
     status = json.load(open(path))
 except (OSError, json.JSONDecodeError) as err:
     raise SystemExit(f\"{path}: invalid JSON: {err}\")
 
+if status.get('replica_id') != expected_replica:
+    raise SystemExit(f\"{path}: expected replica_id={expected_replica}, got {status.get('replica_id')}\")
+expected_fanout_bool = expected_fanout == 'true'
+if bool(status.get('standby_ingestion_fanout_configured')) != expected_fanout_bool:
+    raise SystemExit(f\"{path}: expected standby_ingestion_fanout_configured={expected_fanout_bool}, got {status.get('standby_ingestion_fanout_configured')}\")
 if status.get('ingestion_queue_backend') != 'sqs':
     raise SystemExit(f\"{path}: expected sqs ingestion backend, got {status.get('ingestion_queue_backend')}\")
 if int(status.get('ingestion_processed_count', 0)) < 1:
@@ -243,8 +269,20 @@ start_remote_server "$SHARD0_LEADER_PUBLIC_IP" 0 0 "$(server_pair_csv "$SHARD0_L
 start_remote_server "$SHARD1_FOLLOWER_PUBLIC_IP" 1 1 "$(server_pair_csv "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_LEADER_PORT" "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_FOLLOWER_PORT")" "$SMOKE_RESULTS_REMOTE/shard1" "$SMOKE_LOGS_REMOTE/shard1-follower.log"
 start_remote_server "$SHARD1_LEADER_PUBLIC_IP" 0 1 "$(server_pair_csv "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_LEADER_PORT" "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_FOLLOWER_PORT")" "$SMOKE_RESULTS_REMOTE/shard1" "$SMOKE_LOGS_REMOTE/shard1-leader.log"
 
+if hot_standby_ingestion_enabled; then
+  info "starting hot standby shard replicas for smoke test"
+  start_remote_server "$SHARD0_FOLLOWER_PUBLIC_IP" 1 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_STANDBY_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_STANDBY_FOLLOWER_PORT")" "$SMOKE_RESULTS_REMOTE/shard0-standby" "$SMOKE_LOGS_REMOTE/shard0-standby-follower.log" standby
+  start_remote_server "$SHARD0_LEADER_PUBLIC_IP" 0 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_STANDBY_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_STANDBY_FOLLOWER_PORT")" "$SMOKE_RESULTS_REMOTE/shard0-standby" "$SMOKE_LOGS_REMOTE/shard0-standby-leader.log" standby
+  start_remote_server "$SHARD1_FOLLOWER_PUBLIC_IP" 1 1 "$(server_pair_csv "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_STANDBY_LEADER_PORT" "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_STANDBY_FOLLOWER_PORT")" "$SMOKE_RESULTS_REMOTE/shard1-standby" "$SMOKE_LOGS_REMOTE/shard1-standby-follower.log" standby
+  start_remote_server "$SHARD1_LEADER_PUBLIC_IP" 0 1 "$(server_pair_csv "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_STANDBY_LEADER_PORT" "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_STANDBY_FOLLOWER_PORT")" "$SMOKE_RESULTS_REMOTE/shard1-standby" "$SMOKE_LOGS_REMOTE/shard1-standby-leader.log" standby
+fi
+
 remote_wait_for_port "$SHARD0_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD0_LEADER_PORT"
 remote_wait_for_port "$SHARD1_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD1_LEADER_PORT"
+if hot_standby_ingestion_enabled; then
+  remote_wait_for_port "$SHARD0_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD0_STANDBY_LEADER_PORT"
+  remote_wait_for_port "$SHARD1_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD1_STANDBY_LEADER_PORT"
+fi
 
 start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/coordinator.log"
 remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_PORT"
@@ -266,6 +304,10 @@ wait_for_status_state server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" 
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-active-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard1-leader.json"
+if hot_standby_ingestion_enabled; then
+  capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_standby_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard0-standby-leader.json"
+  capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_standby_leader_addr)" "$SMOKE_LOGS_REMOTE/status-active-shard1-standby-leader.json"
+fi
 capture_dynamodb_smoke_state active
 assert_dynamodb_smoke_state active "$epoch_id" true true
 
@@ -280,8 +322,14 @@ wait_for_sqs_ingestion_drain 120
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
-assert_remote_ingestion_status "$SHARD0_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
-assert_remote_ingestion_status "$SHARD1_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
+assert_remote_ingestion_status "$SHARD0_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json" active "$(hot_standby_ingestion_enabled && printf true || printf false)"
+assert_remote_ingestion_status "$SHARD1_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json" active "$(hot_standby_ingestion_enabled && printf true || printf false)"
+if hot_standby_ingestion_enabled; then
+  capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_standby_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-standby-leader.json"
+  capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_standby_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-standby-leader.json"
+  assert_remote_ingestion_status "$SHARD0_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard0-standby-leader.json" standby false
+  assert_remote_ingestion_status "$SHARD1_LEADER_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/status-completed-shard1-standby-leader.json" standby false
+fi
 assert_remote_scaling_status "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json" "$epoch_id" 2 512
 if public_entry_enabled; then
   capture_nlb_artifacts "$SMOKE_LOCAL_DIR/nlb-completed"
@@ -292,7 +340,7 @@ if sqs_ingestion_enabled; then
   capture_ingestion_artifacts "$SMOKE_LOCAL_DIR/ingestion-completed"
   assert_ingestion_smoke_artifacts "$SMOKE_LOCAL_DIR/ingestion-completed"
   remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE/ingestion-completed'"
-  for artifact in shard0-queue-attributes.json shard1-queue-attributes.json s3-payloads.json completed-upload-ledger.json; do
+  for artifact in shard0-queue-attributes.json shard1-queue-attributes.json shard0-standby-queue-attributes.json shard1-standby-queue-attributes.json s3-payloads.json completed-upload-ledger.json; do
     if [[ -f "$SMOKE_LOCAL_DIR/ingestion-completed/$artifact" ]]; then
       copy_to_remote "$SMOKE_LOCAL_DIR/ingestion-completed/$artifact" "$COORDINATOR_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/ingestion-completed/$artifact"
     fi

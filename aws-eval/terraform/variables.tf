@@ -138,6 +138,26 @@ variable "shard1_follower_port" {
   type = string
 }
 
+variable "shard0_standby_leader_port" {
+  type    = string
+  default = "8640"
+}
+
+variable "shard0_standby_follower_port" {
+  type    = string
+  default = "8641"
+}
+
+variable "shard1_standby_leader_port" {
+  type    = string
+  default = "8650"
+}
+
+variable "shard1_standby_follower_port" {
+  type    = string
+  default = "8651"
+}
+
 variable "remote_root" {
   type = string
 }
@@ -221,6 +241,11 @@ variable "public_entry_multi_coordinator" {
 variable "ingestion_queue_backend" {
   type    = string
   default = "memory"
+}
+
+variable "hot_standby_ingestion" {
+  type    = string
+  default = "0"
 }
 
 variable "ingestion_s3_bucket" {

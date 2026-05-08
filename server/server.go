@@ -33,8 +33,10 @@ var flagThreads = flag.Int("threads", -1, "Number of threads to use")
 var flagResultsDir = flag.String("results-dir", "", "Directory for epoch result files on the leader")
 var flagShardID = flag.Int("shard-id", 0, "Shard identifier for result publication metadata")
 var flagGlobalRowStart = flag.Int("global-row-start", 0, "First global row represented by this server's local row 0")
+var flagReplicaID = flag.String("replica-id", "active", "Completed upload replica identity: active or standby")
 var flagIngestionQueue = flag.String("ingestion-queue", "memory", "Completed upload ingestion queue backend")
 var flagIngestionSQSQueueURL = flag.String("ingestion-sqs-queue-url", "", "SQS queue URL for -ingestion-queue sqs")
+var flagStandbyIngestionSQSQueueURL = flag.String("standby-ingestion-sqs-queue-url", "", "Optional standby SQS queue URL for active replica completed upload fanout")
 var flagIngestionS3Bucket = flag.String("ingestion-s3-bucket", "", "S3 bucket for -ingestion-queue sqs completed upload payloads")
 var flagIngestionReceiveBatchSize = flag.Int("ingestion-receive-batch-size", 1, "Completed upload ingestion receive batch size")
 var flagIngestionSQSWaitSeconds = flag.Int("ingestion-sqs-wait-seconds", 10, "SQS long-poll wait seconds for completed upload ingestion")
@@ -140,6 +142,9 @@ func main() {
 	var a int
 	slotTable := db.NewServer(idx, serverList)
 	slotTable.SetShardID(*flagShardID)
+	if err := slotTable.SetReplicaID(*flagReplicaID); err != nil {
+		log.Fatal(err)
+	}
 	if err := slotTable.SetGlobalRowStart(*flagGlobalRowStart); err != nil {
 		log.Fatal(err)
 	}
@@ -173,6 +178,15 @@ func main() {
 }
 
 func validateIngestionFlags() error {
+	if *flagReplicaID != db.CompletedUploadReplicaActive && *flagReplicaID != db.CompletedUploadReplicaStandby {
+		return errors.New("-replica-id must be active or standby")
+	}
+	if *flagReplicaID == db.CompletedUploadReplicaStandby && *flagStandbyIngestionSQSQueueURL != "" {
+		return errors.New("-standby-ingestion-sqs-queue-url is only valid for active replicas")
+	}
+	if *flagStandbyIngestionSQSQueueURL != "" && *flagIngestionQueue != "sqs" {
+		return errors.New("-standby-ingestion-sqs-queue-url requires -ingestion-queue sqs")
+	}
 	if *flagIngestionSQSWaitSeconds < 0 || *flagIngestionSQSWaitSeconds > 20 {
 		return errors.New("-ingestion-sqs-wait-seconds must be between 0 and 20")
 	}
@@ -214,6 +228,7 @@ func configureIngestionQueue(slotTable *db.Server) {
 		queue, err := db.NewSQSCompletedUploadQueueWithOptions(sqs.NewFromConfig(cfg), s3.NewFromConfig(cfg), *flagIngestionSQSQueueURL, *flagIngestionS3Bucket, db.SQSCompletedUploadQueueOptions{
 			WaitTimeSeconds:          int32(*flagIngestionSQSWaitSeconds),
 			VisibilityTimeoutSeconds: int32(*flagIngestionSQSVisibilityTimeoutSeconds),
+			StandbyQueueURL:          *flagStandbyIngestionSQSQueueURL,
 		})
 		if err != nil {
 			log.Fatal(err)
@@ -221,6 +236,7 @@ func configureIngestionQueue(slotTable *db.Server) {
 		if err := slotTable.SetCompletedUploadQueue(queue); err != nil {
 			log.Fatal(err)
 		}
+		slotTable.SetStandbyIngestionFanoutConfigured(*flagStandbyIngestionSQSQueueURL != "")
 	default:
 		if err := slotTable.SetIngestionQueueBackend(*flagIngestionQueue); err != nil {
 			log.Fatal(err)

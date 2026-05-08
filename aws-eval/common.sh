@@ -39,6 +39,7 @@ COORDINATOR_EXTRA_ARGS="${COORDINATOR_EXTRA_ARGS:-}"
 PUBLIC_ENTRY_BACKEND="${PUBLIC_ENTRY_BACKEND:-none}"
 PUBLIC_ENTRY_MULTI_COORDINATOR="${PUBLIC_ENTRY_MULTI_COORDINATOR:-0}"
 INGESTION_QUEUE_BACKEND="${INGESTION_QUEUE_BACKEND:-memory}"
+HOT_STANDBY_INGESTION="${HOT_STANDBY_INGESTION:-0}"
 INGESTION_S3_BUCKET="${INGESTION_S3_BUCKET:-}"
 INGESTION_RECEIVE_BATCH_SIZE="${INGESTION_RECEIVE_BATCH_SIZE:-1}"
 INGESTION_SQS_WAIT_SECONDS="${INGESTION_SQS_WAIT_SECONDS:-10}"
@@ -55,6 +56,10 @@ SHARD0_LEADER_PORT="${SHARD0_LEADER_PORT:-8610}"
 SHARD0_FOLLOWER_PORT="${SHARD0_FOLLOWER_PORT:-8611}"
 SHARD1_LEADER_PORT="${SHARD1_LEADER_PORT:-8620}"
 SHARD1_FOLLOWER_PORT="${SHARD1_FOLLOWER_PORT:-8621}"
+SHARD0_STANDBY_LEADER_PORT="${SHARD0_STANDBY_LEADER_PORT:-8640}"
+SHARD0_STANDBY_FOLLOWER_PORT="${SHARD0_STANDBY_FOLLOWER_PORT:-8641}"
+SHARD1_STANDBY_LEADER_PORT="${SHARD1_STANDBY_LEADER_PORT:-8650}"
+SHARD1_STANDBY_FOLLOWER_PORT="${SHARD1_STANDBY_FOLLOWER_PORT:-8651}"
 
 REMOTE_ROOT="${REMOTE_ROOT:-/tmp/riposte-eval}"
 REMOTE_BIN_DIR="$REMOTE_ROOT/bin"
@@ -355,6 +360,10 @@ sqs_ingestion_enabled() {
   [[ "$INGESTION_QUEUE_BACKEND" == "sqs" ]]
 }
 
+hot_standby_ingestion_enabled() {
+  sqs_ingestion_enabled && [[ "$HOT_STANDBY_INGESTION" == "1" || "$HOT_STANDBY_INGESTION" == "true" ]]
+}
+
 server_ingestion_iam_role_name() {
   printf '%s' "${SERVER_INGESTION_IAM_ROLE_NAME:-${PROJECT_TAG}-${RUN_ID:-local}-server-ingestion}"
 }
@@ -503,8 +512,26 @@ ingestion_queue_url_for_shard() {
   esac
 }
 
+standby_ingestion_queue_url_for_shard() {
+  local shard_id="$1"
+  case "$shard_id" in
+    0)
+      [[ -n "${INGESTION_SQS_SHARD0_STANDBY_QUEUE_URL:-}" ]] || die "missing INGESTION_SQS_SHARD0_STANDBY_QUEUE_URL"
+      printf '%s' "$INGESTION_SQS_SHARD0_STANDBY_QUEUE_URL"
+      ;;
+    1)
+      [[ -n "${INGESTION_SQS_SHARD1_STANDBY_QUEUE_URL:-}" ]] || die "missing INGESTION_SQS_SHARD1_STANDBY_QUEUE_URL"
+      printf '%s' "$INGESTION_SQS_SHARD1_STANDBY_QUEUE_URL"
+      ;;
+    *)
+      die "no standby ingestion queue configured for shard $shard_id"
+      ;;
+  esac
+}
+
 server_ingestion_queue_args() {
 	local shard_id="$1"
+	local replica_id="${2:-active}"
 	local worker_args ledger_args
 	worker_args="$(printf -- " -ingestion-receive-batch-size %s -ingestion-worker-error-backoff-ms %s" \
 		"$(quote "$INGESTION_RECEIVE_BATCH_SIZE")" \
@@ -527,14 +554,27 @@ server_ingestion_queue_args() {
 	esac
 	case "$INGESTION_QUEUE_BACKEND" in
 	memory)
-		printf '%s%s' "$worker_args" "$ledger_args"
+		printf '%s%s -replica-id %s' "$worker_args" "$ledger_args" "$(quote "$replica_id")"
 		;;
 	sqs)
 		[[ -n "${INGESTION_S3_BUCKET:-}" ]] || die "INGESTION_S3_BUCKET is required when INGESTION_QUEUE_BACKEND=sqs"
-		printf -- "%s%s -ingestion-queue sqs -ingestion-sqs-queue-url %s -ingestion-s3-bucket %s -aws-region %s -ingestion-sqs-wait-seconds %s -ingestion-sqs-visibility-timeout-seconds %s" \
+		local queue_url standby_fanout_arg
+		if [[ "$replica_id" == "standby" ]]; then
+			queue_url="$(standby_ingestion_queue_url_for_shard "$shard_id")"
+			standby_fanout_arg=""
+		else
+			queue_url="$(ingestion_queue_url_for_shard "$shard_id")"
+			standby_fanout_arg=""
+			if hot_standby_ingestion_enabled; then
+				standby_fanout_arg="$(printf -- " -standby-ingestion-sqs-queue-url %s" "$(quote "$(standby_ingestion_queue_url_for_shard "$shard_id")")")"
+			fi
+		fi
+		printf -- "%s%s -replica-id %s -ingestion-queue sqs -ingestion-sqs-queue-url %s%s -ingestion-s3-bucket %s -aws-region %s -ingestion-sqs-wait-seconds %s -ingestion-sqs-visibility-timeout-seconds %s" \
 			"$worker_args" \
 			"$ledger_args" \
-			"$(quote "$(ingestion_queue_url_for_shard "$shard_id")")" \
+			"$(quote "$replica_id")" \
+			"$(quote "$queue_url")" \
+			"$standby_fanout_arg" \
 			"$(quote "$INGESTION_S3_BUCKET")" \
 			"$(quote "$AWS_REGION")" \
 			"$(quote "$INGESTION_SQS_WAIT_SECONDS")" \
@@ -560,6 +600,16 @@ capture_ingestion_artifacts() {
     --queue-url "$INGESTION_SQS_SHARD1_QUEUE_URL" \
     --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
     --output json >"$output_dir/shard1-queue-attributes.json" || true
+  if hot_standby_ingestion_enabled; then
+    aws_region sqs get-queue-attributes \
+      --queue-url "$INGESTION_SQS_SHARD0_STANDBY_QUEUE_URL" \
+      --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+      --output json >"$output_dir/shard0-standby-queue-attributes.json" || true
+    aws_region sqs get-queue-attributes \
+      --queue-url "$INGESTION_SQS_SHARD1_STANDBY_QUEUE_URL" \
+      --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+      --output json >"$output_dir/shard1-standby-queue-attributes.json" || true
+  fi
   aws_region s3api list-objects-v2 \
     --bucket "$INGESTION_S3_BUCKET" \
     --prefix "completed-uploads/" \
@@ -576,7 +626,7 @@ capture_ingestion_artifacts() {
 wait_for_sqs_ingestion_drain() {
   local timeout="${1:-120}"
   local deadline=$((SECONDS + timeout))
-  local shard0_counts shard1_counts
+  local shard0_counts shard1_counts shard0_standby_counts shard1_standby_counts
   if ! sqs_ingestion_enabled; then
     return 0
   fi
@@ -592,12 +642,26 @@ wait_for_sqs_ingestion_drain() {
       --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
       --query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' \
       --output text 2>/dev/null || true)"
-    if [[ "$shard0_counts" == $'0\t0' && "$shard1_counts" == $'0\t0' ]]; then
+    shard0_standby_counts=$'0\t0'
+    shard1_standby_counts=$'0\t0'
+    if hot_standby_ingestion_enabled; then
+      shard0_standby_counts="$(aws_region sqs get-queue-attributes \
+        --queue-url "$INGESTION_SQS_SHARD0_STANDBY_QUEUE_URL" \
+        --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+        --query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' \
+        --output text 2>/dev/null || true)"
+      shard1_standby_counts="$(aws_region sqs get-queue-attributes \
+        --queue-url "$INGESTION_SQS_SHARD1_STANDBY_QUEUE_URL" \
+        --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+        --query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' \
+        --output text 2>/dev/null || true)"
+    fi
+    if [[ "$shard0_counts" == $'0\t0' && "$shard1_counts" == $'0\t0' && "$shard0_standby_counts" == $'0\t0' && "$shard1_standby_counts" == $'0\t0' ]]; then
       return 0
     fi
     if (( SECONDS >= deadline )); then
       capture_ingestion_artifacts "$STATE_DIR/ingestion-drain-timeout"
-      die "SQS ingestion queues did not drain before timeout; shard0=${shard0_counts:-unknown} shard1=${shard1_counts:-unknown}"
+      die "SQS ingestion queues did not drain before timeout; shard0=${shard0_counts:-unknown} shard1=${shard1_counts:-unknown} shard0-standby=${shard0_standby_counts:-unknown} shard1-standby=${shard1_standby_counts:-unknown}"
     fi
     sleep 2
   done
@@ -671,6 +735,22 @@ shard1_leader_addr() {
 
 shard1_follower_addr() {
   printf '%s:%s' "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_FOLLOWER_PORT"
+}
+
+shard0_standby_leader_addr() {
+  printf '%s:%s' "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_STANDBY_LEADER_PORT"
+}
+
+shard0_standby_follower_addr() {
+  printf '%s:%s' "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_STANDBY_FOLLOWER_PORT"
+}
+
+shard1_standby_leader_addr() {
+  printf '%s:%s' "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_STANDBY_LEADER_PORT"
+}
+
+shard1_standby_follower_addr() {
+  printf '%s:%s' "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_STANDBY_FOLLOWER_PORT"
 }
 
 kill_remote_processes() {
@@ -782,9 +862,10 @@ start_remote_server() {
   local servers_csv="$4"
   local results_dir="$5"
   local log_path="$6"
+  local replica_id="${7:-active}"
   local global_row_start=$((shard_id * ROWS_PER_SHARD))
   local ingestion_args
-  ingestion_args="$(server_ingestion_queue_args "$shard_id")"
+  ingestion_args="$(server_ingestion_queue_args "$shard_id" "$replica_id")"
   remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -global-row-start '$global_row_start' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv'$ingestion_args > '${log_path}.nohup' 2>&1 &"
 }
 
@@ -797,7 +878,7 @@ start_remote_coordinator() {
   local lease_renew="${6:-$COORDINATOR_LEASE_RENEW_SECONDS}"
   local pid_path="${7:-}"
   local standby="${8:-0}"
-  local control_args session_args seed_args mkdir_cmd
+  local control_args session_args seed_args mkdir_cmd shard0_arg shard1_arg
   control_args="$(coordinator_control_store_args "$holder" "$lease_ttl" "$lease_renew")"
   session_args="$(coordinator_session_store_args)"
   seed_args=""
@@ -807,12 +888,18 @@ start_remote_coordinator() {
   if [[ "$standby" == "1" || "$standby" == "true" ]]; then
     control_args="$control_args -standby"
   fi
+  shard0_arg="0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)"
+  shard1_arg="1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)"
+  if hot_standby_ingestion_enabled; then
+    shard0_arg="$shard0_arg,$(shard0_standby_leader_addr)|$(shard0_standby_follower_addr)"
+    shard1_arg="$shard1_arg,$(shard1_standby_leader_addr)|$(shard1_standby_follower_addr)"
+  fi
   mkdir_cmd="mkdir -p '$(dirname "$log_path")'"
   if [[ -n "$pid_path" ]]; then
     mkdir_cmd="$mkdir_cmd '$(dirname "$pid_path")'"
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args$session_args$seed_args $COORDINATOR_EXTRA_ARGS > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '$shard0_arg' -shard '$shard1_arg'$control_args$session_args$seed_args $COORDINATOR_EXTRA_ARGS > '${log_path}.nohup' 2>&1 & echo \$! > '$pid_path'"
   else
-    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '0,0,256,$(shard0_leader_addr),$(shard0_follower_addr)' -shard '1,256,512,$(shard1_leader_addr),$(shard1_follower_addr)'$control_args$session_args$seed_args $COORDINATOR_EXTRA_ARGS > '${log_path}.nohup' 2>&1 &"
+    remote_cmd "$host" "$mkdir_cmd; nohup ~/coordinator -listen '$listen_addr' -log '$log_path' -shard '$shard0_arg' -shard '$shard1_arg'$control_args$session_args$seed_args $COORDINATOR_EXTRA_ARGS > '${log_path}.nohup' 2>&1 &"
   fi
 }
 

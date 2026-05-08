@@ -264,6 +264,22 @@ completed uploads committed before deleting the SQS message, and duplicate
 redelivery of committed work is acked without rerunning prepare/commit. S3
 payloads are retained after ack for debugging and replay audit.
 
+Hot-standby completed-upload fanout is opt-in on top of SQS/S3 ingestion:
+
+```bash
+INGESTION_QUEUE_BACKEND=sqs \
+COMPLETED_UPLOAD_LEDGER_BACKEND=dynamodb \
+HOT_STANDBY_INGESTION=1 \
+./aws-eval/01-launch.sh
+```
+
+Terraform then creates an active and standby SQS queue per shard. The active
+leader writes one S3 payload and sends pointer messages to both queues. Standby
+server processes are started with `-replica-id standby` by smoke validation, and
+both active and standby replicas commit the same completed upload under separate
+ledger keys. This does not promote shard routing; it only keeps standby completed
+upload processing caught up enough for a later promotion slice.
+
 Operational knobs default to conservative smoke-safe values:
 
 ```bash
@@ -319,6 +335,11 @@ verifies the SQS approximate visible/in-flight counts are zero, and verifies
 that at least two completed-upload payloads were written to S3. If
 `COMPLETED_UPLOAD_LEDGER_BACKEND=dynamodb`, smoke also verifies at least two
 committed completed-upload ledger records.
+
+If `HOT_STANDBY_INGESTION=1`, smoke also starts standby shard processes on the
+standby ports, waits for the standby queues to drain, captures standby queue
+attributes, and verifies DynamoDB ledger records exist for both `active` and
+`standby` replicas.
 
 To validate coordinator lease/fencing behavior with two coordinator attempts:
 

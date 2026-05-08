@@ -72,6 +72,32 @@ func TestMemoryCompletedUploadLedgerBeginCompleteAndDuplicate(t *testing.T) {
 	}
 }
 
+func TestMemoryCompletedUploadLedgerSeparatesReplicas(t *testing.T) {
+	ledger := newMemoryCompletedUploadLedger()
+	now := time.Unix(150, 0).UTC()
+	activeMsg := CompletedUploadMessage{ReplicaID: CompletedUploadReplicaActive, EpochID: 1, ShardID: 0, Uuid: 7}
+	standbyMsg := activeMsg
+	standbyMsg.ReplicaID = CompletedUploadReplicaStandby
+
+	active, err := ledger.BeginProcessing(context.Background(), activeMsg, now, time.Minute)
+	if err != nil {
+		t.Fatalf("active begin failed: %v", err)
+	}
+	if err := ledger.CompleteProcessing(context.Background(), active.Lease, now.Add(time.Second)); err != nil {
+		t.Fatalf("active complete failed: %v", err)
+	}
+	standby, err := ledger.BeginProcessing(context.Background(), standbyMsg, now.Add(2*time.Second), time.Minute)
+	if err != nil {
+		t.Fatalf("standby begin failed: %v", err)
+	}
+	if standby.AlreadyCommitted {
+		t.Fatalf("standby should not be suppressed by active commit: %+v", standby)
+	}
+	if standby.Lease.ReplicaID != CompletedUploadReplicaStandby {
+		t.Fatalf("unexpected standby lease: %+v", standby.Lease)
+	}
+}
+
 func TestMemoryCompletedUploadLedgerExpiredProcessingCanBeReclaimed(t *testing.T) {
 	ledger := newMemoryCompletedUploadLedger()
 	now := time.Unix(200, 0).UTC()
@@ -107,11 +133,17 @@ func TestDynamoDBCompletedUploadLedgerBeginUsesConditionalWrite(t *testing.T) {
 	if begin.Lease.ShardID != 2 || begin.Lease.EpochID != 1 || begin.Lease.Uuid != 9 || begin.Lease.AttemptID == "" {
 		t.Fatalf("unexpected lease: %+v", begin.Lease)
 	}
+	if begin.Lease.ReplicaID != CompletedUploadReplicaActive {
+		t.Fatalf("unexpected replica id: %+v", begin.Lease)
+	}
 	if len(fake.updates) != 1 {
 		t.Fatalf("expected one update, got %d", len(fake.updates))
 	}
 	if fake.updates[0].ConditionExpression == nil {
 		t.Fatal("expected conditional update")
+	}
+	if attr, ok := fake.updates[0].ExpressionAttributeValues[":replica_id"].(*ddbtypes.AttributeValueMemberS); !ok || attr.Value != CompletedUploadReplicaActive {
+		t.Fatalf("expected active replica attribute, got %+v", fake.updates[0].ExpressionAttributeValues[":replica_id"])
 	}
 }
 

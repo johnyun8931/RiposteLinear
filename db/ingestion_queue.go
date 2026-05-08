@@ -9,9 +9,12 @@ import (
 )
 
 const memoryIngestionQueueBackend = "memory"
+const CompletedUploadReplicaActive = "active"
+const CompletedUploadReplicaStandby = "standby"
 
 type CompletedUploadMessage struct {
 	ID         string
+	ReplicaID  string
 	EpochID    int64
 	ShardID    int
 	Uuid       int64

@@ -115,10 +115,17 @@ func (l *dynamoDBCompletedUploadLedger) BeginProcessing(ctx context.Context, mes
 	if err := validateCompletedUploadLedgerIdentity(message.ShardID, message.EpochID, message.Uuid); err != nil {
 		return CompletedUploadLedgerBeginResult{}, err
 	}
+	if err := validateCompletedUploadReplicaID(message.ReplicaID); err != nil {
+		return CompletedUploadLedgerBeginResult{}, err
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	key := completedUploadLedgerKey(message.ShardID, message.EpochID, message.Uuid)
+	replicaID := message.ReplicaID
+	if replicaID == "" {
+		replicaID = CompletedUploadReplicaActive
+	}
+	key := completedUploadLedgerKeyForReplica(replicaID, message.ShardID, message.EpochID, message.Uuid)
 
 	if record, ok, err := l.getRecord(ctx, key); err != nil {
 		return CompletedUploadLedgerBeginResult{}, err
@@ -129,6 +136,7 @@ func (l *dynamoDBCompletedUploadLedger) BeginProcessing(ctx context.Context, mes
 	}
 
 	lease := CompletedUploadProcessingLease{
+		ReplicaID: replicaID,
 		ShardID:   message.ShardID,
 		EpochID:   message.EpochID,
 		Uuid:      message.Uuid,
@@ -137,13 +145,14 @@ func (l *dynamoDBCompletedUploadLedger) BeginProcessing(ctx context.Context, mes
 	_, err := l.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           aws.String(l.table),
 		Key:                 dynamoCompletedUploadLedgerKey(key),
-		UpdateExpression:    aws.String("SET shard_id = :shard_id, epoch_id = :epoch_id, #uuid = :uuid, #state = :processing, attempt_id = :attempt_id, processing_expires_unix_ms = :expires, updated_unix_ms = :updated"),
+		UpdateExpression:    aws.String("SET replica_id = :replica_id, shard_id = :shard_id, epoch_id = :epoch_id, #uuid = :uuid, #state = :processing, attempt_id = :attempt_id, processing_expires_unix_ms = :expires, updated_unix_ms = :updated"),
 		ConditionExpression: aws.String("attribute_not_exists(pk) OR (#state <> :committed AND (attribute_not_exists(processing_expires_unix_ms) OR processing_expires_unix_ms <= :now))"),
 		ExpressionAttributeNames: map[string]string{
 			"#state": "state",
 			"#uuid":  "uuid",
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":replica_id": &ddbtypes.AttributeValueMemberS{Value: replicaID},
 			":shard_id":   dynamoCompletedUploadLedgerNumberAttr(int64(message.ShardID)),
 			":epoch_id":   dynamoCompletedUploadLedgerNumberAttr(message.EpochID),
 			":uuid":       dynamoCompletedUploadLedgerNumberAttr(message.Uuid),
@@ -178,13 +187,20 @@ func (l *dynamoDBCompletedUploadLedger) CompleteProcessing(ctx context.Context, 
 	if err := validateCompletedUploadLedgerIdentity(lease.ShardID, lease.EpochID, lease.Uuid); err != nil {
 		return err
 	}
+	if err := validateCompletedUploadReplicaID(lease.ReplicaID); err != nil {
+		return err
+	}
 	if lease.AttemptID == "" {
 		return errors.New("completed upload processing attempt id is required")
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	key := completedUploadLedgerKey(lease.ShardID, lease.EpochID, lease.Uuid)
+	replicaID := lease.ReplicaID
+	if replicaID == "" {
+		replicaID = CompletedUploadReplicaActive
+	}
+	key := completedUploadLedgerKeyForReplica(replicaID, lease.ShardID, lease.EpochID, lease.Uuid)
 	_, err := l.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           aws.String(l.table),
 		Key:                 dynamoCompletedUploadLedgerKey(key),

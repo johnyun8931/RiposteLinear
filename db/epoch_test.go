@@ -814,6 +814,49 @@ func TestIngestionWorkerSkipsAlreadyCommittedDuplicate(t *testing.T) {
 	}
 }
 
+func TestStandbyIngestionWorkerCommitsWithStandbyReplica(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetReplicaID(CompletedUploadReplicaStandby); err != nil {
+		t.Fatalf("set replica failed: %v", err)
+	}
+	ledger := newMemoryCompletedUploadLedger()
+	if err := s.SetCompletedUploadLedger(ledger); err != nil {
+		t.Fatalf("set ledger failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		if msg.ReplicaID != CompletedUploadReplicaStandby {
+			t.Fatalf("expected standby replica during processing, got %+v", msg)
+		}
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		if uuid != 11 || !shouldCommit {
+			t.Fatalf("unexpected commit uuid=%d shouldCommit=%v", uuid, shouldCommit)
+		}
+		return nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 11}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	result, err := ledger.BeginProcessing(context.Background(), CompletedUploadMessage{ReplicaID: CompletedUploadReplicaActive, EpochID: 1, ShardID: 0, Uuid: 11}, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("active replica should remain independently processable: %v", err)
+	}
+	if result.AlreadyCommitted {
+		t.Fatalf("active replica should not be suppressed by standby commit: %+v", result)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.CompletedUploadCommittedCount != 1 || status.IngestionAckCount != 1 {
+		t.Fatalf("unexpected standby processing status: %+v", status)
+	}
+}
+
 func TestIngestionWorkerLeavesLedgerCompleteFailureUnacked(t *testing.T) {
 	s := newTestLeaderServer()
 	if err := s.SetCompletedUploadLedger(&completeFailingCompletedUploadLedger{}); err != nil {
@@ -882,6 +925,35 @@ func TestIngestionDiagnosticsRecordReceiveError(t *testing.T) {
 	}
 	if status.IngestionReceiveErrors != 1 || status.IngestionLastError != "receive failed" || status.IngestionLastErrorUnix == 0 {
 		t.Fatalf("unexpected receive error diagnostics: %+v", status)
+	}
+}
+
+func TestStatusReportsReplicaAndStandbyFanout(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetReplicaID(CompletedUploadReplicaStandby); err != nil {
+		t.Fatalf("set replica failed: %v", err)
+	}
+	s.SetStandbyIngestionFanoutConfigured(true)
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.ReplicaID != CompletedUploadReplicaStandby {
+		t.Fatalf("unexpected replica id: %+v", status)
+	}
+	if !status.StandbyIngestionFanoutConfigured {
+		t.Fatalf("expected standby fanout status: %+v", status)
+	}
+}
+
+func TestStandbyReplicaRejectsDirectUploads(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetReplicaID(CompletedUploadReplicaStandby); err != nil {
+		t.Fatalf("set replica failed: %v", err)
+	}
+	if err := s.Upload1(&UploadArgs1{RouteRow: 0}, &UploadReply1{}); err == nil || err.Error() != "standby replica cannot accept direct uploads" {
+		t.Fatalf("expected standby direct upload rejection, got %v", err)
 	}
 }
 

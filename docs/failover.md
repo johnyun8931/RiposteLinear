@@ -223,11 +223,32 @@ and ledger errors.
 
 The completed-upload ledger is opt-in durable state for SQS redelivery. In
 `memory` mode it is process-local. In `dynamodb` mode it writes
-`pk="completed-upload#shard#<shard_id>#epoch#<epoch_id>#uuid#<uuid>"` records
-with `processing` and `committed` states. Workers check the ledger before
-prepare/commit; already-committed duplicates are acked without replaying
-prepare/commit. After prepare/commit succeeds, the worker marks the ledger
-committed before deleting the SQS message.
+`pk="completed-upload#replica#<active|standby>#shard#<shard_id>#epoch#<epoch_id>#uuid#<uuid>"`
+records with `processing` and `committed` states. Workers check the ledger
+before prepare/commit; already-committed duplicates for the same replica are
+acked without replaying prepare/commit. Active and standby replicas use
+separate ledger keys, so the standby can process the same completed upload
+without being suppressed by the active replica's committed record. After
+prepare/commit succeeds, the worker marks the ledger committed before deleting
+the SQS message.
+
+Hot-standby ingestion is opt-in. In SQS/S3 mode, an active shard leader can be
+started with a standby ingestion queue URL. Its `Upload3` path writes one S3
+payload and sends pointer messages to both the active queue and the standby
+queue. `Upload3` returns only after both pointer sends succeed, but it does not
+wait for either replica to run prepare/commit. Catch-up is observed through
+queue depth, server status, and replica-specific ledger records. Standby shard
+processes consume their own queue with `-replica-id standby`; they do not
+accept direct client uploads in this slice.
+
+Shard server flags for this boundary:
+
+- `-ingestion-queue memory|sqs`, default `memory`
+- `-ingestion-sqs-queue-url <url>`, the process-local active or standby queue
+- `-ingestion-s3-bucket <bucket>`, shared S3 payload bucket for SQS mode
+- `-standby-ingestion-sqs-queue-url <url>`, active-replica fanout target
+- `-replica-id active|standby`, default `active`
+- `-completed-upload-ledger memory|dynamodb`, default `memory`
 
 This is pragmatic idempotence, not transactional exactly-once processing. It
 closes the common path where commit succeeds, the ledger commit succeeds, and
@@ -255,11 +276,12 @@ complexity:
 ## Current Boundary
 
 DynamoDB control-store and session-store wiring is opt-in. SQS/S3
-completed-upload ingestion and the DynamoDB completed-upload ledger are also
-opt-in. The current code has local and DynamoDB control-store wiring, local and
-DynamoDB session-store wiring, lease/fencing enforcement, local and SQS/S3
-completed-upload ingestion queueing, a completed-upload idempotence ledger, and
-active-passive shard health monitoring, but no active-passive shard promotion.
+completed-upload ingestion, hot-standby completed-upload fanout, and the
+DynamoDB completed-upload ledger are also opt-in. The current code has local
+and DynamoDB control-store wiring, local and DynamoDB session-store wiring,
+lease/fencing enforcement, local and SQS/S3 completed-upload ingestion
+queueing, replica-aware completed-upload idempotence, and active-passive shard
+health monitoring, but no active-passive shard promotion.
 
 Shard health monitoring is a prerequisite for failover, not failover itself.
 Shard active/passive promotion still requires durable accepted-work/session

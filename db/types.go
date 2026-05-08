@@ -237,7 +237,9 @@ type StatusReply struct {
 	LastResult                          string `json:"last_result"`
 	PeerState                           string `json:"peer_state"`
 	PeerError                           string `json:"peer_error"`
+	ReplicaID                           string `json:"replica_id"`
 	IngestionQueueBackend               string `json:"ingestion_queue_backend"`
+	StandbyIngestionFanoutConfigured    bool   `json:"standby_ingestion_fanout_configured"`
 	IngestionQueueDepth                 int    `json:"ingestion_queue_depth"`
 	IngestionInflightCount              int    `json:"ingestion_inflight_count"`
 	IngestionProcessedCount             int64  `json:"ingestion_processed_count"`
@@ -552,6 +554,8 @@ type Server struct {
 
 	ingestionQueue               completedUploadQueue
 	ingestionQueueBackend        string
+	replicaID                    string
+	standbyIngestionFanout       bool
 	ingestionBatchSize           int
 	ingestionErrorBackoff        time.Duration
 	completedUploadLedger        CompletedUploadLedger

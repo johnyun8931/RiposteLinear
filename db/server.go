@@ -274,6 +274,9 @@ func (t *Server) Upload1(args *UploadArgs1, reply *UploadReply1) error {
 	if !t.isLeader() {
 		return errors.New("Only leader can accept uploads")
 	}
+	if t.replicaID == CompletedUploadReplicaStandby {
+		return errors.New("standby replica cannot accept direct uploads")
+	}
 	<-t.incoming1
 	defer func() { t.incoming1 <- true }()
 
@@ -291,6 +294,9 @@ func (t *Server) Upload2(args *UploadArgs2, reply *UploadReply2) error {
 	if !t.isLeader() {
 		return errors.New("Only leader can accept uploads")
 	}
+	if t.replicaID == CompletedUploadReplicaStandby {
+		return errors.New("standby replica cannot accept direct uploads")
+	}
 	<-t.incoming2
 	defer func() { t.incoming2 <- true }()
 
@@ -307,6 +313,9 @@ func (t *Server) Upload2(args *UploadArgs2, reply *UploadReply2) error {
 func (t *Server) Upload3(args *UploadArgs3, reply *UploadReply3) error {
 	if !t.isLeader() {
 		return errors.New("Only leader can accept uploads")
+	}
+	if t.replicaID == CompletedUploadReplicaStandby {
+		return errors.New("standby replica cannot accept direct uploads")
 	}
 	<-t.incoming3
 	defer func() { t.incoming3 <- true }()
@@ -498,6 +507,7 @@ func (t *Server) processRequest() {
 
 func (t *Server) processIngestionJob(item QueuedCompletedUploadMessage) {
 	msg := item.Message
+	msg.ReplicaID = t.replicaID
 	t.amPublishingMutex.RLock()
 	defer t.amPublishingMutex.RUnlock()
 
@@ -888,7 +898,9 @@ func (t *Server) Status(_ *StatusArgs, reply *StatusReply) error {
 	reply.IsLeader = t.isLeader()
 	reply.ServerIndex = t.ServerIdx
 	reply.ShardID = t.ShardID
+	reply.ReplicaID = t.replicaID
 	reply.IngestionQueueBackend = t.ingestionQueueBackend
+	reply.StandbyIngestionFanoutConfigured = t.standbyIngestionFanout
 	stats := t.ingestionQueueStats()
 	reply.IngestionQueueDepth = stats.Depth
 	reply.IngestionInflightCount = stats.Inflight
@@ -1098,6 +1110,7 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 		return t.sendMergeRequest()
 	}
 	t.SetIngestionQueueBackend(memoryIngestionQueueBackend)
+	t.replicaID = CompletedUploadReplicaActive
 	t.ingestionBatchSize = defaultIngestionReceiveBatchSize
 	t.ingestionErrorBackoff = defaultIngestionWorkerErrorBackoff
 	t.SetCompletedUploadLedger(newMemoryCompletedUploadLedger())
@@ -1132,6 +1145,21 @@ func (t *Server) SetCompletedUploadQueue(queue CompletedUploadQueue) error {
 	t.ingestionQueue = queue
 	t.ingestionQueueBackend = queue.Backend()
 	return nil
+}
+
+func (t *Server) SetReplicaID(replicaID string) error {
+	if err := validateCompletedUploadReplicaID(replicaID); err != nil {
+		return err
+	}
+	if replicaID == "" {
+		replicaID = CompletedUploadReplicaActive
+	}
+	t.replicaID = replicaID
+	return nil
+}
+
+func (t *Server) SetStandbyIngestionFanoutConfigured(configured bool) {
+	t.standbyIngestionFanout = configured
 }
 
 func (t *Server) SetCompletedUploadLedger(ledger CompletedUploadLedger) error {

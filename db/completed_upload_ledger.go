@@ -18,6 +18,7 @@ const (
 var errCompletedUploadProcessingBusy = errors.New("completed upload processing is busy")
 
 type CompletedUploadProcessingLease struct {
+	ReplicaID string
 	ShardID   int
 	EpochID   int64
 	Uuid      int64
@@ -58,7 +59,23 @@ func (l *memoryCompletedUploadLedger) Backend() string {
 }
 
 func completedUploadLedgerKey(shardID int, epochID int64, uuid int64) string {
-	return fmt.Sprintf("completed-upload#shard#%d#epoch#%d#uuid#%d", shardID, epochID, uuid)
+	return completedUploadLedgerKeyForReplica(CompletedUploadReplicaActive, shardID, epochID, uuid)
+}
+
+func completedUploadLedgerKeyForReplica(replicaID string, shardID int, epochID int64, uuid int64) string {
+	if replicaID == "" {
+		replicaID = CompletedUploadReplicaActive
+	}
+	return fmt.Sprintf("completed-upload#replica#%s#shard#%d#epoch#%d#uuid#%d", replicaID, shardID, epochID, uuid)
+}
+
+func validateCompletedUploadReplicaID(replicaID string) error {
+	switch replicaID {
+	case "", CompletedUploadReplicaActive, CompletedUploadReplicaStandby:
+		return nil
+	default:
+		return fmt.Errorf("unsupported completed upload replica id %q", replicaID)
+	}
 }
 
 func validateCompletedUploadLedgerIdentity(shardID int, epochID int64, uuid int64) error {
@@ -84,11 +101,18 @@ func (l *memoryCompletedUploadLedger) BeginProcessing(ctx context.Context, messa
 	if err := validateCompletedUploadLedgerIdentity(message.ShardID, message.EpochID, message.Uuid); err != nil {
 		return CompletedUploadLedgerBeginResult{}, err
 	}
+	if err := validateCompletedUploadReplicaID(message.ReplicaID); err != nil {
+		return CompletedUploadLedgerBeginResult{}, err
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 
-	key := completedUploadLedgerKey(message.ShardID, message.EpochID, message.Uuid)
+	replicaID := message.ReplicaID
+	if replicaID == "" {
+		replicaID = CompletedUploadReplicaActive
+	}
+	key := completedUploadLedgerKeyForReplica(replicaID, message.ShardID, message.EpochID, message.Uuid)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if record, ok := l.records[key]; ok {
@@ -104,6 +128,7 @@ func (l *memoryCompletedUploadLedger) BeginProcessing(ctx context.Context, messa
 
 	l.nextID++
 	lease := CompletedUploadProcessingLease{
+		ReplicaID: replicaID,
 		ShardID:   message.ShardID,
 		EpochID:   message.EpochID,
 		Uuid:      message.Uuid,
@@ -125,6 +150,9 @@ func (l *memoryCompletedUploadLedger) CompleteProcessing(ctx context.Context, le
 	if err := validateCompletedUploadLedgerIdentity(lease.ShardID, lease.EpochID, lease.Uuid); err != nil {
 		return err
 	}
+	if err := validateCompletedUploadReplicaID(lease.ReplicaID); err != nil {
+		return err
+	}
 	if lease.AttemptID == "" {
 		return errors.New("completed upload processing attempt id is required")
 	}
@@ -132,7 +160,11 @@ func (l *memoryCompletedUploadLedger) CompleteProcessing(ctx context.Context, le
 		now = time.Now().UTC()
 	}
 
-	key := completedUploadLedgerKey(lease.ShardID, lease.EpochID, lease.Uuid)
+	replicaID := lease.ReplicaID
+	if replicaID == "" {
+		replicaID = CompletedUploadReplicaActive
+	}
+	key := completedUploadLedgerKeyForReplica(replicaID, lease.ShardID, lease.EpochID, lease.Uuid)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	record, ok := l.records[key]
