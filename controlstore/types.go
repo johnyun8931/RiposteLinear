@@ -121,8 +121,14 @@ type IngestionMessage struct {
 	GlobalUUID int64
 	LocalUUID  int64
 	HashKey    [32]byte
-	RouteRow   int
+	Challenge  [16]byte
+	GlobalRow  int
+	LocalRow   int
+	Args1      db.UploadArgs1
+	Args2      db.UploadArgs2
+	Args3      db.UploadArgs3
 	EnqueuedAt time.Time
+	Attempts   int
 }
 
 type QueuedIngestionMessage struct {

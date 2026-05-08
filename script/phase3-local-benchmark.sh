@@ -31,7 +31,11 @@ baseline_run() {
 	before="$(last_since_start "$(log_file baseline-leader)")"
 	start_epoch server "$BASELINE_LEADER_ADDR" "$BENCH_DURATION" >/dev/null
 	sleep "$START_DELAY"
-	run_client -leader "$BASELINE_LEADER_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" "${CLIENT_RETRY_ARGS[@]}" -log "$client_log"
+	if [[ "${#CLIENT_RETRY_ARGS[@]}" -gt 0 ]]; then
+		run_client -leader "$BASELINE_LEADER_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" "${CLIENT_RETRY_ARGS[@]}" -log "$client_log"
+	else
+		run_client -leader "$BASELINE_LEADER_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" -log "$client_log"
+	fi
 	wait_for_epoch_complete server "$BASELINE_LEADER_ADDR"
 	sleep "$POST_RUN_WAIT"
 	after="$(last_since_start "$(log_file baseline-leader)")"
@@ -52,7 +56,11 @@ sharded_run() {
 	shard1_before="$(last_since_start "$(log_file shard1-leader)")"
 	start_epoch coordinator "$COORDINATOR_ADDR" "$BENCH_DURATION" >/dev/null
 	sleep "$START_DELAY"
-	run_client -coordinator "$COORDINATOR_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" "${CLIENT_RETRY_ARGS[@]}" -log "$client_log"
+	if [[ "${#CLIENT_RETRY_ARGS[@]}" -gt 0 ]]; then
+		run_client -coordinator "$COORDINATOR_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" "${CLIENT_RETRY_ARGS[@]}" -log "$client_log"
+	else
+		run_client -coordinator "$COORDINATOR_ADDR" -hammer -threads "$CLIENT_THREADS" -concurrency "$CLIENT_CONCURRENCY" -log "$client_log"
+	fi
 	wait_for_epoch_complete coordinator "$COORDINATOR_ADDR"
 	status_json coordinator "$COORDINATOR_ADDR" >"$status_file"
 	sleep "$POST_RUN_WAIT"

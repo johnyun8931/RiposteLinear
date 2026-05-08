@@ -242,11 +242,11 @@ func TestMemoryIngestionQueueEnqueueReceiveAck(t *testing.T) {
 	queue := newMemoryIngestionQueue()
 	ctx := context.Background()
 
-	firstID, err := queue.Enqueue(ctx, IngestionMessage{EpochID: 1, ShardID: 0, GlobalUUID: 10, LocalUUID: 20, RouteRow: 7})
+	firstID, err := queue.Enqueue(ctx, IngestionMessage{EpochID: 1, ShardID: 0, GlobalUUID: 10, LocalUUID: 20, GlobalRow: 7, LocalRow: 7})
 	if err != nil {
 		t.Fatalf("Enqueue first failed: %v", err)
 	}
-	secondID, err := queue.Enqueue(ctx, IngestionMessage{EpochID: 1, ShardID: 1, GlobalUUID: 11, LocalUUID: 21, RouteRow: 128})
+	secondID, err := queue.Enqueue(ctx, IngestionMessage{EpochID: 1, ShardID: 1, GlobalUUID: 11, LocalUUID: 21, GlobalRow: 128, LocalRow: 128})
 	if err != nil {
 		t.Fatalf("Enqueue second failed: %v", err)
 	}

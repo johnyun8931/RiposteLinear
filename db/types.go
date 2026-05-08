@@ -224,19 +224,22 @@ type EpochStatusReply struct {
 type StatusArgs struct{}
 
 type StatusReply struct {
-	Healthy      bool   `json:"healthy"`
-	IsLeader     bool   `json:"is_leader"`
-	ServerIndex  int    `json:"server_index"`
-	ShardID      int    `json:"shard_id"`
-	EpochID      int64  `json:"epoch_id"`
-	State        string `json:"state"`
-	StartUnix    int64  `json:"start_unix"`
-	EndUnix      int64  `json:"end_unix"`
-	DurationSecs int64  `json:"duration_secs"`
-	Accepting    bool   `json:"accepting"`
-	LastResult   string `json:"last_result"`
-	PeerState    string `json:"peer_state"`
-	PeerError    string `json:"peer_error"`
+	Healthy                bool   `json:"healthy"`
+	IsLeader               bool   `json:"is_leader"`
+	ServerIndex            int    `json:"server_index"`
+	ShardID                int    `json:"shard_id"`
+	EpochID                int64  `json:"epoch_id"`
+	State                  string `json:"state"`
+	StartUnix              int64  `json:"start_unix"`
+	EndUnix                int64  `json:"end_unix"`
+	DurationSecs           int64  `json:"duration_secs"`
+	Accepting              bool   `json:"accepting"`
+	LastResult             string `json:"last_result"`
+	PeerState              string `json:"peer_state"`
+	PeerError              string `json:"peer_error"`
+	IngestionQueueBackend  string `json:"ingestion_queue_backend"`
+	IngestionQueueDepth    int    `json:"ingestion_queue_depth"`
+	IngestionInflightCount int    `json:"ingestion_inflight_count"`
 }
 
 type CoordinatorStatusArgs struct {
@@ -467,6 +470,13 @@ type abortEpochCommand struct {
 	reply   chan error
 }
 
+type ingestionQueueDrainedCommand struct {
+	reply chan struct{}
+}
+
+type processCompletedUploadFunc func(CompletedUploadMessage) (bool, error)
+type commitCompletedUploadFunc func(int64, bool) error
+
 type Server struct {
 	ServerIdx   int
 	ShardID     int
@@ -480,7 +490,6 @@ type Server struct {
 	incoming1 chan bool
 	incoming2 chan bool
 	incoming3 chan bool
-	ready     chan int64
 
 	pending      map[int64](*InsertQueryTuple)
 	pendingMutex sync.RWMutex
@@ -499,6 +508,11 @@ type Server struct {
 	globalRowStart int
 	controlCh      chan leaderControlCommand
 	mergeFn        func() (string, error)
+
+	ingestionQueue        completedUploadQueue
+	ingestionQueueBackend string
+	processUploadFn       processCompletedUploadFunc
+	commitUploadFn        commitCompletedUploadFunc
 }
 
 func init() {

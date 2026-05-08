@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,7 +17,6 @@ func newTestLeaderServer() *Server {
 	s.incoming1 = make(chan bool, 1)
 	s.incoming2 = make(chan bool, 1)
 	s.incoming3 = make(chan bool, 1)
-	s.ready = make(chan int64, 4)
 	s.incoming1 <- true
 	s.incoming2 <- true
 	s.incoming3 <- true
@@ -45,6 +45,29 @@ func waitForEpochState(t *testing.T, s *Server, want DbState) {
 			}
 		}
 	}
+}
+
+func receiveQueuedIngestion(t *testing.T, s *Server) QueuedCompletedUploadMessage {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	items, err := s.ingestionQueue.Receive(ctx, 1)
+	if err != nil {
+		t.Fatalf("receive ingestion item failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one ingestion item, got %d", len(items))
+	}
+	return items[0]
+}
+
+func ackQueuedIngestion(t *testing.T, s *Server) {
+	t.Helper()
+	item := receiveQueuedIngestion(t, s)
+	if err := s.ingestionQueue.Ack(context.Background(), item.ReceiptHandle); err != nil {
+		t.Fatalf("ack ingestion item failed: %v", err)
+	}
+	s.notifyIngestionQueueDrained()
 }
 
 func TestUploadRejectedWithoutActiveEpoch(t *testing.T) {
@@ -403,7 +426,7 @@ func TestFinishEpochRejectsWhenPeerConnectionsNotReady(t *testing.T) {
 	}
 }
 
-func TestUploadSessionAssemblyAndReadyQueue(t *testing.T) {
+func TestUpload3EnqueuesCompletedUploadJob(t *testing.T) {
 	s := newTestLeaderServer()
 
 	var startReply StartEpochReply
@@ -413,7 +436,8 @@ func TestUploadSessionAssemblyAndReadyQueue(t *testing.T) {
 	defer s.stopEpochTimer()
 
 	var up1Reply UploadReply1
-	if err := s.Upload1(&UploadArgs1{}, &up1Reply); err != nil {
+	up1Args := &UploadArgs1{RouteRow: 7}
+	if err := s.Upload1(up1Args, &up1Reply); err != nil {
 		t.Fatalf("upload1 failed: %v", err)
 	}
 
@@ -429,32 +453,34 @@ func TestUploadSessionAssemblyAndReadyQueue(t *testing.T) {
 		t.Fatalf("upload3 failed: %v", err)
 	}
 
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 1 || stats.Inflight != 0 {
+		t.Fatalf("expected one queued ingestion item, got %+v", stats)
+	}
+
 	replyCh := make(chan takeAcceptedSessionResult, 1)
 	s.controlCh <- takeAcceptedSessionCommand{uuid: up1Reply.Uuid, reply: replyCh}
 	session := <-replyCh
-	if !session.ok || session.session == nil {
-		t.Fatalf("expected accepted session for uuid %d", up1Reply.Uuid)
-	}
-	if session.session.args1 == nil || session.session.args2 == nil || session.session.args3 == nil {
-		t.Fatalf("expected all upload stages to be present, got %+v", session.session)
-	}
-	if session.session.args2.Uuid != up1Reply.Uuid || session.session.args3.Uuid != up1Reply.Uuid {
-		t.Fatalf("expected consistent uuids in session, got %+v", session.session)
+	if session.ok || session.session != nil {
+		t.Fatalf("expected accepted session to be removed after enqueue, got %+v", session.session)
 	}
 
-	select {
-	case queued := <-s.ready:
-		if queued != up1Reply.Uuid {
-			t.Fatalf("expected queued uuid %d, got %d", up1Reply.Uuid, queued)
-		}
-	default:
-		t.Fatal("expected upload3 to enqueue one request")
+	item := receiveQueuedIngestion(t, s)
+	msg := item.Message
+	if msg.EpochID != startReply.EpochID || msg.ShardID != s.ShardID || msg.Uuid != up1Reply.Uuid {
+		t.Fatalf("unexpected ingestion identity: %+v", msg)
 	}
-
-	select {
-	case queued := <-s.ready:
-		t.Fatalf("expected only one queued request, got extra uuid %d", queued)
-	default:
+	if msg.HashKey != up1Reply.HashKey || msg.Challenge != up2Reply.Challenge {
+		t.Fatalf("unexpected ingestion session material")
+	}
+	if msg.LocalRow != 7 || msg.GlobalRow != s.globalRowStart+7 || msg.Args1.RouteRow != 7 {
+		t.Fatalf("unexpected ingestion row data: %+v", msg)
+	}
+	if msg.Args2.Uuid != up1Reply.Uuid || msg.Args3.Uuid != up1Reply.Uuid {
+		t.Fatalf("expected consistent uuids in queued upload, got %+v", msg)
+	}
+	if err := s.ingestionQueue.Ack(context.Background(), item.ReceiptHandle); err != nil {
+		t.Fatalf("ack queued ingestion failed: %v", err)
 	}
 }
 
@@ -496,11 +522,7 @@ func TestClosingRejectsUpload1ButAllowsAdmittedUploadToFinish(t *testing.T) {
 		t.Fatalf("upload3 for admitted uuid failed during closing: %v", err)
 	}
 
-	replyCh := make(chan takeAcceptedSessionResult, 1)
-	s.controlCh <- takeAcceptedSessionCommand{uuid: admitted.Uuid, reply: replyCh}
-	if session := <-replyCh; !session.ok || session.session == nil {
-		t.Fatalf("expected admitted session to drain")
-	}
+	ackQueuedIngestion(t, s)
 
 	select {
 	case err := <-finishDone:
@@ -552,9 +574,7 @@ func TestClosingDoesNotMergeBeforeAdmittedUploadsDrain(t *testing.T) {
 	if err := s.Upload3(&UploadArgs3{Uuid: admitted.Uuid, HashKey: admitted.HashKey}, &UploadReply3{}); err != nil {
 		t.Fatalf("upload3 failed: %v", err)
 	}
-	replyCh := make(chan takeAcceptedSessionResult, 1)
-	s.controlCh <- takeAcceptedSessionCommand{uuid: admitted.Uuid, reply: replyCh}
-	<-replyCh
+	ackQueuedIngestion(t, s)
 
 	select {
 	case err := <-finishDone:
@@ -566,10 +586,8 @@ func TestClosingDoesNotMergeBeforeAdmittedUploadsDrain(t *testing.T) {
 	}
 }
 
-func TestUpload3ReadyQueueFullReturnsOverload(t *testing.T) {
+func TestUpload3MemoryQueueReportsBacklogInsteadOfOverload(t *testing.T) {
 	s := newTestLeaderServer()
-	s.ready = make(chan int64, 1)
-	s.ready <- 99
 
 	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &StartEpochReply{}); err != nil {
 		t.Fatalf("start epoch failed: %v", err)
@@ -584,8 +602,16 @@ func TestUpload3ReadyQueueFullReturnsOverload(t *testing.T) {
 		t.Fatalf("upload2 failed: %v", err)
 	}
 	err := s.Upload3(&UploadArgs3{Uuid: up1.Uuid, HashKey: up1.HashKey}, &UploadReply3{})
-	if err == nil || err.Error() != "server overloaded: ready queue full" {
-		t.Fatalf("expected ready queue overload, got %v", err)
+	if err != nil {
+		t.Fatalf("upload3 should enqueue into memory ingestion queue, got %v", err)
+	}
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionQueueBackend != memoryIngestionQueueBackend || status.IngestionQueueDepth != 1 || status.IngestionInflightCount != 0 {
+		t.Fatalf("unexpected ingestion status: %+v", status)
 	}
 
 	statusCh := make(chan error, 1)
@@ -598,7 +624,56 @@ func TestUpload3ReadyQueueFullReturnsOverload(t *testing.T) {
 			t.Fatalf("status failed after overload: %v", err)
 		}
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("leader control actor blocked after ready queue overload")
+		t.Fatal("leader control actor blocked after ingestion enqueue")
+	}
+}
+
+func TestIngestionWorkerAcksAfterSuccessfulProcessing(t *testing.T) {
+	s := newTestLeaderServer()
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		if msg.Uuid != 7 {
+			t.Fatalf("unexpected uuid %d", msg.Uuid)
+		}
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		if uuid != 7 || !shouldCommit {
+			t.Fatalf("unexpected commit uuid=%d shouldCommit=%t", uuid, shouldCommit)
+		}
+		return nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, Uuid: 7}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 0 {
+		t.Fatalf("expected successful processing to ack queue item, got %+v", stats)
+	}
+}
+
+func TestIngestionWorkerLeavesFailedProcessingUnacked(t *testing.T) {
+	s := newTestLeaderServer()
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		return false, errors.New("prepare failed")
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		t.Fatal("commit should not run after prepare failure")
+		return nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, Uuid: 8}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 1 {
+		t.Fatalf("expected failed processing to leave item in flight, got %+v", stats)
 	}
 }
 

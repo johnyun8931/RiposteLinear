@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -39,7 +40,7 @@ func (t *Server) runLeaderControl() {
 	}
 
 	startMergeIfDrained := func() {
-		if state.epoch.State != EpochStateClosing || len(state.accepted) != 0 {
+		if state.epoch.State != EpochStateClosing || len(state.accepted) != 0 || !t.ingestionQueueDrained() {
 			return
 		}
 		state.epoch.State = EpochStateMerging
@@ -179,25 +180,18 @@ func (t *Server) runLeaderControl() {
 				c.reply <- upload3Result{err: errors.New("Bogus UUID")}
 				continue
 			}
-			data.args3 = c.args
-			if t.ready != nil {
-				select {
-				case t.ready <- c.args.Uuid:
-				default:
-					log.Printf(
-						"Ready queue overload epoch=%d state=%s ready_len=%d ready_cap=%d accepted=%d",
-						state.epoch.ID,
-						state.epoch.State.String(),
-						len(t.ready),
-						cap(t.ready),
-						len(state.accepted),
-					)
-					delete(state.accepted, c.args.Uuid)
-					startMergeIfDrained()
-					c.reply <- upload3Result{err: errors.New("server overloaded: ready queue full")}
-					continue
-				}
+			if data.args1 == nil || data.args2 == nil {
+				c.reply <- upload3Result{err: errors.New("Incomplete upload session")}
+				continue
 			}
+			data.args3 = c.args
+			msg := t.completedUploadMessageFromSession(state.epoch, c.args.Uuid, data)
+			if _, err := t.ingestionQueue.Enqueue(context.Background(), msg); err != nil {
+				c.reply <- upload3Result{err: err}
+				continue
+			}
+			delete(state.accepted, c.args.Uuid)
+			startMergeIfDrained()
 			c.reply <- upload3Result{}
 		case beginEpochMergeCommand:
 			if state.epoch.State != EpochStateActive {
@@ -244,6 +238,9 @@ func (t *Server) runLeaderControl() {
 			}
 			c.reply <- takeAcceptedSessionResult{session: session, ok: ok}
 			startMergeIfDrained()
+		case ingestionQueueDrainedCommand:
+			startMergeIfDrained()
+			c.reply <- struct{}{}
 		case stopEpochTimerCommand:
 			if state.epochTimer != nil {
 				state.epochTimer.Stop()
@@ -372,53 +369,97 @@ func (t *Server) requirePeerRPCClients(op string) ([NUM_SERVERS]*rpc.Client, err
 	return clients, nil
 }
 
-// Do everything
-func (t *Server) processRequest() {
-	for {
-		uuid := <-t.ready
-		t.amPublishingMutex.RLock()
-
-		t.clientsServedMutex.Lock()
-		t.clientsServed += 1
-		t.clientsServedMutex.Unlock()
-
-		shouldCommit, err := t.submitPrepares(uuid)
-		if err != nil {
-			log.Printf("Error preparing uuid %d: %v", uuid, err)
-			t.amPublishingMutex.RUnlock()
-			continue
-		}
-		if err := t.submitCommits(uuid, shouldCommit); err != nil {
-			log.Printf("Error committing uuid %d: %v", uuid, err)
-		}
-
-		t.amPublishingMutex.RUnlock()
+func (t *Server) completedUploadMessageFromSession(epoch EpochMeta, uuid int64, tup *AcceptQueryTuple) CompletedUploadMessage {
+	return CompletedUploadMessage{
+		EpochID:   epoch.ID,
+		ShardID:   t.ShardID,
+		Uuid:      uuid,
+		HashKey:   tup.hashKey,
+		Challenge: tup.challenge,
+		GlobalRow: t.globalRowStart + tup.args1.RouteRow,
+		LocalRow:  tup.args1.RouteRow,
+		Args1:     *tup.args1,
+		Args2:     *tup.args2,
+		Args3:     *tup.args3,
 	}
 }
 
-func (t *Server) submitPrepares(uuid int64) (bool, error) {
+func (t *Server) ingestionQueueStats() IngestionQueueStats {
+	if t.ingestionQueue == nil {
+		return IngestionQueueStats{}
+	}
+	return t.ingestionQueue.Stats()
+}
+
+func (t *Server) ingestionQueueDrained() bool {
+	stats := t.ingestionQueueStats()
+	return stats.Depth == 0 && stats.Inflight == 0
+}
+
+func (t *Server) notifyIngestionQueueDrained() {
+	if !t.isLeader() || t.controlCh == nil {
+		return
+	}
+	replyCh := make(chan struct{}, 1)
+	t.controlCh <- ingestionQueueDrainedCommand{reply: replyCh}
+	<-replyCh
+}
+
+// Do everything
+func (t *Server) processRequest() {
+	for {
+		items, err := t.ingestionQueue.Receive(context.Background(), 1)
+		if err != nil {
+			log.Printf("Error receiving ingestion work: %v", err)
+			continue
+		}
+		for _, item := range items {
+			t.processIngestionJob(item)
+		}
+	}
+}
+
+func (t *Server) processIngestionJob(item QueuedCompletedUploadMessage) {
+	msg := item.Message
+	t.amPublishingMutex.RLock()
+	defer t.amPublishingMutex.RUnlock()
+
+	t.clientsServedMutex.Lock()
+	t.clientsServed += 1
+	t.clientsServedMutex.Unlock()
+
+	shouldCommit, err := t.processUploadFn(msg)
+	if err != nil {
+		log.Printf("Error preparing uuid %d: %v", msg.Uuid, err)
+		return
+	}
+	if err := t.commitUploadFn(msg.Uuid, shouldCommit); err != nil {
+		log.Printf("Error committing uuid %d: %v", msg.Uuid, err)
+		return
+	}
+	if err := t.ingestionQueue.Ack(context.Background(), item.ReceiptHandle); err != nil {
+		log.Printf("Error acking ingestion uuid %d: %v", msg.Uuid, err)
+		return
+	}
+	t.notifyIngestionQueueDrained()
+}
+
+func (t *Server) submitPrepares(msg CompletedUploadMessage) (bool, error) {
 	clients, err := t.requirePeerRPCClients("prepare")
 	if err != nil {
 		return false, err
 	}
 	var preps [NUM_SERVERS]PrepareArgs
-	replyCh := make(chan takeAcceptedSessionResult, 1)
-	t.controlCh <- takeAcceptedSessionCommand{uuid: uuid, reply: replyCh}
-	sessionRes := <-replyCh
-	if !sessionRes.ok || sessionRes.session == nil {
-		return false, fmt.Errorf("missing accepted session for uuid %d", uuid)
-	}
-	tup := sessionRes.session
 
 	randPt := utils.RandInt(IntModulus)
 	for i := 0; i < NUM_SERVERS; i++ {
-		preps[i].Uuid = uuid
+		preps[i].Uuid = msg.Uuid
 		preps[i].RandomPoint = randPt
-		copy(preps[i].HashKey[:], tup.hashKey[:])
-		copy(preps[i].Challenge[:], tup.challenge[:])
-		preps[i].Query1 = tup.args1.Query[i]
-		preps[i].Query2 = tup.args2.Query[i]
-		preps[i].Query3 = tup.args3.Query[i]
+		copy(preps[i].HashKey[:], msg.HashKey[:])
+		copy(preps[i].Challenge[:], msg.Challenge[:])
+		preps[i].Query1 = msg.Args1.Query[i]
+		preps[i].Query2 = msg.Args2.Query[i]
+		preps[i].Query3 = msg.Args3.Query[i]
 	}
 
 	//log.Printf("Send PREPARE %d", uuid)
@@ -740,6 +781,10 @@ func (t *Server) Status(_ *StatusArgs, reply *StatusReply) error {
 	reply.IsLeader = t.isLeader()
 	reply.ServerIndex = t.ServerIdx
 	reply.ShardID = t.ShardID
+	reply.IngestionQueueBackend = t.ingestionQueueBackend
+	stats := t.ingestionQueueStats()
+	reply.IngestionQueueDepth = stats.Depth
+	reply.IngestionInflightCount = stats.Inflight
 	if !t.isLeader() {
 		reply.State = EpochStateNoActive.String()
 		reply.PeerState = "not_applicable"
@@ -854,7 +899,9 @@ func (t *Server) Initialize(*int, *int) error {
 		t.incoming1 = make(chan bool, READY_BUFFER_SIZE)
 		t.incoming2 = make(chan bool, READY_BUFFER_SIZE)
 		t.incoming3 = make(chan bool, READY_BUFFER_SIZE)
-		t.ready = make(chan int64, READY_BUFFER_SIZE)
+		if t.ingestionQueue == nil {
+			t.SetIngestionQueueBackend(memoryIngestionQueueBackend)
+		}
 		go t.printStats()
 
 		for i := 0; i < WORKER_THREADS; i++ {
@@ -924,12 +971,26 @@ func NewServer(serverIdx int, serverAddrs []string) *Server {
 	t.mergeFn = func() (string, error) {
 		return t.sendMergeRequest()
 	}
+	t.SetIngestionQueueBackend(memoryIngestionQueueBackend)
+	t.processUploadFn = t.submitPrepares
+	t.commitUploadFn = t.submitCommits
 	if t.isLeader() {
 		t.controlCh = make(chan leaderControlCommand, READY_BUFFER_SIZE)
 		go t.runLeaderControl()
 	}
 
 	return t
+}
+
+func (t *Server) SetIngestionQueueBackend(backend string) error {
+	switch backend {
+	case "", memoryIngestionQueueBackend:
+		t.ingestionQueue = newMemoryCompletedUploadQueue()
+		t.ingestionQueueBackend = memoryIngestionQueueBackend
+		return nil
+	default:
+		return fmt.Errorf("unsupported ingestion queue backend %q", backend)
+	}
 }
 
 func (t *Server) DoNothing(args *int, reply *int) error {
