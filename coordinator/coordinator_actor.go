@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -152,7 +151,7 @@ func (c *Coordinator) upload1Decision() upload1Decision {
 		decision.epoch = c.epoch
 		decision.controlStore = c.controlStore
 		if c.epoch.State != db.EpochStateActive {
-			decision.err = errors.New("No active epoch")
+			decision.err = errCoordinatorNoActiveEpoch
 		}
 	})
 	return decision
@@ -186,7 +185,7 @@ func (c *Coordinator) startEpochDecision(args *db.StartEpochArgs) startEpochDeci
 	var decision startEpochDecision
 	c.actorCall(func() {
 		if c.epoch.State == db.EpochStateActive {
-			decision.err = errors.New("An epoch is already in progress")
+			decision.err = errCoordinatorEpochAlreadyActive
 			return
 		}
 		decision.nextEpochID = c.epoch.ID + 1

@@ -473,14 +473,14 @@ func (c *Coordinator) cachedOrStoredSession(globalUUID int64) (SessionRecord, er
 func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
 	decision := c.upload1Decision()
 	if decision.err != nil {
-		return decision.err
+		return coordinatorWireError(decision.err)
 	}
 	if err := c.requireCoordinatorLease(); err != nil {
-		return errors.New("No active epoch")
+		return coordinatorWireError(errCoordinatorNoActiveEpoch)
 	}
 	accepting, err := decision.controlStore.Accepting(decision.epoch.ID)
 	if err != nil || !accepting {
-		return errors.New("No active epoch")
+		return coordinatorWireError(errCoordinatorNoActiveEpoch)
 	}
 
 	shard, err := c.routeShard(args.RouteRow)
@@ -530,7 +530,7 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 		break
 	}
 	if !persisted {
-		return errors.New("could not allocate unique coordinator session")
+		return coordinatorWireError(errCoordinatorSessionAllocation)
 	}
 
 	localArgs.UseAssignedSession = true
@@ -548,7 +548,7 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 		if deleteErr := c.sessionStore.DeleteSession(context.Background(), session.GlobalUUID); deleteErr != nil && !errors.Is(deleteErr, errSessionMissing) {
 			log.Printf("Delete persisted session %d after mismatched shard Upload1 reply failed: %v", session.GlobalUUID, deleteErr)
 		}
-		return errors.New("shard returned mismatched assigned session")
+		return coordinatorWireError(errCoordinatorAssignedSessionFailed)
 	}
 
 	c.cacheSession(session)
@@ -559,11 +559,11 @@ func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) erro
 
 func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) error {
 	if err := c.requireCoordinatorLease(); err != nil {
-		return errors.New("No active epoch")
+		return coordinatorWireError(errCoordinatorNoActiveEpoch)
 	}
 	session, err := c.cachedOrStoredSession(args.Uuid)
 	if err != nil || session.HashKey != args.HashKey {
-		return errors.New("Bogus UUID")
+		return coordinatorWireError(errCoordinatorBogusUUID)
 	}
 
 	client := c.clients[session.ShardID]
@@ -577,11 +577,11 @@ func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) erro
 
 func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error {
 	if err := c.requireCoordinatorLease(); err != nil {
-		return errors.New("No active epoch")
+		return coordinatorWireError(errCoordinatorNoActiveEpoch)
 	}
 	session, err := c.cachedOrStoredSession(args.Uuid)
 	if err != nil || session.HashKey != args.HashKey {
-		return errors.New("Bogus UUID")
+		return coordinatorWireError(errCoordinatorBogusUUID)
 	}
 
 	client := c.clients[session.ShardID]
@@ -612,7 +612,7 @@ func sameEpochReply(expected db.StartEpochReply, actual db.StartEpochReply) bool
 
 func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochReply) error {
 	if args.DurationSeconds <= 0 {
-		return errors.New("Epoch duration must be positive")
+		return coordinatorWireError(errCoordinatorInvalidEpochDuration)
 	}
 	if err := c.requireCoordinatorLease(); err != nil {
 		return err
@@ -620,7 +620,7 @@ func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochRe
 
 	decision := c.startEpochDecision(args)
 	if decision.err != nil {
-		return decision.err
+		return coordinatorWireError(decision.err)
 	}
 
 	startArgs := db.StartEpochArgs{
