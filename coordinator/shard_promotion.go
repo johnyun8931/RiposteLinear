@@ -39,17 +39,9 @@ func (c *Coordinator) PromoteShardStandby(args *db.PromoteShardStandbyArgs, repl
 		return fmt.Errorf("%s: %s", evaluation.status, evaluation.reason)
 	}
 
-	newClient, err := c.shardLeaderDialer(evaluation.promotedShard.Active.LeaderAddr)
-	if err != nil {
-		return fmt.Errorf("connect promoted shard %d leader %s: %w", evaluation.promotedShard.ID, evaluation.promotedShard.Active.LeaderAddr, err)
-	}
-	if err := c.controlStore.PutShardConfig(evaluation.proposed); err != nil {
-		if closer, ok := newClient.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
+	if err := c.applyShardStandbyPromotion(evaluation); err != nil {
 		return err
 	}
-	c.replaceActiveShardClientWith(evaluation.promotedShard, newClient)
 	populatePromoteShardStandbyReply(reply, evaluation, true)
 	return nil
 }
@@ -110,6 +102,22 @@ func (c *Coordinator) evaluateShardStandbyPromotion(shardID int, force bool) (sh
 		}
 	}
 
+	return promotedShardEvaluation(current, index, shardPromotionStatusPromoted, "standby promoted to active shard pair")
+}
+
+func promotedShardEvaluation(current ShardConfigRecord, index int, status string, reason string) (shardPromotionEvaluation, error) {
+	if index < 0 || index >= len(current.Shards) {
+		return shardPromotionEvaluation{}, fmt.Errorf("shard index %d out of range", index)
+	}
+	shard := current.Shards[index]
+	if shard.Standby == nil {
+		return shardPromotionEvaluation{
+			current: current,
+			shard:   shard,
+			status:  standbyPromotionStatusMissingStandby,
+			reason:  "shard has no configured standby pair",
+		}, nil
+	}
 	promoted := shard
 	oldActive := shard.Active
 	promoted.Active = *shard.Standby
@@ -121,13 +129,30 @@ func (c *Coordinator) evaluateShardStandbyPromotion(shardID int, force bool) (sh
 	if err := validateShardConfigRecord(proposed); err != nil {
 		return shardPromotionEvaluation{}, err
 	}
+	return shardPromotionEvaluation{
+		current:       current,
+		proposed:      proposed,
+		shard:         shard,
+		promotedShard: promoted,
+		status:        status,
+		reason:        reason,
+		allowed:       true,
+	}, nil
+}
 
-	evaluation.proposed = proposed
-	evaluation.promotedShard = promoted
-	evaluation.status = shardPromotionStatusPromoted
-	evaluation.reason = "standby promoted to active shard pair"
-	evaluation.allowed = true
-	return evaluation, nil
+func (c *Coordinator) applyShardStandbyPromotion(evaluation shardPromotionEvaluation) error {
+	newClient, err := c.shardLeaderDialer(evaluation.promotedShard.Active.LeaderAddr)
+	if err != nil {
+		return fmt.Errorf("connect promoted shard %d leader %s: %w", evaluation.promotedShard.ID, evaluation.promotedShard.Active.LeaderAddr, err)
+	}
+	if err := c.controlStore.PutShardConfig(evaluation.proposed); err != nil {
+		if closer, ok := newClient.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		return err
+	}
+	c.replaceActiveShardClientWith(evaluation.promotedShard, newClient)
+	return nil
 }
 
 func forcedStandbyPromotionReadiness(entry db.CoordinatorShardStatus) (string, string, bool) {

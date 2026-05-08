@@ -289,6 +289,10 @@ type CoordinatorShardStatus struct {
 	StandbyCompletedUploadCommittedCount int64       `json:"standby_completed_upload_committed_count"`
 	StandbyIngestionQueueDepth           int         `json:"standby_ingestion_queue_depth"`
 	StandbyIngestionInflightCount        int         `json:"standby_ingestion_inflight_count"`
+	AutoPromotionFailureCount            int         `json:"auto_promotion_failure_count"`
+	AutoPromotionEligible                bool        `json:"auto_promotion_eligible"`
+	AutoPromotionStatus                  string      `json:"auto_promotion_status"`
+	AutoPromotionReason                  string      `json:"auto_promotion_reason"`
 }
 
 type CoordinatorStatusReply struct {

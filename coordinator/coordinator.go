@@ -87,6 +87,8 @@ func (r *rpcShardClient) Close() error {
 const (
 	defaultShardStatusTimeout            = 2 * time.Second
 	defaultShardHealthInterval           = 5 * time.Second
+	defaultAutoPromotionCooldown         = 60 * time.Second
+	defaultAutoPromotionFailureThreshold = 3
 	defaultCoordinatorLeaseHolder        = "standalone"
 	defaultCoordinatorLeaseTTL           = 30 * time.Second
 	defaultCoordinatorLeaseRenewInterval = 10 * time.Second
@@ -120,6 +122,10 @@ type Coordinator struct {
 	healthTimeout       time.Duration
 	healthStopCh        chan struct{}
 	healthDoneCh        chan struct{}
+	autoPromotion       autoPromotionConfig
+	autoPromotionState  map[int]autoPromotionShardState
+	autoPromotionStopCh chan struct{}
+	autoPromotionDoneCh chan struct{}
 	shardLeaderDialer   func(addr string) (shardClient, error)
 	standbyLeaderDialer func(addr string, timeout time.Duration) (closeableStatusClient, error)
 
@@ -396,6 +402,7 @@ func newCoordinatorWithStandbyScalingAndSeedConfig(
 		healthTimeout:       defaultShardStatusTimeout,
 		healthStopCh:        make(chan struct{}),
 		healthDoneCh:        make(chan struct{}),
+		autoPromotionState:  make(map[int]autoPromotionShardState, len(validated)),
 		shardLeaderDialer:   dialShardLeader,
 		standbyLeaderDialer: dialStandbyShardLeader,
 		scalingConfig:       resolvedScalingConfig,
@@ -423,10 +430,14 @@ func (c *Coordinator) Close() {
 	doneCh := c.leaseDoneCh
 	healthStopCh := c.healthStopCh
 	healthDoneCh := c.healthDoneCh
+	autoPromotionStopCh := c.autoPromotionStopCh
+	autoPromotionDoneCh := c.autoPromotionDoneCh
 	c.leaseStopCh = nil
 	c.leaseDoneCh = nil
 	c.healthStopCh = nil
 	c.healthDoneCh = nil
+	c.autoPromotionStopCh = nil
+	c.autoPromotionDoneCh = nil
 	c.mu.Unlock()
 
 	if stopCh != nil {
@@ -436,6 +447,10 @@ func (c *Coordinator) Close() {
 	if healthStopCh != nil {
 		close(healthStopCh)
 		<-healthDoneCh
+	}
+	if autoPromotionStopCh != nil {
+		close(autoPromotionStopCh)
+		<-autoPromotionDoneCh
 	}
 	if actor != nil {
 		actor.call(func() {
@@ -1033,6 +1048,7 @@ func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.Coordinat
 		entry.StandbyStatusError = shardHealth.Standby.Error
 		entry.StandbyLastChecked = lastCheckedUnix(shardHealth.Standby.CheckedAt)
 		populateStandbyPromotionReadiness(&entry)
+		populateAutoPromotionStatus(&entry, snapshot.autoPromotion[shard.ID])
 		entry.Reachable = entry.ActiveReachable
 		entry.Status = entry.ActiveStatus
 		entry.StatusError = entry.ActiveStatusError

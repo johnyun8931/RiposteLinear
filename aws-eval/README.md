@@ -401,6 +401,20 @@ to become promotable, stops the active shard 0 leader, force-promotes shard 0's
 standby pair, starts a second epoch, and verifies row `0` lands in the promoted
 standby result path.
 
+To validate opt-in automatic hot standby shard promotion:
+
+```bash
+CONTROL_STORE_BACKEND=dynamodb SESSION_STORE_BACKEND=dynamodb \
+INGESTION_QUEUE_BACKEND=sqs COMPLETED_UPLOAD_LEDGER_BACKEND=dynamodb \
+HOT_STANDBY_INGESTION=1 ./aws-eval/12-validate-auto-hot-standby-promotion.sh
+```
+
+This follows the same topology as the manual promotion validation, but starts
+the coordinator with `-auto-promote-shard-standby`. After shard 0's active
+leader is stopped, the script waits for the coordinator to promote the standby
+through the control-store shard config, then verifies the next epoch routes row
+`0` to the auto-promoted standby result path.
+
 To validate the in-cloud autoscaler-driven apply path instead of direct local
 admin apply:
 

@@ -2001,6 +2001,206 @@ func TestPromoteShardStandbyForceAllowsActiveUnreachable(t *testing.T) {
 	}
 }
 
+func TestAutoPromotionDisabledByDefault(t *testing.T) {
+	active := &fakeShardClient{statusErr: errors.New("active down")}
+	standby := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaStandby}}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	coord.standbyLeaderDialer = func(addr string, timeout time.Duration) (closeableStatusClient, error) {
+		return standby, nil
+	}
+
+	coord.runAutoPromotionCheck()
+
+	config, ok, err := coord.controlStore.GetShardConfig()
+	if err != nil || !ok {
+		t.Fatalf("GetShardConfig failed: ok=%t err=%v", ok, err)
+	}
+	if config.Version != 1 || config.Shards[0].Active.LeaderAddr != "127.0.0.1:8000" {
+		t.Fatalf("auto promotion should be disabled by default, got %+v", config)
+	}
+
+	var status db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &status); err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.Shards[0].AutoPromotionStatus != autoPromotionStatusDisabled {
+		t.Fatalf("expected disabled auto-promotion status, got %+v", status.Shards[0])
+	}
+}
+
+func TestAutoPromotionWaitsForConsecutiveFailuresThenPromotes(t *testing.T) {
+	active := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaActive, CompletedUploadCommittedCount: 2}}
+	standby := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaStandby, CompletedUploadCommittedCount: 2}}
+	promoted := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaStandby}}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	if err := coord.configureAutoPromotion(autoPromotionConfig{
+		Enabled:          true,
+		CheckInterval:    time.Second,
+		FailureThreshold: 2,
+		Cooldown:         time.Minute,
+	}); err != nil {
+		t.Fatalf("configureAutoPromotion failed: %v", err)
+	}
+	coord.standbyLeaderDialer = func(addr string, timeout time.Duration) (closeableStatusClient, error) {
+		return standby, nil
+	}
+	coord.shardLeaderDialer = func(addr string) (shardClient, error) {
+		if addr != "127.0.0.1:9000" {
+			t.Fatalf("unexpected promoted address %s", addr)
+		}
+		return promoted, nil
+	}
+
+	coord.runAutoPromotionCheck()
+	active.statusErr = errors.New("active down")
+	coord.runAutoPromotionCheck()
+	config, _, _ := coord.controlStore.GetShardConfig()
+	if config.Version != 1 {
+		t.Fatalf("expected first failed check below threshold to avoid promotion, got %+v", config)
+	}
+	var status db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &status); err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.Shards[0].AutoPromotionFailureCount != 1 || status.Shards[0].AutoPromotionStatus != autoPromotionStatusWaitingFailureThreshold {
+		t.Fatalf("expected waiting threshold status, got %+v", status.Shards[0])
+	}
+
+	coord.runAutoPromotionCheck()
+	config, _, _ = coord.controlStore.GetShardConfig()
+	if config.Version != 2 || config.Shards[0].Active.LeaderAddr != "127.0.0.1:9000" {
+		t.Fatalf("expected auto-promotion to swap config, got %+v", config)
+	}
+	if coord.clients[0] != promoted {
+		t.Fatalf("expected promoted client to replace active client")
+	}
+}
+
+func TestAutoPromotionRequiresStandbyCaughtUpToLastActiveStatus(t *testing.T) {
+	active := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaActive, CompletedUploadCommittedCount: 3}}
+	standby := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaStandby, CompletedUploadCommittedCount: 2}}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	if err := coord.configureAutoPromotion(autoPromotionConfig{
+		Enabled:          true,
+		CheckInterval:    time.Second,
+		FailureThreshold: 1,
+		Cooldown:         time.Minute,
+	}); err != nil {
+		t.Fatalf("configureAutoPromotion failed: %v", err)
+	}
+	coord.standbyLeaderDialer = func(addr string, timeout time.Duration) (closeableStatusClient, error) {
+		return standby, nil
+	}
+
+	coord.runAutoPromotionCheck()
+	active.statusErr = errors.New("active down")
+	coord.runAutoPromotionCheck()
+
+	config, _, _ := coord.controlStore.GetShardConfig()
+	if config.Version != 1 {
+		t.Fatalf("standby behind should block auto-promotion, got %+v", config)
+	}
+	var status db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &status); err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.Shards[0].AutoPromotionStatus != standbyPromotionStatusStandbyBehind {
+		t.Fatalf("expected standby_behind status, got %+v", status.Shards[0])
+	}
+}
+
+func TestAutoPromotionCooldownBlocksRepeatedPromotion(t *testing.T) {
+	active := &fakeShardClient{statusErr: errors.New("active down")}
+	standby := &fakeShardClient{statusReply: db.StatusReply{Healthy: true, ReplicaID: db.CompletedUploadReplicaStandby, CompletedUploadCommittedCount: 2}}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+	if err := coord.configureAutoPromotion(autoPromotionConfig{
+		Enabled:          true,
+		CheckInterval:    time.Second,
+		FailureThreshold: 1,
+		Cooldown:         time.Minute,
+	}); err != nil {
+		t.Fatalf("configureAutoPromotion failed: %v", err)
+	}
+	coord.standbyLeaderDialer = func(addr string, timeout time.Duration) (closeableStatusClient, error) {
+		return standby, nil
+	}
+	coord.actorCall(func() {
+		coord.autoPromotionState[0] = autoPromotionShardState{
+			LastReachableActive:    db.StatusReply{CompletedUploadCommittedCount: 2},
+			HasLastReachableActive: true,
+			LastPromotionAt:        time.Now().UTC(),
+		}
+	})
+
+	coord.runAutoPromotionCheck()
+
+	config, _, _ := coord.controlStore.GetShardConfig()
+	if config.Version != 1 {
+		t.Fatalf("cooldown should block auto-promotion, got %+v", config)
+	}
+	var status db.CoordinatorStatusReply
+	if err := coord.Status(&db.CoordinatorStatusArgs{}, &status); err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.Shards[0].AutoPromotionStatus != autoPromotionStatusCooldown {
+		t.Fatalf("expected cooldown status, got %+v", status.Shards[0])
+	}
+}
+
+func TestAutoPromotionRequiresCoordinatorLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := mustCoordinatorWithLease(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	passive := mustStandbyCoordinator(t, []ShardConfig{
+		activeStandbyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{statusErr: errors.New("active down")}}, store, "coord-b", testLeaseTTL, testLeaseRenewInterval)
+	_ = active
+	if err := passive.configureAutoPromotion(autoPromotionConfig{
+		Enabled:          true,
+		CheckInterval:    time.Second,
+		FailureThreshold: 1,
+		Cooldown:         time.Minute,
+	}); err != nil {
+		t.Fatalf("configureAutoPromotion failed: %v", err)
+	}
+
+	passive.runAutoPromotionCheck()
+
+	config, _, _ := store.GetShardConfig()
+	if config.Version != 1 {
+		t.Fatalf("passive coordinator should not auto-promote, got %+v", config)
+	}
+	var status db.CoordinatorStatusReply
+	if err := passive.Status(&db.CoordinatorStatusArgs{}, &status); err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.Shards[0].AutoPromotionStatus != autoPromotionStatusNotAuthoritative {
+		t.Fatalf("expected not_authoritative status, got %+v", status.Shards[0])
+	}
+}
+
+func TestValidateAutoPromotionConfigRejectsInvalidValues(t *testing.T) {
+	tests := []autoPromotionConfig{
+		{Enabled: true, CheckInterval: 0, FailureThreshold: 1, Cooldown: time.Second},
+		{Enabled: true, CheckInterval: time.Second, FailureThreshold: 0, Cooldown: time.Second},
+		{Enabled: true, CheckInterval: time.Second, FailureThreshold: 1, Cooldown: 0},
+	}
+	for _, config := range tests {
+		if err := validateAutoPromotionConfig(config); err == nil {
+			t.Fatalf("expected invalid config to fail: %+v", config)
+		}
+	}
+}
+
 func TestUploadShardBogusUUIDMapsToShardSessionLost(t *testing.T) {
 	client := &fakeShardClient{upload2Err: errors.New(coordinatorWireBogusUUID), upload3Err: errors.New(coordinatorWireBogusUUID)}
 	coord := mustCoordinator(t, []ShardConfig{

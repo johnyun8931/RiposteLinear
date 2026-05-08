@@ -50,6 +50,7 @@ type statusSnapshot struct {
 	lease          CoordinatorLease
 	role           string
 	health         map[int]shardHealthSnapshot
+	autoPromotion  map[int]autoPromotionShardState
 	scalingMetrics EpochScalingMetrics
 	scaling        ScalingRecommendation
 }
@@ -275,7 +276,8 @@ func (c *Coordinator) scalingStatusSnapshot(currentShardCount int) (EpochScaling
 
 func (c *Coordinator) coordinatorStatusSnapshot(currentShardCount int) statusSnapshot {
 	snapshot := statusSnapshot{
-		health: make(map[int]shardHealthSnapshot),
+		health:        make(map[int]shardHealthSnapshot),
+		autoPromotion: make(map[int]autoPromotionShardState),
 	}
 	c.actorCall(func() {
 		snapshot.epoch = c.epoch
@@ -283,6 +285,8 @@ func (c *Coordinator) coordinatorStatusSnapshot(currentShardCount int) statusSna
 		snapshot.role = c.role
 		snapshot.health = make(map[int]shardHealthSnapshot, len(c.health))
 		maps.Copy(snapshot.health, c.health)
+		snapshot.autoPromotion = make(map[int]autoPromotionShardState, len(c.autoPromotionState))
+		maps.Copy(snapshot.autoPromotion, c.autoPromotionState)
 		snapshot.scalingMetrics, snapshot.scaling = c.scalingStatusSnapshot(currentShardCount)
 	})
 	return snapshot

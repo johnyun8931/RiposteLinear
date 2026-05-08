@@ -281,6 +281,24 @@ retryable signal and restart the full upload from `Upload1`. Completed uploads
 that reached `Upload3` remain the durable handoff covered by SQS/S3 fanout and
 the replica-aware ledger.
 
+Automatic hot standby promotion is opt-in on the coordinator:
+
+```bash
+coordinator ... -auto-promote-shard-standby \
+  -auto-promote-check-seconds 5 \
+  -auto-promote-failure-threshold 3 \
+  -auto-promote-cooldown-seconds 60
+```
+
+The automatic path is intentionally narrower than manual promotion: it only
+promotes when the current coordinator holds the lease, the active shard has
+failed consecutive health checks, and the standby is reachable, drained,
+error-free, still marked `replica_id=standby`, and caught up to the last
+reachable active completed-upload count. It never performs planned healthy
+active switchover. Coordinator status reports per-shard `auto_promotion_*`
+fields so operators can see whether a shard is blocked, eligible, or was
+promoted automatically.
+
 Future slices can close the partial-upload gap in increasing order of
 complexity:
 

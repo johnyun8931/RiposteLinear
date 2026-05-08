@@ -48,6 +48,10 @@ var flagScalingTargetRowsPerShard = flag.Int("scaling-target-rows-per-shard", db
 var flagScalingUpDensity = flag.Float64("scaling-up-density", defaultScaleUpDensityThreshold, "Request-density threshold for grow recommendations")
 var flagScalingDownDensity = flag.Float64("scaling-down-density", defaultScaleDownDensityThreshold, "Request-density threshold for shrink recommendations")
 var flagScalingMaxShardMultiplier = flag.Int("scaling-max-shard-multiplier", defaultMaxShardMultiplier, "Maximum shard-count multiplier for grow/shrink recommendations")
+var flagAutoPromoteShardStandby = flag.Bool("auto-promote-shard-standby", false, "If set, automatically promote hot standby shard pairs after active health failures")
+var flagAutoPromoteCheckSeconds = flag.Int64("auto-promote-check-seconds", int64(defaultShardHealthInterval/time.Second), "Automatic shard standby promotion check interval in seconds")
+var flagAutoPromoteFailureThreshold = flag.Int("auto-promote-failure-threshold", defaultAutoPromotionFailureThreshold, "Consecutive active shard health failures required before automatic promotion")
+var flagAutoPromoteCooldownSeconds = flag.Int64("auto-promote-cooldown-seconds", int64(defaultAutoPromotionCooldown/time.Second), "Cooldown between automatic shard standby promotions in seconds")
 
 var shardFlags shardListType
 
@@ -127,6 +131,16 @@ func main() {
 	if err := coord.connectShards(); err != nil {
 		log.Fatal(err)
 	}
+	autoPromotionConfig := autoPromotionConfig{
+		Enabled:          *flagAutoPromoteShardStandby,
+		CheckInterval:    time.Duration(*flagAutoPromoteCheckSeconds) * time.Second,
+		FailureThreshold: *flagAutoPromoteFailureThreshold,
+		Cooldown:         time.Duration(*flagAutoPromoteCooldownSeconds) * time.Second,
+	}
+	if err := coord.configureAutoPromotion(autoPromotionConfig); err != nil {
+		log.Fatal(err)
+	}
+	coord.startAutoPromotionLoop()
 
 	if err := rpc.RegisterName("Server", coord); err != nil {
 		log.Fatal(err)
