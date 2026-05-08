@@ -988,9 +988,20 @@ func (t *Server) SetIngestionQueueBackend(backend string) error {
 		t.ingestionQueue = newMemoryCompletedUploadQueue()
 		t.ingestionQueueBackend = memoryIngestionQueueBackend
 		return nil
+	case sqsIngestionQueueBackend:
+		return errors.New("sqs ingestion queue requires explicit queue configuration")
 	default:
 		return fmt.Errorf("unsupported ingestion queue backend %q", backend)
 	}
+}
+
+func (t *Server) SetCompletedUploadQueue(queue CompletedUploadQueue) error {
+	if queue == nil {
+		return errors.New("completed upload queue is required")
+	}
+	t.ingestionQueue = queue
+	t.ingestionQueueBackend = queue.Backend()
+	return nil
 }
 
 func (t *Server) DoNothing(args *int, reply *int) error {

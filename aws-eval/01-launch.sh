@@ -13,6 +13,7 @@ require_cmd terraform
 require_cmd python3
 require_cmd ssh-keygen
 validate_public_entry_backend
+validate_ingestion_queue_backend
 
 if [[ -f "$STATE_FILE" && "${FORCE:-0}" != "1" ]]; then
   die "state already exists at $STATE_FILE. Run 06-teardown.sh first, or set FORCE=1 to overwrite local state."
@@ -50,6 +51,8 @@ export DYNAMODB_SESSION_REGION_RESOLVED="$(dynamodb_session_region)"
 export COORDINATOR_HOLDER_ID_RESOLVED="$(coordinator_holder_id)"
 export COORDINATOR_IAM_ROLE_NAME_RESOLVED="$(coordinator_iam_role_name)"
 export COORDINATOR_IAM_INSTANCE_PROFILE_NAME_RESOLVED="$(coordinator_iam_instance_profile_name)"
+export SERVER_INGESTION_IAM_ROLE_NAME_RESOLVED="$(server_ingestion_iam_role_name)"
+export SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME_RESOLVED="$(server_ingestion_iam_instance_profile_name)"
 CREATE_DYNAMODB_CONTROL_TABLE=false
 CREATE_DYNAMODB_SESSION_TABLE=false
 if dynamodb_runtime_enabled; then
@@ -77,6 +80,8 @@ export WARMUP_EPOCH_SECONDS MEASURED_EPOCH_SECONDS START_EPOCH_RETRY_TIMEOUT STA
 export COORDINATOR_PORT COORDINATOR_STANDBY_PORT SHARD0_LEADER_PORT SHARD0_FOLLOWER_PORT SHARD1_LEADER_PORT SHARD1_FOLLOWER_PORT
 export REMOTE_ROOT REMOTE_BIN_DIR REMOTE_PHASES_DIR REMOTE_SMOKE_DIR CONTROL_STORE_BACKEND DYNAMODB_CONTROL_TABLE SESSION_STORE_BACKEND
 export COORDINATOR_LEASE_TTL_SECONDS COORDINATOR_LEASE_RENEW_SECONDS COORDINATOR_IAM_POLICY_NAME PUBLIC_ENTRY_BACKEND PUBLIC_ENTRY_MULTI_COORDINATOR
+export INGESTION_QUEUE_BACKEND INGESTION_S3_BUCKET SERVER_INGESTION_IAM_POLICY_NAME
+export SERVER_INGESTION_IAM_ROLE_NAME_RESOLVED SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME_RESOLVED
 export CREATE_DYNAMODB_CONTROL_TABLE CREATE_DYNAMODB_SESSION_TABLE
 
 python3 - "$TFVARS_FILE" <<'PY'
@@ -140,6 +145,11 @@ payload = {
     "coordinator_iam_policy_name": os.environ["COORDINATOR_IAM_POLICY_NAME"],
     "public_entry_backend": os.environ["PUBLIC_ENTRY_BACKEND"],
     "public_entry_multi_coordinator": os.environ["PUBLIC_ENTRY_MULTI_COORDINATOR"],
+    "ingestion_queue_backend": os.environ["INGESTION_QUEUE_BACKEND"],
+    "ingestion_s3_bucket": os.environ["INGESTION_S3_BUCKET"],
+    "server_ingestion_iam_role_name": os.environ["SERVER_INGESTION_IAM_ROLE_NAME_RESOLVED"],
+    "server_ingestion_iam_instance_profile_name": os.environ["SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME_RESOLVED"],
+    "server_ingestion_iam_policy_name": os.environ["SERVER_INGESTION_IAM_POLICY_NAME"],
 }
 
 with open(sys.argv[1], "w") as fh:

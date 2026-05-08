@@ -240,6 +240,29 @@ This registers the coordinator instance on both `COORDINATOR_PORT` and
 mutations through the DynamoDB lease, while both coordinator processes can route
 uploads through the shared DynamoDB session store while the epoch is accepting.
 
+### Optional Durable Ingestion
+
+The harness defaults to the process-local memory completed-upload queue:
+
+```bash
+INGESTION_QUEUE_BACKEND=memory
+```
+
+To validate the durable completed-upload boundary, launch with:
+
+```bash
+INGESTION_QUEUE_BACKEND=sqs ./aws-eval/01-launch.sh
+```
+
+Terraform creates one SQS queue per shard and one S3 bucket for completed-upload
+payloads. Shard leaders write the full completed-upload job to S3, enqueue a
+small SQS pointer, and delete the SQS message only after prepare/commit
+succeeds. S3 payloads are retained after ack for debugging and replay audit.
+
+Smoke captures SQS queue attributes and S3 payload listings under
+`smoke/run/logs/ingestion-completed/`. `05-collect-logs.sh` also copies current
+ingestion artifacts under `aws/ingestion/`.
+
 ### 4. Smoke
 
 ```bash
@@ -271,6 +294,10 @@ completes. The smoke check also verifies that the DynamoDB epoch ID and
 accepting flag match the observed coordinator lifecycle, and that the persisted
 current and epoch-bound shard configs report two shards, `rows_per_shard=256`,
 and `global_table_height=512`.
+
+If `INGESTION_QUEUE_BACKEND=sqs`, smoke waits for both shard queues to drain,
+verifies the SQS approximate visible/in-flight counts are zero, and verifies
+that at least two completed-upload payloads were written to S3.
 
 To validate coordinator lease/fencing behavior with two coordinator attempts:
 

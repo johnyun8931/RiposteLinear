@@ -204,19 +204,30 @@ Coordinator sessions can now be persisted in DynamoDB, so a coordinator can
 recover the route/session metadata for uploads that already passed `Upload1`.
 Shard leaders now hand completed `Upload3` work to a local memory ingestion
 queue before worker prepare/commit processing. This removes the bounded
-ready-channel overload path and makes the replay boundary explicit, but the
-memory backend is still process-local. SQS/S3-backed ingestion remains needed
-before active-passive shard promotion can replay completed uploads after shard
-death. Partial shard-side `Upload1`/`Upload2` sessions are still not durable at
-the shard layer.
+ready-channel overload path and makes the replay boundary explicit.
+
+The opt-in AWS ingestion backend uses SQS plus S3:
+
+- `Upload3` writes the full completed-upload payload to S3.
+- `Upload3` sends a small SQS pointer message after the S3 write succeeds.
+- shard workers receive SQS messages, load the S3 payload, run prepare/commit,
+  and delete the SQS message only after successful commit.
+- failed prepare/commit leaves the SQS message unacked for redelivery after the
+  queue visibility timeout.
+
+The S3 payload is retained after ack for debugging and replay audit. This gives
+active/passive shard promotion a durable replay boundary for uploads that
+successfully reached `Upload3`. Partial shard-side `Upload1`/`Upload2` sessions
+are still not durable at the shard layer.
 
 ## Current Boundary
 
-DynamoDB control-store and session-store wiring is opt-in. SQS and S3 SDK calls
-are not implemented yet. The current code has local and DynamoDB control-store
-wiring, local and DynamoDB session-store wiring, lease/fencing enforcement,
-local completed-upload ingestion queueing, and active-passive shard health
-monitoring, but no active-passive shard promotion.
+DynamoDB control-store and session-store wiring is opt-in. SQS/S3
+completed-upload ingestion is also opt-in. The current code has local and
+DynamoDB control-store wiring, local and DynamoDB session-store wiring,
+lease/fencing enforcement, local and SQS/S3 completed-upload ingestion queueing,
+and active-passive shard health monitoring, but no active-passive shard
+promotion.
 
 Shard health monitoring is a prerequisite for failover, not failover itself.
 Shard active/passive promotion still requires durable accepted-work/session

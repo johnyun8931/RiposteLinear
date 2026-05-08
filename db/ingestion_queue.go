@@ -44,6 +44,8 @@ type completedUploadQueue interface {
 	Stats() IngestionQueueStats
 }
 
+type CompletedUploadQueue = completedUploadQueue
+
 type memoryCompletedUploadQueue struct {
 	mu            sync.Mutex
 	nextMessageID int64

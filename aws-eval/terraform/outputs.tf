@@ -92,5 +92,15 @@ output "state_env" {
     NLB_TARGET_GROUP_NAME          = local.public_entry_enabled ? aws_lb_target_group.coordinator[0].name : ""
     NLB_TARGET_GROUP_ARN           = local.public_entry_enabled ? aws_lb_target_group.coordinator[0].arn : ""
     NLB_LISTENER_ARN               = local.public_entry_enabled ? aws_lb_listener.coordinator[0].arn : ""
+
+    INGESTION_QUEUE_BACKEND                    = var.ingestion_queue_backend
+    INGESTION_S3_BUCKET                        = local.ingestion_sqs_enabled ? aws_s3_bucket.ingestion_payloads[0].bucket : ""
+    INGESTION_SQS_SHARD0_QUEUE_URL             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard0[0].url : ""
+    INGESTION_SQS_SHARD0_QUEUE_ARN             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard0[0].arn : ""
+    INGESTION_SQS_SHARD1_QUEUE_URL             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard1[0].url : ""
+    INGESTION_SQS_SHARD1_QUEUE_ARN             = local.ingestion_sqs_enabled ? aws_sqs_queue.ingestion_shard1[0].arn : ""
+    SERVER_INGESTION_IAM_ROLE_NAME             = var.server_ingestion_iam_role_name
+    SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME = var.server_ingestion_iam_instance_profile_name
+    SERVER_INGESTION_IAM_POLICY_NAME           = var.server_ingestion_iam_policy_name
   }
 }

@@ -38,6 +38,9 @@ COORDINATOR_INITIAL_ACTIVE_SHARDS="${COORDINATOR_INITIAL_ACTIVE_SHARDS:-0}"
 COORDINATOR_EXTRA_ARGS="${COORDINATOR_EXTRA_ARGS:-}"
 PUBLIC_ENTRY_BACKEND="${PUBLIC_ENTRY_BACKEND:-none}"
 PUBLIC_ENTRY_MULTI_COORDINATOR="${PUBLIC_ENTRY_MULTI_COORDINATOR:-0}"
+INGESTION_QUEUE_BACKEND="${INGESTION_QUEUE_BACKEND:-memory}"
+INGESTION_S3_BUCKET="${INGESTION_S3_BUCKET:-}"
+SERVER_INGESTION_IAM_POLICY_NAME="${SERVER_INGESTION_IAM_POLICY_NAME:-RiposteCompletedUploadIngestion}"
 
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
 COORDINATOR_STANDBY_PORT="${COORDINATOR_STANDBY_PORT:-8631}"
@@ -341,6 +344,18 @@ dynamodb_runtime_enabled() {
   dynamodb_control_enabled || dynamodb_session_enabled
 }
 
+sqs_ingestion_enabled() {
+  [[ "$INGESTION_QUEUE_BACKEND" == "sqs" ]]
+}
+
+server_ingestion_iam_role_name() {
+  printf '%s' "${SERVER_INGESTION_IAM_ROLE_NAME:-${PROJECT_TAG}-${RUN_ID:-local}-server-ingestion}"
+}
+
+server_ingestion_iam_instance_profile_name() {
+  printf '%s' "${SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME:-$(server_ingestion_iam_role_name)}"
+}
+
 dynamodb_control_table() {
   [[ -n "$DYNAMODB_CONTROL_TABLE" ]] || die "DYNAMODB_CONTROL_TABLE is required when CONTROL_STORE_BACKEND=dynamodb"
   printf '%s' "$DYNAMODB_CONTROL_TABLE"
@@ -444,6 +459,103 @@ validate_public_entry_backend() {
       die "unknown PUBLIC_ENTRY_BACKEND: $PUBLIC_ENTRY_BACKEND"
       ;;
   esac
+}
+
+validate_ingestion_queue_backend() {
+  case "$INGESTION_QUEUE_BACKEND" in
+    memory|sqs)
+      return 0
+      ;;
+    *)
+      die "unknown INGESTION_QUEUE_BACKEND: $INGESTION_QUEUE_BACKEND"
+      ;;
+  esac
+}
+
+ingestion_queue_url_for_shard() {
+  local shard_id="$1"
+  case "$shard_id" in
+    0)
+      [[ -n "${INGESTION_SQS_SHARD0_QUEUE_URL:-}" ]] || die "missing INGESTION_SQS_SHARD0_QUEUE_URL"
+      printf '%s' "$INGESTION_SQS_SHARD0_QUEUE_URL"
+      ;;
+    1)
+      [[ -n "${INGESTION_SQS_SHARD1_QUEUE_URL:-}" ]] || die "missing INGESTION_SQS_SHARD1_QUEUE_URL"
+      printf '%s' "$INGESTION_SQS_SHARD1_QUEUE_URL"
+      ;;
+    *)
+      die "no ingestion queue configured for shard $shard_id"
+      ;;
+  esac
+}
+
+server_ingestion_queue_args() {
+  local shard_id="$1"
+  case "$INGESTION_QUEUE_BACKEND" in
+    memory)
+      return 0
+      ;;
+    sqs)
+      [[ -n "${INGESTION_S3_BUCKET:-}" ]] || die "INGESTION_S3_BUCKET is required when INGESTION_QUEUE_BACKEND=sqs"
+      printf -- " -ingestion-queue sqs -ingestion-sqs-queue-url %s -ingestion-s3-bucket %s -aws-region %s" \
+        "$(quote "$(ingestion_queue_url_for_shard "$shard_id")")" \
+        "$(quote "$INGESTION_S3_BUCKET")" \
+        "$(quote "$AWS_REGION")"
+      ;;
+    *)
+      die "unknown INGESTION_QUEUE_BACKEND: $INGESTION_QUEUE_BACKEND"
+      ;;
+  esac
+}
+
+capture_ingestion_artifacts() {
+  local output_dir="$1"
+  mkdir -p "$output_dir"
+  if ! sqs_ingestion_enabled; then
+    return 0
+  fi
+  aws_region sqs get-queue-attributes \
+    --queue-url "$INGESTION_SQS_SHARD0_QUEUE_URL" \
+    --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+    --output json >"$output_dir/shard0-queue-attributes.json" || true
+  aws_region sqs get-queue-attributes \
+    --queue-url "$INGESTION_SQS_SHARD1_QUEUE_URL" \
+    --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+    --output json >"$output_dir/shard1-queue-attributes.json" || true
+  aws_region s3api list-objects-v2 \
+    --bucket "$INGESTION_S3_BUCKET" \
+    --prefix "completed-uploads/" \
+    --output json >"$output_dir/s3-payloads.json" || true
+}
+
+wait_for_sqs_ingestion_drain() {
+  local timeout="${1:-120}"
+  local deadline=$((SECONDS + timeout))
+  local shard0_counts shard1_counts
+  if ! sqs_ingestion_enabled; then
+    return 0
+  fi
+  info "waiting for SQS ingestion queues to drain"
+  while true; do
+    shard0_counts="$(aws_region sqs get-queue-attributes \
+      --queue-url "$INGESTION_SQS_SHARD0_QUEUE_URL" \
+      --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+      --query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' \
+      --output text 2>/dev/null || true)"
+    shard1_counts="$(aws_region sqs get-queue-attributes \
+      --queue-url "$INGESTION_SQS_SHARD1_QUEUE_URL" \
+      --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+      --query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' \
+      --output text 2>/dev/null || true)"
+    if [[ "$shard0_counts" == $'0\t0' && "$shard1_counts" == $'0\t0' ]]; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      capture_ingestion_artifacts "$STATE_DIR/ingestion-drain-timeout"
+      die "SQS ingestion queues did not drain before timeout; shard0=${shard0_counts:-unknown} shard1=${shard1_counts:-unknown}"
+    fi
+    sleep 2
+  done
 }
 
 capture_nlb_artifacts() {
@@ -626,7 +738,9 @@ start_remote_server() {
   local results_dir="$5"
   local log_path="$6"
   local global_row_start=$((shard_id * ROWS_PER_SHARD))
-  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -global-row-start '$global_row_start' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv' > '${log_path}.nohup' 2>&1 &"
+  local ingestion_args
+  ingestion_args="$(server_ingestion_queue_args "$shard_id")"
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -global-row-start '$global_row_start' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv'$ingestion_args > '${log_path}.nohup' 2>&1 &"
 }
 
 start_remote_coordinator() {

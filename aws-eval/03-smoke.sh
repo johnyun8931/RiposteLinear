@@ -10,7 +10,7 @@ load_state
 require_cmd ssh
 require_cmd scp
 require_cmd python3
-if dynamodb_control_enabled || public_entry_enabled; then
+if dynamodb_control_enabled || public_entry_enabled || sqs_ingestion_enabled; then
   require_cmd aws
 fi
 
@@ -157,6 +157,37 @@ if int(status.get('global_table_height', 0)) != int(expected_global_height):
 PY"
 }
 
+assert_ingestion_smoke_artifacts() {
+  local dir="$1"
+  if ! sqs_ingestion_enabled; then
+    return 0
+  fi
+  python3 - "$dir/shard0-queue-attributes.json" "$dir/shard1-queue-attributes.json" "$dir/s3-payloads.json" <<'PY'
+import json
+import sys
+
+shard0_path, shard1_path, payloads_path = sys.argv[1:]
+
+def load(path):
+    try:
+        return json.load(open(path))
+    except (OSError, json.JSONDecodeError) as err:
+        raise SystemExit(f"{path}: invalid JSON: {err}")
+
+for path in (shard0_path, shard1_path):
+    attrs = load(path).get("Attributes", {})
+    visible = int(attrs.get("ApproximateNumberOfMessages", "0"))
+    inflight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", "0"))
+    if visible != 0 or inflight != 0:
+        raise SystemExit(f"{path}: expected drained queue, got visible={visible} inflight={inflight}")
+
+payloads = load(payloads_path).get("Contents", [])
+keys = [item.get("Key", "") for item in payloads]
+if len([key for key in keys if key.startswith("completed-uploads/")]) < 2:
+    raise SystemExit(f"expected at least two completed-upload S3 payloads, got {keys}")
+PY
+}
+
 cleanup() {
   kill_all_remote_processes
 }
@@ -203,6 +234,9 @@ remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordin
 remote_cmd "$CLIENT_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE'; ~/client -coordinator '$(public_coordinator_addr)' -x 2 -y 256 -payload shard1-boundary -threads '$CLIENT_THREADS' -log '$SMOKE_LOGS_REMOTE/client-row256.log'"
 
 wait_for_epoch_complete coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" 120
+wait_for_epoch_complete server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" 120
+wait_for_epoch_complete server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" 120
+wait_for_sqs_ingestion_drain 120
 capture_remote_status_json coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$SMOKE_LOGS_REMOTE/status-completed-coordinator.json"
 capture_remote_status_json server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard0-leader.json"
 capture_remote_status_json server "$SHARD1_LEADER_PUBLIC_IP" "$(shard1_leader_addr)" "$SMOKE_LOGS_REMOTE/status-completed-shard1-leader.json"
@@ -211,6 +245,14 @@ if public_entry_enabled; then
   capture_nlb_artifacts "$SMOKE_LOCAL_DIR/nlb-completed"
   remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE/nlb-completed'"
   copy_to_remote "$SMOKE_LOCAL_DIR/nlb-completed/target-health.json" "$COORDINATOR_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/nlb-completed/target-health.json"
+fi
+if sqs_ingestion_enabled; then
+  capture_ingestion_artifacts "$SMOKE_LOCAL_DIR/ingestion-completed"
+  assert_ingestion_smoke_artifacts "$SMOKE_LOCAL_DIR/ingestion-completed"
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$SMOKE_LOGS_REMOTE/ingestion-completed'"
+  for artifact in shard0-queue-attributes.json shard1-queue-attributes.json s3-payloads.json; do
+    copy_to_remote "$SMOKE_LOCAL_DIR/ingestion-completed/$artifact" "$COORDINATOR_PUBLIC_IP" "$SMOKE_LOGS_REMOTE/ingestion-completed/$artifact"
+  done
 fi
 capture_dynamodb_smoke_state completed
 assert_dynamodb_smoke_state completed "$epoch_id" false

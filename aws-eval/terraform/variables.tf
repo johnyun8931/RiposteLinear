@@ -217,3 +217,28 @@ variable "public_entry_backend" {
 variable "public_entry_multi_coordinator" {
   type = string
 }
+
+variable "ingestion_queue_backend" {
+  type    = string
+  default = "memory"
+}
+
+variable "ingestion_s3_bucket" {
+  type    = string
+  default = ""
+}
+
+variable "server_ingestion_iam_role_name" {
+  type    = string
+  default = "riposte-server-ingestion"
+}
+
+variable "server_ingestion_iam_instance_profile_name" {
+  type    = string
+  default = "riposte-server-ingestion"
+}
+
+variable "server_ingestion_iam_policy_name" {
+  type    = string
+  default = "RiposteCompletedUploadIngestion"
+}

@@ -22,6 +22,9 @@ mkdir -p "$OUT_DIR/remotes" "$OUT_DIR/leader-results"
 if public_entry_enabled; then
   capture_nlb_artifacts "$OUT_DIR/aws/nlb"
 fi
+if sqs_ingestion_enabled; then
+  capture_ingestion_artifacts "$OUT_DIR/aws/ingestion"
+fi
 
 copy_role_tree() {
   local label="$1"
@@ -97,6 +100,10 @@ POST_EPOCH_FLUSH_SECONDS="$POST_EPOCH_FLUSH_SECONDS" \
 CLIENT_EXIT_GRACE_SECONDS="$CLIENT_EXIT_GRACE_SECONDS" \
 PUBLIC_ENTRY_BACKEND="$PUBLIC_ENTRY_BACKEND" \
 PUBLIC_ENTRY_MULTI_COORDINATOR="${PUBLIC_ENTRY_MULTI_COORDINATOR:-0}" \
+INGESTION_QUEUE_BACKEND="$INGESTION_QUEUE_BACKEND" \
+INGESTION_S3_BUCKET="${INGESTION_S3_BUCKET:-}" \
+INGESTION_SQS_SHARD0_QUEUE_URL="${INGESTION_SQS_SHARD0_QUEUE_URL:-}" \
+INGESTION_SQS_SHARD1_QUEUE_URL="${INGESTION_SQS_SHARD1_QUEUE_URL:-}" \
 NLB_NAME="${NLB_NAME:-}" \
 NLB_DNS_NAME="${NLB_DNS_NAME:-}" \
 NLB_ARN="${NLB_ARN:-}" \
@@ -178,6 +185,10 @@ payload = {
         "client_exit_grace_seconds": int(os.environ["CLIENT_EXIT_GRACE_SECONDS"]),
         "public_entry_backend": os.environ["PUBLIC_ENTRY_BACKEND"],
         "public_entry_multi_coordinator": os.environ["PUBLIC_ENTRY_MULTI_COORDINATOR"],
+        "ingestion_queue_backend": os.environ["INGESTION_QUEUE_BACKEND"],
+        "ingestion_s3_bucket": os.environ["INGESTION_S3_BUCKET"],
+        "ingestion_sqs_shard0_queue_url": os.environ["INGESTION_SQS_SHARD0_QUEUE_URL"],
+        "ingestion_sqs_shard1_queue_url": os.environ["INGESTION_SQS_SHARD1_QUEUE_URL"],
         "nlb": {
             "name": os.environ["NLB_NAME"],
             "dns_name": os.environ["NLB_DNS_NAME"],

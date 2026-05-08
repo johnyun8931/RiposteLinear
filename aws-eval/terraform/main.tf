@@ -20,6 +20,8 @@ locals {
   nlb_suffix            = substr(var.run_id, max(0, length(var.run_id) - 16), 16)
   nlb_name              = substr("riposte-${local.nlb_suffix}", 0, 32)
   nlb_target_group_name = substr("riposte-tg-${local.nlb_suffix}", 0, 32)
+  ingestion_sqs_enabled = var.ingestion_queue_backend == "sqs"
+  ingestion_bucket_name = var.ingestion_s3_bucket != "" ? var.ingestion_s3_bucket : lower(substr("${var.project_tag}-${var.run_id}-ingestion", 0, 63))
 }
 
 resource "aws_key_pair" "eval" {
@@ -172,6 +174,120 @@ resource "aws_dynamodb_table" "session" {
   tags = local.common_tags
 }
 
+resource "aws_sqs_queue" "ingestion_shard0" {
+  count = local.ingestion_sqs_enabled ? 1 : 0
+
+  name                       = substr("${var.project_tag}-${local.nlb_suffix}-ingestion-shard0", 0, 80)
+  visibility_timeout_seconds = 300
+  message_retention_seconds  = 1209600
+
+  tags = merge(local.common_tags, {
+    Role = "ingestion-shard0"
+  })
+}
+
+resource "aws_sqs_queue" "ingestion_shard1" {
+  count = local.ingestion_sqs_enabled ? 1 : 0
+
+  name                       = substr("${var.project_tag}-${local.nlb_suffix}-ingestion-shard1", 0, 80)
+  visibility_timeout_seconds = 300
+  message_retention_seconds  = 1209600
+
+  tags = merge(local.common_tags, {
+    Role = "ingestion-shard1"
+  })
+}
+
+resource "aws_s3_bucket" "ingestion_payloads" {
+  count = local.ingestion_sqs_enabled ? 1 : 0
+
+  bucket        = local.ingestion_bucket_name
+  force_destroy = true
+
+  tags = merge(local.common_tags, {
+    Role = "ingestion-payloads"
+  })
+}
+
+resource "aws_s3_bucket_public_access_block" "ingestion_payloads" {
+  count = local.ingestion_sqs_enabled ? 1 : 0
+
+  bucket                  = aws_s3_bucket.ingestion_payloads[0].id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_iam_role" "server_ingestion" {
+  count = local.ingestion_sqs_enabled ? 1 : 0
+
+  name = var.server_ingestion_iam_role_name
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "server_ingestion" {
+  count = local.ingestion_sqs_enabled ? 1 : 0
+
+  name = var.server_ingestion_iam_policy_name
+  role = aws_iam_role.server_ingestion[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:GetQueueAttributes",
+          "sqs:ReceiveMessage",
+          "sqs:SendMessage",
+          "sqs:DeleteMessage",
+        ]
+        Resource = [
+          aws_sqs_queue.ingestion_shard0[0].arn,
+          aws_sqs_queue.ingestion_shard1[0].arn,
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "${aws_s3_bucket.ingestion_payloads[0].arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = aws_s3_bucket.ingestion_payloads[0].arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "server_ingestion" {
+  count = local.ingestion_sqs_enabled ? 1 : 0
+
+  name = var.server_ingestion_iam_instance_profile_name
+  role = aws_iam_role.server_ingestion[0].name
+
+  tags = local.common_tags
+}
+
 resource "aws_instance" "coordinator" {
   ami                         = var.ami_id
   instance_type               = var.coordinator_instance_type
@@ -201,6 +317,7 @@ resource "aws_instance" "shard0_leader" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
+  iam_instance_profile        = local.ingestion_sqs_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-shard0-leader"
@@ -222,6 +339,7 @@ resource "aws_instance" "shard0_follower" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
+  iam_instance_profile        = local.ingestion_sqs_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-shard0-follower"
@@ -243,6 +361,7 @@ resource "aws_instance" "shard1_leader" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
+  iam_instance_profile        = local.ingestion_sqs_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-shard1-leader"
@@ -264,6 +383,7 @@ resource "aws_instance" "shard1_follower" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
+  iam_instance_profile        = local.ingestion_sqs_enabled ? aws_iam_instance_profile.server_ingestion[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-shard1-follower"

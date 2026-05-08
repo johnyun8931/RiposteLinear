@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -13,9 +14,11 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strings"
-)
 
-import (
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+
 	"bitbucket.org/henrycg/riposte/db"
 	"bitbucket.org/henrycg/riposte/utils"
 )
@@ -28,6 +31,9 @@ var flagResultsDir = flag.String("results-dir", "", "Directory for epoch result 
 var flagShardID = flag.Int("shard-id", 0, "Shard identifier for result publication metadata")
 var flagGlobalRowStart = flag.Int("global-row-start", 0, "First global row represented by this server's local row 0")
 var flagIngestionQueue = flag.String("ingestion-queue", "memory", "Completed upload ingestion queue backend")
+var flagIngestionSQSQueueURL = flag.String("ingestion-sqs-queue-url", "", "SQS queue URL for -ingestion-queue sqs")
+var flagIngestionS3Bucket = flag.String("ingestion-s3-bucket", "", "S3 bucket for -ingestion-queue sqs completed upload payloads")
+var flagAWSRegion = flag.String("aws-region", "", "AWS SDK region override")
 var flagAdminTarget = flag.String("admin-target", "", "Target leader address for admin RPC commands")
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
 var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query leader epoch status over admin RPC and exit")
@@ -127,9 +133,7 @@ func main() {
 	if err := slotTable.SetGlobalRowStart(*flagGlobalRowStart); err != nil {
 		log.Fatal(err)
 	}
-	if err := slotTable.SetIngestionQueueBackend(*flagIngestionQueue); err != nil {
-		log.Fatal(err)
-	}
+	configureIngestionQueue(slotTable)
 	slotTable.SetResultsDir(*flagResultsDir)
 	slotTable.Initialize(&a, &a)
 	rpc.Register(slotTable)
@@ -146,6 +150,41 @@ func main() {
 	log.Printf("Server %d is listening at %s", idx, serverList[idx])
 
 	//http.ListenAndServe(addr, nil)
+}
+
+func configureIngestionQueue(slotTable *db.Server) {
+	switch *flagIngestionQueue {
+	case "", "memory":
+		if err := slotTable.SetIngestionQueueBackend(*flagIngestionQueue); err != nil {
+			log.Fatal(err)
+		}
+	case "sqs":
+		if *flagIngestionSQSQueueURL == "" {
+			log.Fatal("-ingestion-sqs-queue-url is required when -ingestion-queue=sqs")
+		}
+		if *flagIngestionS3Bucket == "" {
+			log.Fatal("-ingestion-s3-bucket is required when -ingestion-queue=sqs")
+		}
+		options := []func(*awsconfig.LoadOptions) error{}
+		if *flagAWSRegion != "" {
+			options = append(options, awsconfig.WithRegion(*flagAWSRegion))
+		}
+		cfg, err := awsconfig.LoadDefaultConfig(context.Background(), options...)
+		if err != nil {
+			log.Fatal("Could not load AWS config for SQS ingestion queue: ", err)
+		}
+		queue, err := db.NewSQSCompletedUploadQueue(sqs.NewFromConfig(cfg), s3.NewFromConfig(cfg), *flagIngestionSQSQueueURL, *flagIngestionS3Bucket)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := slotTable.SetCompletedUploadQueue(queue); err != nil {
+			log.Fatal(err)
+		}
+	default:
+		if err := slotTable.SetIngestionQueueBackend(*flagIngestionQueue); err != nil {
+			log.Fatal(err)
+		}
+	}
 }
 
 func runAdminCommand() {
