@@ -1,11 +1,10 @@
 # Riposte AWS Evaluation
 
-This directory contains a first-pass AWS CLI + SSH evaluation harness for the
+This directory contains a Terraform + AWS CLI + SSH evaluation harness for the
 current sharded coordinator topology.
 
 It is intentionally operational, not permanent infrastructure:
 
-- no Terraform
 - no ALB / HTTPS proxy layer
 - no active-passive or checkpoint work
 - no health-check protocol changes
@@ -103,8 +102,9 @@ Generated files are git-ignored:
 
 ## Prerequisites
 
-- AWS CLI v2 authenticated with EC2 and SSM AMI-lookup permissions
-- `go`, `ssh`, `scp`, `curl`, `python3`, `file`
+- AWS CLI v2 authenticated with EC2, IAM, ELBv2, DynamoDB, and SSM AMI-lookup
+  permissions
+- `go`, `ssh`, `scp`, `curl`, `python3`, `file`, `terraform`
 - enough AWS quota for six On-Demand instances in one AZ
 
 ## Workflow
@@ -130,7 +130,8 @@ Checks:
 ./aws-eval/01-launch.sh
 ```
 
-Creates:
+Runs Terraform from `aws-eval/terraform/` and writes compatibility state to
+`aws-eval/.state/env.sh` for the remaining scripts. Terraform creates:
 
 - one temporary AWS key pair
 - one security group
@@ -139,8 +140,13 @@ Creates:
 - optionally, an internet-facing Network Load Balancer for public coordinator
   RPC ingress when `PUBLIC_ENTRY_BACKEND=nlb`
 - six tagged EC2 instances
+- optional DynamoDB control/session tables when they do not already exist
+- optional coordinator IAM role/profile for DynamoDB runtime access
 
-State is written to:
+The wrapper preserves the old shell interface: set the same env vars as before,
+then run `01-launch.sh`. Terraform variables are generated under
+`aws-eval/.state/`, and Terraform state is local under `aws-eval/terraform/`.
+State for downstream scripts is written to:
 
 ```text
 aws-eval/.state/env.sh
@@ -160,16 +166,17 @@ Builds Linux binaries locally and copies:
 
 ### Optional DynamoDB Tables
 
-The coordinator defaults to in-memory control and session stores. To create the
-minimal DynamoDB table for opt-in control/session-store testing, launch with at
-least one DynamoDB backend enabled so the coordinator instance receives an IAM
-instance profile:
+The coordinator defaults to in-memory control and session stores. To use
+DynamoDB for opt-in control/session-store testing, launch with at least one
+DynamoDB backend enabled so Terraform attaches a coordinator IAM instance
+profile:
 
 ```bash
 CONTROL_STORE_BACKEND=dynamodb SESSION_STORE_BACKEND=dynamodb ./aws-eval/01-launch.sh
 ```
 
-Then create or record the DynamoDB table:
+Terraform creates missing DynamoDB tables during launch. If a table already
+exists, Terraform leaves it unmanaged and the helper below records and seeds it:
 
 ```bash
 ./aws-eval/07-create-control-table.sh
@@ -193,9 +200,9 @@ coordinator-routed uploads that have completed `Upload1` but not yet completed
 `SESSION_STORE_BACKEND=dynamodb`, `DYNAMODB_SESSION_TABLE`, and
 `DYNAMODB_SESSION_REGION` in `aws-eval/.state/env.sh`.
 
-The launch script creates a temporary coordinator IAM role and instance profile
-for DynamoDB runtime access. Teardown removes that role/profile with the EC2
-resources.
+Terraform creates a temporary coordinator IAM role and instance profile for
+DynamoDB runtime access. Teardown removes Terraform-managed role/profile
+resources with the EC2 resources.
 
 ### Optional Public Entry NLB
 
@@ -365,9 +372,10 @@ Run teardown even if earlier steps fail:
 ./aws-eval/06-teardown.sh
 ```
 
-This terminates the six instances, deletes the temporary key pair, and deletes
-the security group after attachments drain. If an NLB was created, teardown
-deletes the listener, load balancer, and target group first.
+This runs `terraform destroy` for the six instances, temporary key pair,
+security group, IAM role/profile, NLB resources, and any DynamoDB tables
+Terraform created for the run. Local state, keys, binaries, and copied results
+remain in ignored paths for audit/debug.
 
 ## Useful Overrides
 
@@ -400,6 +408,11 @@ START_EPOCH_RETRY_INTERVAL=2
 POST_EPOCH_FLUSH_SECONDS=12
 CLIENT_EXIT_GRACE_SECONDS=30
 PUBLIC_ENTRY_BACKEND=none
+PUBLIC_ENTRY_MULTI_COORDINATOR=0
+TF_VAR_vpc_id=vpc-...
+TF_VAR_subnet_id=subnet-...
+TF_VAR_ssh_cidr=203.0.113.10/32
+TERRAFORM_AUTO_APPROVE=1
 ```
 
 Use explicit subnet/AZ overrides only when the default-network auto-selection

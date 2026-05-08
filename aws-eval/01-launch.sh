@@ -9,7 +9,9 @@ source "$SCRIPT_DIR/common.sh"
 require_cmd aws
 require_cmd curl
 require_cmd chmod
-require_cmd mktemp
+require_cmd terraform
+require_cmd python3
+require_cmd ssh-keygen
 validate_public_entry_backend
 
 if [[ -f "$STATE_FILE" && "${FORCE:-0}" != "1" ]]; then
@@ -22,426 +24,160 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 KEY_NAME="${KEY_NAME:-${PROJECT_TAG}-${RUN_ID}}"
 KEY_FILE="${KEY_FILE:-$KEY_DIR/${KEY_NAME}.pem}"
 SG_NAME="${SG_NAME:-${PROJECT_TAG}-${RUN_ID}}"
-SSH_CIDR="${SSH_CIDR:-$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')/32}"
+SSH_CIDR="${SSH_CIDR:-${TF_VAR_ssh_cidr:-$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')/32}}"
+VPC_ID="${VPC_ID:-${TF_VAR_vpc_id:-}}"
+SUBNET_ID="${SUBNET_ID:-${TF_VAR_subnet_id:-}}"
 
 IFS=$'\t' read -r SELECTED_VPC_ID SELECTED_SUBNET_ID SELECTED_AZ <<<"$(resolve_network_selection)"
 AMI_ID="${AMI_ID:-$(aws_region ssm get-parameter --name "$AMI_SSM_PARAM" --query 'Parameter.Value' --output text)}"
 
-SG_ID=""
-COORDINATOR_ID=""
-SHARD0_LEADER_ID=""
-SHARD0_FOLLOWER_ID=""
-SHARD1_LEADER_ID=""
-SHARD1_FOLLOWER_ID=""
-CLIENT_ID=""
+TF_DIR="$SCRIPT_DIR/terraform"
+TFVARS_FILE="$STATE_DIR/terraform.tfvars.json"
 
-COORDINATOR_PRIVATE_IP=""
-SHARD0_LEADER_PRIVATE_IP=""
-SHARD0_FOLLOWER_PRIVATE_IP=""
-SHARD1_LEADER_PRIVATE_IP=""
-SHARD1_FOLLOWER_PRIVATE_IP=""
-CLIENT_PRIVATE_IP=""
-
-COORDINATOR_PUBLIC_IP=""
-SHARD0_LEADER_PUBLIC_IP=""
-SHARD0_FOLLOWER_PUBLIC_IP=""
-SHARD1_LEADER_PUBLIC_IP=""
-SHARD1_FOLLOWER_PUBLIC_IP=""
-CLIENT_PUBLIC_IP=""
-
-NLB_NAME=""
-NLB_ARN=""
-NLB_DNS_NAME=""
-NLB_TARGET_GROUP_NAME=""
-NLB_TARGET_GROUP_ARN=""
-NLB_LISTENER_ARN=""
-
-write_launch_state() {
-  cat >"$STATE_FILE" <<EOF_STATE
-RUN_ID=$(quote "$RUN_ID")
-PROJECT_TAG=$(quote "$PROJECT_TAG")
-AWS_REGION=$(quote "$AWS_REGION")
-AMI_ID=$(quote "$AMI_ID")
-AMI_SSM_PARAM=$(quote "$AMI_SSM_PARAM")
-SELECTED_VPC_ID=$(quote "$SELECTED_VPC_ID")
-SELECTED_SUBNET_ID=$(quote "$SELECTED_SUBNET_ID")
-SELECTED_AZ=$(quote "$SELECTED_AZ")
-KEY_NAME=$(quote "$KEY_NAME")
-KEY_FILE=$(quote "$KEY_FILE")
-SG_ID=$(quote "$SG_ID")
-SG_NAME=$(quote "$SG_NAME")
-SSH_CIDR=$(quote "$SSH_CIDR")
-COORDINATOR_INSTANCE_TYPE=$(quote "$COORDINATOR_INSTANCE_TYPE")
-SERVER_INSTANCE_TYPE=$(quote "$SERVER_INSTANCE_TYPE")
-CLIENT_INSTANCE_TYPE=$(quote "$CLIENT_INSTANCE_TYPE")
-COORDINATOR_ID=$(quote "$COORDINATOR_ID")
-SHARD0_LEADER_ID=$(quote "$SHARD0_LEADER_ID")
-SHARD0_FOLLOWER_ID=$(quote "$SHARD0_FOLLOWER_ID")
-SHARD1_LEADER_ID=$(quote "$SHARD1_LEADER_ID")
-SHARD1_FOLLOWER_ID=$(quote "$SHARD1_FOLLOWER_ID")
-CLIENT_ID=$(quote "$CLIENT_ID")
-COORDINATOR_PRIVATE_IP=$(quote "$COORDINATOR_PRIVATE_IP")
-SHARD0_LEADER_PRIVATE_IP=$(quote "$SHARD0_LEADER_PRIVATE_IP")
-SHARD0_FOLLOWER_PRIVATE_IP=$(quote "$SHARD0_FOLLOWER_PRIVATE_IP")
-SHARD1_LEADER_PRIVATE_IP=$(quote "$SHARD1_LEADER_PRIVATE_IP")
-SHARD1_FOLLOWER_PRIVATE_IP=$(quote "$SHARD1_FOLLOWER_PRIVATE_IP")
-CLIENT_PRIVATE_IP=$(quote "$CLIENT_PRIVATE_IP")
-COORDINATOR_PUBLIC_IP=$(quote "$COORDINATOR_PUBLIC_IP")
-SHARD0_LEADER_PUBLIC_IP=$(quote "$SHARD0_LEADER_PUBLIC_IP")
-SHARD0_FOLLOWER_PUBLIC_IP=$(quote "$SHARD0_FOLLOWER_PUBLIC_IP")
-SHARD1_LEADER_PUBLIC_IP=$(quote "$SHARD1_LEADER_PUBLIC_IP")
-SHARD1_FOLLOWER_PUBLIC_IP=$(quote "$SHARD1_FOLLOWER_PUBLIC_IP")
-CLIENT_PUBLIC_IP=$(quote "$CLIENT_PUBLIC_IP")
-SSH_USER=$(quote "$SSH_USER")
-SERVER_THREADS=$(quote "$SERVER_THREADS")
-CLIENT_THREADS=$(quote "$CLIENT_THREADS")
-CLIENT_CONCURRENCY=$(quote "$CLIENT_CONCURRENCY")
-CLIENT_RETRY_OVERLOAD=$(quote "$CLIENT_RETRY_OVERLOAD")
-CLIENT_OVERLOAD_BACKOFF_INITIAL_MS=$(quote "$CLIENT_OVERLOAD_BACKOFF_INITIAL_MS")
-CLIENT_OVERLOAD_BACKOFF_MAX_MS=$(quote "$CLIENT_OVERLOAD_BACKOFF_MAX_MS")
-WARMUP_EPOCH_SECONDS=$(quote "$WARMUP_EPOCH_SECONDS")
-MEASURED_EPOCH_SECONDS=$(quote "$MEASURED_EPOCH_SECONDS")
-START_EPOCH_RETRY_TIMEOUT=$(quote "$START_EPOCH_RETRY_TIMEOUT")
-START_EPOCH_RETRY_INTERVAL=$(quote "$START_EPOCH_RETRY_INTERVAL")
-POST_EPOCH_FLUSH_SECONDS=$(quote "$POST_EPOCH_FLUSH_SECONDS")
-CLIENT_EXIT_GRACE_SECONDS=$(quote "$CLIENT_EXIT_GRACE_SECONDS")
-COORDINATOR_PORT=$(quote "$COORDINATOR_PORT")
-COORDINATOR_STANDBY_PORT=$(quote "$COORDINATOR_STANDBY_PORT")
-SHARD0_LEADER_PORT=$(quote "$SHARD0_LEADER_PORT")
-SHARD0_FOLLOWER_PORT=$(quote "$SHARD0_FOLLOWER_PORT")
-SHARD1_LEADER_PORT=$(quote "$SHARD1_LEADER_PORT")
-SHARD1_FOLLOWER_PORT=$(quote "$SHARD1_FOLLOWER_PORT")
-REMOTE_ROOT=$(quote "$REMOTE_ROOT")
-REMOTE_BIN_DIR=$(quote "$REMOTE_BIN_DIR")
-REMOTE_PHASES_DIR=$(quote "$REMOTE_PHASES_DIR")
-REMOTE_SMOKE_DIR=$(quote "$REMOTE_SMOKE_DIR")
-CONTROL_STORE_BACKEND=$(quote "$CONTROL_STORE_BACKEND")
-DYNAMODB_CONTROL_TABLE=$(quote "$DYNAMODB_CONTROL_TABLE")
-DYNAMODB_CONTROL_REGION=$(quote "$(dynamodb_control_region)")
-SESSION_STORE_BACKEND=$(quote "$SESSION_STORE_BACKEND")
-DYNAMODB_SESSION_TABLE=$(quote "$(dynamodb_session_table)")
-DYNAMODB_SESSION_REGION=$(quote "$(dynamodb_session_region)")
-COORDINATOR_HOLDER_ID=$(quote "$(coordinator_holder_id)")
-COORDINATOR_LEASE_TTL_SECONDS=$(quote "$COORDINATOR_LEASE_TTL_SECONDS")
-COORDINATOR_LEASE_RENEW_SECONDS=$(quote "$COORDINATOR_LEASE_RENEW_SECONDS")
-COORDINATOR_IAM_ROLE_NAME=$(quote "$(coordinator_iam_role_name)")
-COORDINATOR_IAM_INSTANCE_PROFILE_NAME=$(quote "$(coordinator_iam_instance_profile_name)")
-COORDINATOR_IAM_POLICY_NAME=$(quote "$COORDINATOR_IAM_POLICY_NAME")
-PUBLIC_ENTRY_BACKEND=$(quote "$PUBLIC_ENTRY_BACKEND")
-PUBLIC_ENTRY_MULTI_COORDINATOR=$(quote "$PUBLIC_ENTRY_MULTI_COORDINATOR")
-NLB_NAME=$(quote "$NLB_NAME")
-NLB_ARN=$(quote "$NLB_ARN")
-NLB_DNS_NAME=$(quote "$NLB_DNS_NAME")
-NLB_TARGET_GROUP_NAME=$(quote "$NLB_TARGET_GROUP_NAME")
-NLB_TARGET_GROUP_ARN=$(quote "$NLB_TARGET_GROUP_ARN")
-NLB_LISTENER_ARN=$(quote "$NLB_LISTENER_ARN")
-EOF_STATE
-}
-
-create_coordinator_instance_profile() {
-  local account_id role_name profile_name control_policy_arn session_policy_arn trust_doc policy_doc
-  account_id="$(aws_base sts get-caller-identity --query Account --output text)"
-  role_name="$(coordinator_iam_role_name)"
-  profile_name="$(coordinator_iam_instance_profile_name)"
-  control_policy_arn="arn:aws:dynamodb:$(dynamodb_control_region):${account_id}:table/$(dynamodb_control_table)"
-  session_policy_arn="arn:aws:dynamodb:$(dynamodb_session_region):${account_id}:table/$(dynamodb_session_table)"
-  trust_doc="$(mktemp)"
-  policy_doc="$(mktemp)"
-
-  cat >"$trust_doc" <<'JSON'
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "ec2.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-JSON
-
-  cat >"$policy_doc" <<JSON
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "dynamodb:DescribeTable",
-        "dynamodb:GetItem",
-        "dynamodb:UpdateItem",
-        "dynamodb:DeleteItem"
-      ],
-      "Resource": [
-        "$control_policy_arn",
-        "$session_policy_arn"
-      ]
-    }
-  ]
-}
-JSON
-
-  info "creating coordinator IAM role/profile for DynamoDB stores: role=$role_name profile=$profile_name"
-  if ! aws_base iam get-role --role-name "$role_name" >/dev/null 2>&1; then
-    aws_base iam create-role \
-      --role-name "$role_name" \
-      --assume-role-policy-document "file://$trust_doc" \
-      --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" >/dev/null
-  fi
-
-  aws_base iam put-role-policy \
-    --role-name "$role_name" \
-    --policy-name "$COORDINATOR_IAM_POLICY_NAME" \
-    --policy-document "file://$policy_doc" >/dev/null
-
-  if ! aws_base iam get-instance-profile --instance-profile-name "$profile_name" >/dev/null 2>&1; then
-    aws_base iam create-instance-profile \
-      --instance-profile-name "$profile_name" \
-      --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" >/dev/null
-  fi
-
-  aws_base iam add-role-to-instance-profile \
-    --instance-profile-name "$profile_name" \
-    --role-name "$role_name" >/dev/null 2>&1 || true
-
-  for _ in $(seq 1 30); do
-    if aws_base iam get-instance-profile \
-      --instance-profile-name "$profile_name" \
-      --query "InstanceProfile.Roles[?RoleName=='${role_name}'].RoleName | [0]" \
-      --output text | grep -qx "$role_name"; then
-      rm -f "$trust_doc" "$policy_doc"
-      return 0
-    fi
-    sleep 2
-  done
-
-  rm -f "$trust_doc" "$policy_doc"
-  die "coordinator IAM instance profile did not become ready: $profile_name"
-}
+if [[ ! -f "$KEY_FILE" ]]; then
+  info "generating SSH key: $KEY_FILE"
+  ssh-keygen -q -t rsa -b 4096 -m PEM -N "" -f "$KEY_FILE"
+fi
+chmod 400 "$KEY_FILE"
 
 info "launch run id: $RUN_ID"
 info "selected network: vpc=$SELECTED_VPC_ID subnet=$SELECTED_SUBNET_ID az=$SELECTED_AZ"
+info "writing Terraform variables: $TFVARS_FILE"
+
+export DYNAMODB_CONTROL_REGION_RESOLVED="$(dynamodb_control_region)"
+export DYNAMODB_SESSION_TABLE_RESOLVED="$(dynamodb_session_table)"
+export DYNAMODB_SESSION_REGION_RESOLVED="$(dynamodb_session_region)"
+export COORDINATOR_HOLDER_ID_RESOLVED="$(coordinator_holder_id)"
+export COORDINATOR_IAM_ROLE_NAME_RESOLVED="$(coordinator_iam_role_name)"
+export COORDINATOR_IAM_INSTANCE_PROFILE_NAME_RESOLVED="$(coordinator_iam_instance_profile_name)"
+CREATE_DYNAMODB_CONTROL_TABLE=false
+CREATE_DYNAMODB_SESSION_TABLE=false
 if dynamodb_runtime_enabled; then
-  create_coordinator_instance_profile
-  write_launch_state
-fi
-info "creating key pair: $KEY_NAME"
-aws_region ec2 create-key-pair \
-  --key-name "$KEY_NAME" \
-  --key-type rsa \
-  --key-format pem \
-  --tag-specifications "ResourceType=key-pair,Tags=[{Key=Project,Value=${PROJECT_TAG}},{Key=RunId,Value=${RUN_ID}}]" \
-  --query 'KeyMaterial' \
-  --output text >"$KEY_FILE"
-chmod 400 "$KEY_FILE"
-write_launch_state
-
-info "creating security group: $SG_NAME"
-SG_ID="$(aws_region ec2 create-security-group \
-  --group-name "$SG_NAME" \
-  --description "Temporary Riposte AWS evaluation security group ${RUN_ID}" \
-  --vpc-id "$SELECTED_VPC_ID" \
-  --query 'GroupId' \
-  --output text)"
-
-aws_region ec2 create-tags \
-  --resources "$SG_ID" \
-  --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" Key=Name,Value="$SG_NAME"
-write_launch_state
-
-info "authorizing SSH from $SSH_CIDR"
-aws_region ec2 authorize-security-group-ingress \
-  --group-id "$SG_ID" \
-  --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${SSH_CIDR}}]"
-
-info "authorizing all TCP within $SG_ID"
-aws_region ec2 authorize-security-group-ingress \
-  --group-id "$SG_ID" \
-  --ip-permissions "IpProtocol=tcp,FromPort=0,ToPort=65535,UserIdGroupPairs=[{GroupId=${SG_ID}}]"
-
-if public_entry_enabled; then
-  info "authorizing public coordinator RPC ingress for NLB entry on port $COORDINATOR_PORT"
-  aws_region ec2 authorize-security-group-ingress \
-    --group-id "$SG_ID" \
-    --ip-permissions "IpProtocol=tcp,FromPort=${COORDINATOR_PORT},ToPort=${COORDINATOR_PORT},IpRanges=[{CidrIp=0.0.0.0/0,Description='Riposte NLB public coordinator entry'}]"
-  if public_entry_multi_coordinator_enabled; then
-    info "authorizing public standby coordinator RPC ingress for NLB entry on port $COORDINATOR_STANDBY_PORT"
-    aws_region ec2 authorize-security-group-ingress \
-      --group-id "$SG_ID" \
-      --ip-permissions "IpProtocol=tcp,FromPort=${COORDINATOR_STANDBY_PORT},ToPort=${COORDINATOR_STANDBY_PORT},IpRanges=[{CidrIp=0.0.0.0/0,Description='Riposte NLB public standby coordinator entry'}]"
-  fi
-fi
-
-launch_instance() {
-  local name="$1"
-  local role="$2"
-  local instance_type="$3"
-  local instance_profile_name=""
-  local attempt out status
-
-  if [[ "$role" == "coordinator" ]] && dynamodb_runtime_enabled; then
-    instance_profile_name="$(coordinator_iam_instance_profile_name)"
-  fi
-
-  local args=(
-    --image-id "$AMI_ID" \
-    --instance-type "$instance_type" \
-    --key-name "$KEY_NAME" \
-    --security-group-ids "$SG_ID" \
-    --subnet-id "$SELECTED_SUBNET_ID" \
-    --instance-initiated-shutdown-behavior terminate \
-    --tag-specifications \
-      "ResourceType=instance,Tags=[{Key=Project,Value=${PROJECT_TAG}},{Key=RunId,Value=${RUN_ID}},{Key=Name,Value=${name}},{Key=Role,Value=${role}}]" \
-      "ResourceType=volume,Tags=[{Key=Project,Value=${PROJECT_TAG}},{Key=RunId,Value=${RUN_ID}},{Key=Name,Value=${name}-root},{Key=Role,Value=${role}}]" \
-    --query 'Instances[0].InstanceId' \
-    --output text
-  )
-
-  if [[ -n "$instance_profile_name" ]]; then
-    args+=(--iam-instance-profile "Name=$instance_profile_name")
-  fi
-
-  for attempt in $(seq 1 12); do
-    set +e
-    out="$(aws_region ec2 run-instances "${args[@]}" 2>&1)"
-    status=$?
-    set -e
-    if [[ $status -eq 0 ]]; then
-      printf '%s\n' "$out"
-      return 0
+  if [[ "$CONTROL_STORE_BACKEND" == "dynamodb" ]]; then
+    if aws_base --region "$DYNAMODB_CONTROL_REGION_RESOLVED" dynamodb describe-table --table-name "$DYNAMODB_CONTROL_TABLE" >/dev/null 2>&1; then
+      info "DynamoDB control table already exists; Terraform will not create it: $DYNAMODB_CONTROL_TABLE"
+    else
+      CREATE_DYNAMODB_CONTROL_TABLE=true
     fi
-    if [[ -n "$instance_profile_name" ]] && printf '%s\n' "$out" | grep -qi "Invalid IAM Instance Profile name"; then
-      info "waiting for IAM instance profile propagation before launching $name (attempt $attempt/12)"
-      sleep 10
-      continue
-    fi
-    printf '%s\n' "$out" >&2
-    return "$status"
-  done
-
-  printf '%s\n' "$out" >&2
-  return "$status"
-}
-
-info "launching instances"
-COORDINATOR_ID="$(launch_instance "${PROJECT_TAG}-coordinator" coordinator "$COORDINATOR_INSTANCE_TYPE")"
-write_launch_state
-SHARD0_LEADER_ID="$(launch_instance "${PROJECT_TAG}-shard0-leader" shard0-leader "$SERVER_INSTANCE_TYPE")"
-write_launch_state
-SHARD0_FOLLOWER_ID="$(launch_instance "${PROJECT_TAG}-shard0-follower" shard0-follower "$SERVER_INSTANCE_TYPE")"
-write_launch_state
-SHARD1_LEADER_ID="$(launch_instance "${PROJECT_TAG}-shard1-leader" shard1-leader "$SERVER_INSTANCE_TYPE")"
-write_launch_state
-SHARD1_FOLLOWER_ID="$(launch_instance "${PROJECT_TAG}-shard1-follower" shard1-follower "$SERVER_INSTANCE_TYPE")"
-write_launch_state
-CLIENT_ID="$(launch_instance "${PROJECT_TAG}-client" client "$CLIENT_INSTANCE_TYPE")"
-write_launch_state
-
-INSTANCE_IDS=(
-  "$COORDINATOR_ID"
-  "$SHARD0_LEADER_ID"
-  "$SHARD0_FOLLOWER_ID"
-  "$SHARD1_LEADER_ID"
-  "$SHARD1_FOLLOWER_ID"
-  "$CLIENT_ID"
-)
-
-info "waiting for instances to enter running state"
-aws_region ec2 wait instance-running --instance-ids "${INSTANCE_IDS[@]}"
-
-describe_field() {
-  local instance_id="$1"
-  local field="$2"
-  aws_region ec2 describe-instances \
-    --instance-ids "$instance_id" \
-    --query "Reservations[0].Instances[0].${field}" \
-    --output text
-}
-
-COORDINATOR_PRIVATE_IP="$(describe_field "$COORDINATOR_ID" PrivateIpAddress)"
-SHARD0_LEADER_PRIVATE_IP="$(describe_field "$SHARD0_LEADER_ID" PrivateIpAddress)"
-SHARD0_FOLLOWER_PRIVATE_IP="$(describe_field "$SHARD0_FOLLOWER_ID" PrivateIpAddress)"
-SHARD1_LEADER_PRIVATE_IP="$(describe_field "$SHARD1_LEADER_ID" PrivateIpAddress)"
-SHARD1_FOLLOWER_PRIVATE_IP="$(describe_field "$SHARD1_FOLLOWER_ID" PrivateIpAddress)"
-CLIENT_PRIVATE_IP="$(describe_field "$CLIENT_ID" PrivateIpAddress)"
-
-COORDINATOR_PUBLIC_IP="$(describe_field "$COORDINATOR_ID" PublicIpAddress)"
-SHARD0_LEADER_PUBLIC_IP="$(describe_field "$SHARD0_LEADER_ID" PublicIpAddress)"
-SHARD0_FOLLOWER_PUBLIC_IP="$(describe_field "$SHARD0_FOLLOWER_ID" PublicIpAddress)"
-SHARD1_LEADER_PUBLIC_IP="$(describe_field "$SHARD1_LEADER_ID" PublicIpAddress)"
-SHARD1_FOLLOWER_PUBLIC_IP="$(describe_field "$SHARD1_FOLLOWER_ID" PublicIpAddress)"
-CLIENT_PUBLIC_IP="$(describe_field "$CLIENT_ID" PublicIpAddress)"
-
-write_launch_state
-
-create_public_entry_nlb() {
-  local nlb_suffix
-  nlb_suffix="$(printf '%s' "$RUN_ID" | tr -cd '[:alnum:]' | tail -c 16)"
-  NLB_NAME="${NLB_NAME:-riposte-${nlb_suffix}}"
-  NLB_TARGET_GROUP_NAME="${NLB_TARGET_GROUP_NAME:-riposte-tg-${nlb_suffix}}"
-
-  info "creating public Network Load Balancer: $NLB_NAME"
-  NLB_ARN="$(aws_region elbv2 create-load-balancer \
-    --name "$NLB_NAME" \
-    --type network \
-    --scheme internet-facing \
-    --subnets "$SELECTED_SUBNET_ID" \
-    --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" \
-    --query 'LoadBalancers[0].LoadBalancerArn' \
-    --output text)"
-  NLB_DNS_NAME="$(aws_region elbv2 describe-load-balancers \
-    --load-balancer-arns "$NLB_ARN" \
-    --query 'LoadBalancers[0].DNSName' \
-    --output text)"
-  write_launch_state
-
-  aws_region elbv2 wait load-balancer-available --load-balancer-arns "$NLB_ARN"
-
-  info "creating NLB target group: $NLB_TARGET_GROUP_NAME"
-  NLB_TARGET_GROUP_ARN="$(aws_region elbv2 create-target-group \
-    --name "$NLB_TARGET_GROUP_NAME" \
-    --protocol TCP \
-    --port "$COORDINATOR_PORT" \
-    --vpc-id "$SELECTED_VPC_ID" \
-    --target-type instance \
-    --health-check-protocol TCP \
-    --tags Key=Project,Value="$PROJECT_TAG" Key=RunId,Value="$RUN_ID" \
-    --query 'TargetGroups[0].TargetGroupArn' \
-    --output text)"
-  write_launch_state
-
-  info "registering coordinator instance with NLB target group"
-  aws_region elbv2 register-targets \
-    --target-group-arn "$NLB_TARGET_GROUP_ARN" \
-    --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_PORT"
-  if public_entry_multi_coordinator_enabled; then
-    info "registering standby coordinator port with NLB target group"
-    aws_region elbv2 register-targets \
-      --target-group-arn "$NLB_TARGET_GROUP_ARN" \
-      --targets "Id=$COORDINATOR_ID,Port=$COORDINATOR_STANDBY_PORT"
   fi
+  if [[ "$SESSION_STORE_BACKEND" == "dynamodb" ]]; then
+    if [[ "$DYNAMODB_SESSION_TABLE_RESOLVED" == "$DYNAMODB_CONTROL_TABLE" && "$DYNAMODB_SESSION_REGION_RESOLVED" == "$DYNAMODB_CONTROL_REGION_RESOLVED" && "$CREATE_DYNAMODB_CONTROL_TABLE" == "true" ]]; then
+      :
+    elif aws_base --region "$DYNAMODB_SESSION_REGION_RESOLVED" dynamodb describe-table --table-name "$DYNAMODB_SESSION_TABLE_RESOLVED" >/dev/null 2>&1; then
+      info "DynamoDB session table already exists; Terraform will not create it: $DYNAMODB_SESSION_TABLE_RESOLVED"
+    else
+      CREATE_DYNAMODB_SESSION_TABLE=true
+    fi
+  fi
+fi
+export AWS_REGION PROJECT_TAG RUN_ID AMI_ID AMI_SSM_PARAM SELECTED_VPC_ID SELECTED_SUBNET_ID SELECTED_AZ
+export SSH_CIDR SSH_USER KEY_NAME KEY_FILE SG_NAME COORDINATOR_INSTANCE_TYPE SERVER_INSTANCE_TYPE CLIENT_INSTANCE_TYPE
+export SERVER_THREADS CLIENT_THREADS CLIENT_CONCURRENCY CLIENT_RETRY_OVERLOAD CLIENT_OVERLOAD_BACKOFF_INITIAL_MS CLIENT_OVERLOAD_BACKOFF_MAX_MS
+export WARMUP_EPOCH_SECONDS MEASURED_EPOCH_SECONDS START_EPOCH_RETRY_TIMEOUT START_EPOCH_RETRY_INTERVAL POST_EPOCH_FLUSH_SECONDS CLIENT_EXIT_GRACE_SECONDS
+export COORDINATOR_PORT COORDINATOR_STANDBY_PORT SHARD0_LEADER_PORT SHARD0_FOLLOWER_PORT SHARD1_LEADER_PORT SHARD1_FOLLOWER_PORT
+export REMOTE_ROOT REMOTE_BIN_DIR REMOTE_PHASES_DIR REMOTE_SMOKE_DIR CONTROL_STORE_BACKEND DYNAMODB_CONTROL_TABLE SESSION_STORE_BACKEND
+export COORDINATOR_LEASE_TTL_SECONDS COORDINATOR_LEASE_RENEW_SECONDS COORDINATOR_IAM_POLICY_NAME PUBLIC_ENTRY_BACKEND PUBLIC_ENTRY_MULTI_COORDINATOR
+export CREATE_DYNAMODB_CONTROL_TABLE CREATE_DYNAMODB_SESSION_TABLE
 
-  info "creating NLB listener on TCP port $COORDINATOR_PORT"
-  NLB_LISTENER_ARN="$(aws_region elbv2 create-listener \
-    --load-balancer-arn "$NLB_ARN" \
-    --protocol TCP \
-    --port "$COORDINATOR_PORT" \
-    --default-actions "Type=forward,TargetGroupArn=$NLB_TARGET_GROUP_ARN" \
-    --query 'Listeners[0].ListenerArn' \
-    --output text)"
-  write_launch_state
+python3 - "$TFVARS_FILE" <<'PY'
+import json
+import os
+import sys
+
+payload = {
+    "aws_region": os.environ["AWS_REGION"],
+    "project_tag": os.environ["PROJECT_TAG"],
+    "run_id": os.environ["RUN_ID"],
+    "ami_id": os.environ["AMI_ID"],
+    "ami_ssm_param": os.environ["AMI_SSM_PARAM"],
+    "vpc_id": os.environ["SELECTED_VPC_ID"],
+    "subnet_id": os.environ["SELECTED_SUBNET_ID"],
+    "availability_zone": os.environ["SELECTED_AZ"],
+    "ssh_cidr": os.environ["SSH_CIDR"],
+    "ssh_user": os.environ["SSH_USER"],
+    "key_name": os.environ["KEY_NAME"],
+    "key_file": os.environ["KEY_FILE"],
+    "ssh_public_key_path": os.environ["KEY_FILE"] + ".pub",
+    "sg_name": os.environ["SG_NAME"],
+    "coordinator_instance_type": os.environ["COORDINATOR_INSTANCE_TYPE"],
+    "server_instance_type": os.environ["SERVER_INSTANCE_TYPE"],
+    "client_instance_type": os.environ["CLIENT_INSTANCE_TYPE"],
+    "server_threads": os.environ["SERVER_THREADS"],
+    "client_threads": os.environ["CLIENT_THREADS"],
+    "client_concurrency": os.environ["CLIENT_CONCURRENCY"],
+    "client_retry_overload": os.environ["CLIENT_RETRY_OVERLOAD"],
+    "client_overload_backoff_initial_ms": os.environ["CLIENT_OVERLOAD_BACKOFF_INITIAL_MS"],
+    "client_overload_backoff_max_ms": os.environ["CLIENT_OVERLOAD_BACKOFF_MAX_MS"],
+    "warmup_epoch_seconds": os.environ["WARMUP_EPOCH_SECONDS"],
+    "measured_epoch_seconds": os.environ["MEASURED_EPOCH_SECONDS"],
+    "start_epoch_retry_timeout": os.environ["START_EPOCH_RETRY_TIMEOUT"],
+    "start_epoch_retry_interval": os.environ["START_EPOCH_RETRY_INTERVAL"],
+    "post_epoch_flush_seconds": os.environ["POST_EPOCH_FLUSH_SECONDS"],
+    "client_exit_grace_seconds": os.environ["CLIENT_EXIT_GRACE_SECONDS"],
+    "coordinator_port": os.environ["COORDINATOR_PORT"],
+    "coordinator_standby_port": os.environ["COORDINATOR_STANDBY_PORT"],
+    "shard0_leader_port": os.environ["SHARD0_LEADER_PORT"],
+    "shard0_follower_port": os.environ["SHARD0_FOLLOWER_PORT"],
+    "shard1_leader_port": os.environ["SHARD1_LEADER_PORT"],
+    "shard1_follower_port": os.environ["SHARD1_FOLLOWER_PORT"],
+    "remote_root": os.environ["REMOTE_ROOT"],
+    "remote_bin_dir": os.environ["REMOTE_BIN_DIR"],
+    "remote_phases_dir": os.environ["REMOTE_PHASES_DIR"],
+    "remote_smoke_dir": os.environ["REMOTE_SMOKE_DIR"],
+    "control_store_backend": os.environ["CONTROL_STORE_BACKEND"],
+    "dynamodb_control_table": os.environ["DYNAMODB_CONTROL_TABLE"],
+    "dynamodb_control_region": os.environ["DYNAMODB_CONTROL_REGION_RESOLVED"],
+    "session_store_backend": os.environ["SESSION_STORE_BACKEND"],
+    "dynamodb_session_table": os.environ["DYNAMODB_SESSION_TABLE_RESOLVED"],
+    "dynamodb_session_region": os.environ["DYNAMODB_SESSION_REGION_RESOLVED"],
+    "create_dynamodb_control_table": os.environ["CREATE_DYNAMODB_CONTROL_TABLE"] == "true",
+    "create_dynamodb_session_table": os.environ["CREATE_DYNAMODB_SESSION_TABLE"] == "true",
+    "coordinator_holder_id": os.environ["COORDINATOR_HOLDER_ID_RESOLVED"],
+    "coordinator_lease_ttl_seconds": os.environ["COORDINATOR_LEASE_TTL_SECONDS"],
+    "coordinator_lease_renew_seconds": os.environ["COORDINATOR_LEASE_RENEW_SECONDS"],
+    "coordinator_iam_role_name": os.environ["COORDINATOR_IAM_ROLE_NAME_RESOLVED"],
+    "coordinator_iam_instance_profile_name": os.environ["COORDINATOR_IAM_INSTANCE_PROFILE_NAME_RESOLVED"],
+    "coordinator_iam_policy_name": os.environ["COORDINATOR_IAM_POLICY_NAME"],
+    "public_entry_backend": os.environ["PUBLIC_ENTRY_BACKEND"],
+    "public_entry_multi_coordinator": os.environ["PUBLIC_ENTRY_MULTI_COORDINATOR"],
 }
 
-if public_entry_enabled; then
-  create_public_entry_nlb
+with open(sys.argv[1], "w") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+
+terraform -chdir="$TF_DIR" init
+
+apply_args=(-var-file="$TFVARS_FILE")
+if [[ "${TERRAFORM_AUTO_APPROVE:-1}" != "0" ]]; then
+  apply_args+=(-auto-approve)
 fi
+
+info "applying Terraform infrastructure"
+terraform -chdir="$TF_DIR" apply "${apply_args[@]}"
+
+info "writing launch state: $STATE_FILE"
+terraform -chdir="$TF_DIR" output -json >"$STATE_DIR/terraform-output.json"
+python3 - "$STATE_FILE" "$STATE_DIR/terraform-output.json" <<'PY'
+import json
+import shlex
+import sys
+
+with open(sys.argv[2]) as fh:
+    payload = json.load(fh)["state_env"]["value"]
+with open(sys.argv[1], "w") as fh:
+    for key in sorted(payload):
+        value = "" if payload[key] is None else str(payload[key])
+        fh.write(f"{key}={shlex.quote(value)}\n")
+PY
 
 echo
 cat "$STATE_FILE"
 echo
+
+# shellcheck disable=SC1090
+source "$STATE_FILE"
 
 wait_for_ssh "$COORDINATOR_PUBLIC_IP" "coordinator"
 wait_for_ssh "$SHARD0_LEADER_PUBLIC_IP" "shard0-leader"
