@@ -399,6 +399,128 @@ func TestUploadWithOverloadRetryReturnsUnexpectedError(t *testing.T) {
 	}
 }
 
+func TestIsCoordinatorNotActiveError(t *testing.T) {
+	if !isCoordinatorNotActiveError(errors.New("Coordinator not active")) {
+		t.Fatal("expected Coordinator not active to be classified")
+	}
+	if isCoordinatorNotActiveError(errors.New("No active epoch")) {
+		t.Fatal("No active epoch must not be classified as coordinator-not-active")
+	}
+}
+
+func TestUploadWithCoordinatorRetryRetriesSamePlaintext(t *testing.T) {
+	msg := &db.Plaintext{X: 5, Y: 6}
+	req := uploadRequest{msg: msg, routeRow: msg.Y}
+	config := coordinatorRetryConfig{
+		enabled:        true,
+		initialBackoff: 10 * time.Millisecond,
+		maxBackoff:     25 * time.Millisecond,
+	}
+	calls := 0
+	var sleeps []time.Duration
+	err := uploadWithCoordinatorRetry(
+		req,
+		config,
+		func(got uploadRequest) error {
+			calls++
+			if got.msg != msg || got.routeRow != msg.Y {
+				t.Fatal("expected retry to reuse the same plaintext")
+			}
+			if calls <= 3 {
+				return errors.New("Coordinator not active")
+			}
+			return nil
+		},
+		func(delay time.Duration) {
+			sleeps = append(sleeps, delay)
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected retry to eventually succeed, got %v", err)
+	}
+	if calls != 4 {
+		t.Fatalf("expected four upload attempts, got %d", calls)
+	}
+	wantSleeps := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 25 * time.Millisecond}
+	if len(sleeps) != len(wantSleeps) {
+		t.Fatalf("expected sleeps %v, got %v", wantSleeps, sleeps)
+	}
+	for i := range wantSleeps {
+		if sleeps[i] != wantSleeps[i] {
+			t.Fatalf("expected sleeps %v, got %v", wantSleeps, sleeps)
+		}
+	}
+}
+
+func TestUploadWithCoordinatorRetryDisabledReturnsCoordinatorNotActive(t *testing.T) {
+	wantErr := errors.New("Coordinator not active")
+	calls := 0
+	err := uploadWithCoordinatorRetry(
+		uploadRequest{msg: &db.Plaintext{}},
+		coordinatorRetryConfig{},
+		func(uploadRequest) error {
+			calls++
+			return wantErr
+		},
+		func(time.Duration) {
+			t.Fatal("sleep should not run when retry is disabled")
+		},
+	)
+	if err != wantErr {
+		t.Fatalf("expected coordinator-not-active error %v, got %v", wantErr, err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one upload attempt, got %d", calls)
+	}
+}
+
+func TestUploadWithCoordinatorRetryStopsOnNoActiveEpoch(t *testing.T) {
+	config := coordinatorRetryConfig{
+		enabled:        true,
+		initialBackoff: 10 * time.Millisecond,
+		maxBackoff:     20 * time.Millisecond,
+	}
+	err := uploadWithCoordinatorRetry(
+		uploadRequest{msg: &db.Plaintext{}},
+		config,
+		func(uploadRequest) error {
+			return errors.New("No active epoch")
+		},
+		func(time.Duration) {
+			t.Fatal("sleep should not run for No active epoch")
+		},
+	)
+	if err == nil || err.Error() != "No active epoch" {
+		t.Fatalf("expected No active epoch error, got %v", err)
+	}
+}
+
+func TestUploadWithCoordinatorRetryReturnsFatalErrors(t *testing.T) {
+	config := coordinatorRetryConfig{
+		enabled:        true,
+		initialBackoff: 10 * time.Millisecond,
+		maxBackoff:     20 * time.Millisecond,
+	}
+	for _, wantErr := range []error{
+		errors.New("Bogus UUID"),
+		errors.New("unexpected EOF"),
+	} {
+		err := uploadWithCoordinatorRetry(
+			uploadRequest{msg: &db.Plaintext{}},
+			config,
+			func(uploadRequest) error {
+				return wantErr
+			},
+			func(time.Duration) {
+				t.Fatal("sleep should not run for fatal errors")
+			},
+		)
+		if err != wantErr {
+			t.Fatalf("expected fatal error %v, got %v", wantErr, err)
+		}
+	}
+}
+
 func TestRunClientLoopSignalsStopOnNoActiveEpoch(t *testing.T) {
 	var signaled bool
 	var calls int
@@ -419,6 +541,24 @@ func TestRunClientLoopSignalsStopOnNoActiveEpoch(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("expected one upload attempt, got %d", calls)
+	}
+}
+
+func TestRunClientLoopDoesNotSignalStopOnCoordinatorNotActive(t *testing.T) {
+	var signaled bool
+	err := runClientLoop(
+		true,
+		func() bool { return false },
+		func() { signaled = true },
+		func() error {
+			return errors.New("Coordinator not active")
+		},
+	)
+	if err == nil || err.Error() != "Coordinator not active" {
+		t.Fatalf("expected Coordinator not active error, got %v", err)
+	}
+	if signaled {
+		t.Fatal("Coordinator not active must not signal hammer shutdown")
 	}
 }
 

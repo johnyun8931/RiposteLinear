@@ -54,6 +54,48 @@ type overloadRetryConfig struct {
 	maxBackoff     time.Duration
 }
 
+type coordinatorRetryConfig struct {
+	enabled        bool
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+}
+
+type rpcUploader struct {
+	server string
+	client *rpc.Client
+}
+
+func (u *rpcUploader) connect() error {
+	if u.client != nil {
+		return nil
+	}
+	certs := make([]tls.Certificate, 1)
+	certs[0] = utils.LeaderCertificate
+	client, err := utils.DialHTTPWithTLS("tcp", u.server, -1, certs)
+	if err != nil {
+		return fmt.Errorf("could not connect: %w", err)
+	}
+	u.client = client
+	return nil
+}
+
+func (u *rpcUploader) close() {
+	if u.client == nil {
+		return
+	}
+	if err := u.client.Close(); err != nil {
+		log.Printf("Close client connection: %v", err)
+	}
+	u.client = nil
+}
+
+func (u *rpcUploader) upload(req uploadRequest) error {
+	if err := u.connect(); err != nil {
+		return err
+	}
+	return tryUpload(u.client, req)
+}
+
 func tryUpload(client *rpc.Client, req uploadRequest) error {
 	var upRes1 db.UploadReply1
 	var upArgs1 db.UploadArgs1
@@ -103,8 +145,22 @@ func isNoActiveEpochError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "No active epoch")
 }
 
+func isCoordinatorNotActiveError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Coordinator not active")
+}
+
 func isOverloadError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "server overloaded: ready queue full")
+}
+
+func nextBackoff(backoff time.Duration, maximum time.Duration) time.Duration {
+	if backoff < maximum {
+		backoff *= 2
+		if backoff > maximum {
+			backoff = maximum
+		}
+	}
+	return backoff
 }
 
 func uploadWithOverloadRetry(req uploadRequest, config overloadRetryConfig, upload func(uploadRequest) error, sleep func(time.Duration)) error {
@@ -119,12 +175,23 @@ func uploadWithOverloadRetry(req uploadRequest, config overloadRetryConfig, uplo
 		}
 		log.Printf("Overload retry after %s: %v", backoff, err)
 		sleep(backoff)
-		if backoff < config.maxBackoff {
-			backoff *= 2
-			if backoff > config.maxBackoff {
-				backoff = config.maxBackoff
-			}
+		backoff = nextBackoff(backoff, config.maxBackoff)
+	}
+}
+
+func uploadWithCoordinatorRetry(req uploadRequest, config coordinatorRetryConfig, upload func(uploadRequest) error, sleep func(time.Duration)) error {
+	backoff := config.initialBackoff
+	for {
+		err := upload(req)
+		if err == nil {
+			return nil
 		}
+		if !config.enabled || !isCoordinatorNotActiveError(err) {
+			return err
+		}
+		log.Printf("Coordinator retry after %s: %v", backoff, err)
+		sleep(backoff)
+		backoff = nextBackoff(backoff, config.maxBackoff)
 	}
 }
 
@@ -146,14 +213,9 @@ func runClientLoop(hammer bool, shouldStop func() bool, signalStop func(), doUpl
 	return nil
 }
 
-func runClientWithStop(server string, nextMessage messageProvider, retryConfig overloadRetryConfig, shouldStop func() bool, signalStop func()) error {
-	certs := make([]tls.Certificate, 1)
-	certs[0] = utils.LeaderCertificate
-	client, err := utils.DialHTTPWithTLS("tcp", server, -1, certs)
-	if err != nil {
-		return fmt.Errorf("could not connect: %w", err)
-	}
-	defer client.Close()
+func runClientWithStop(server string, nextMessage messageProvider, overloadConfig overloadRetryConfig, coordinatorConfig coordinatorRetryConfig, shouldStop func() bool, signalStop func()) error {
+	uploader := &rpcUploader{server: server}
+	defer uploader.close()
 
 	//log.Printf("Connected")
 	return runClientLoop(*hammerFlag, shouldStop, signalStop, func() error {
@@ -169,8 +231,10 @@ func runClientWithStop(server string, nextMessage messageProvider, retryConfig o
 
 		if *donothingFlag {
 			var a, b int
-			err := client.Call("Server.DoNothing", &a, &b)
-			if err != nil {
+			if err := uploader.connect(); err != nil {
+				return err
+			}
+			if err := uploader.client.Call("Server.DoNothing", &a, &b); err != nil {
 				return err
 			}
 
@@ -179,8 +243,14 @@ func runClientWithStop(server string, nextMessage messageProvider, retryConfig o
 			if err != nil {
 				return err
 			}
-			err = uploadWithOverloadRetry(req, retryConfig, func(req uploadRequest) error {
-				return tryUpload(client, req)
+			err = uploadWithCoordinatorRetry(req, coordinatorConfig, func(req uploadRequest) error {
+				return uploadWithOverloadRetry(req, overloadConfig, func(req uploadRequest) error {
+					err := uploader.upload(req)
+					if coordinatorConfig.enabled && isCoordinatorNotActiveError(err) {
+						uploader.close()
+					}
+					return err
+				}, time.Sleep)
 			}, time.Sleep)
 			if err != nil {
 				log.Printf("Upload error: %v", err)
@@ -266,12 +336,24 @@ func queryCoordinatorGlobalTableHeight(target string) (int, error) {
 }
 
 func runClientWorker(target string, globalTableHeight int, shouldStop func() bool, signalStop func()) error {
-	retryConfig, err := resolveOverloadRetryConfig(*hammerFlag && *retryOverloadFlag, *overloadBackoffInitialFlag, *overloadBackoffMaxFlag)
+	overloadEnabled := *hammerFlag && *retryOverloadFlag
+	coordinatorRetryEnabled := *coordinatorFlag != ""
+	backoffConfig, err := resolveBackoffConfig(overloadEnabled || coordinatorRetryEnabled, *overloadBackoffInitialFlag, *overloadBackoffMaxFlag)
 	if err != nil {
 		return err
 	}
+	overloadConfig := overloadRetryConfig{
+		enabled:        overloadEnabled,
+		initialBackoff: backoffConfig.initialBackoff,
+		maxBackoff:     backoffConfig.maxBackoff,
+	}
+	coordinatorConfig := coordinatorRetryConfig{
+		enabled:        coordinatorRetryEnabled,
+		initialBackoff: backoffConfig.initialBackoff,
+		maxBackoff:     backoffConfig.maxBackoff,
+	}
 	if *donothingFlag {
-		return runClientWithStop(target, nil, retryConfig, shouldStop, signalStop)
+		return runClientWithStop(target, nil, overloadConfig, coordinatorConfig, shouldStop, signalStop)
 	}
 	//log.Printf("=== Starting Client ===")
 	nextMessage, err := resolveMessageProvider(*xFlag, *yFlag, *payloadFlag, globalTableHeight)
@@ -281,7 +363,7 @@ func runClientWorker(target string, globalTableHeight int, shouldStop func() boo
 
 	//log.Printf("Insert into [%v,%v]", xIdx, yIdx)
 	//log.Printf("Plaintext [%v]", msg)
-	return runClientWithStop(target, nextMessage, retryConfig, shouldStop, signalStop)
+	return runClientWithStop(target, nextMessage, overloadConfig, coordinatorConfig, shouldStop, signalStop)
 }
 
 func runHammerClients(concurrent int, runOnce func(func() bool, func()) error) error {
@@ -325,25 +407,36 @@ func resolveHammerConcurrency(value uint) (int, error) {
 	return int(value), nil
 }
 
-func resolveOverloadRetryConfig(enabled bool, initialMS uint, maxMS uint) (overloadRetryConfig, error) {
+func resolveBackoffConfig(enabled bool, initialMS uint, maxMS uint) (coordinatorRetryConfig, error) {
 	if !enabled {
-		return overloadRetryConfig{}, nil
+		return coordinatorRetryConfig{}, nil
 	}
 	if initialMS == 0 {
-		return overloadRetryConfig{}, errors.New("-overload-backoff-initial-ms must be positive")
+		return coordinatorRetryConfig{}, errors.New("-overload-backoff-initial-ms must be positive")
 	}
 	if maxMS == 0 {
-		return overloadRetryConfig{}, errors.New("-overload-backoff-max-ms must be positive")
+		return coordinatorRetryConfig{}, errors.New("-overload-backoff-max-ms must be positive")
 	}
 	initial := time.Duration(initialMS) * time.Millisecond
 	maximum := time.Duration(maxMS) * time.Millisecond
 	if maximum < initial {
-		return overloadRetryConfig{}, errors.New("-overload-backoff-max-ms must be greater than or equal to -overload-backoff-initial-ms")
+		return coordinatorRetryConfig{}, errors.New("-overload-backoff-max-ms must be greater than or equal to -overload-backoff-initial-ms")
 	}
-	return overloadRetryConfig{
-		enabled:        true,
+	return coordinatorRetryConfig{
 		initialBackoff: initial,
 		maxBackoff:     maximum,
+	}, nil
+}
+
+func resolveOverloadRetryConfig(enabled bool, initialMS uint, maxMS uint) (overloadRetryConfig, error) {
+	backoffConfig, err := resolveBackoffConfig(enabled, initialMS, maxMS)
+	if err != nil {
+		return overloadRetryConfig{}, err
+	}
+	return overloadRetryConfig{
+		enabled:        enabled,
+		initialBackoff: backoffConfig.initialBackoff,
+		maxBackoff:     backoffConfig.maxBackoff,
 	}, nil
 }
 
