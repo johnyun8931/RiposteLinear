@@ -36,6 +36,9 @@ type ControlStore interface {
 	PutShardConfig(config ShardConfigRecord) error
 	GetEpochShardConfig(epochID int64) (ShardConfigRecord, bool, error)
 	PutEpochShardConfig(epochID int64, config ShardConfigRecord) error
+	PutScalingRecommendation(record ScalingRecommendationRecord) error
+	GetLatestScalingRecommendation() (ScalingRecommendationRecord, bool, error)
+	GetEpochScalingRecommendation(epochID int64) (ScalingRecommendationRecord, bool, error)
 }
 
 type ShardConfigRecord struct {
@@ -45,6 +48,22 @@ type ShardConfigRecord struct {
 	RowsPerShard      int
 	GlobalTableHeight int
 	Shards            []ShardConfig
+}
+
+type ScalingRecommendationRecord struct {
+	Key                       string
+	EpochID                   int64
+	AcceptedRequestCount      int64
+	DurationSeconds           int64
+	CurrentShardCount         int
+	RecommendedShardCount     int
+	TargetRowsPerShard        int
+	RequestDensity            float64
+	Action                    string
+	Reason                    string
+	ProposedGlobalTableHeight int
+	ShardConfigVersion        int64
+	CreatedAt                 time.Time
 }
 
 type IngestionMessage struct {

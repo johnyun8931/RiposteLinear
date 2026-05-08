@@ -35,6 +35,12 @@ var flagCoordinatorID = flag.String("coordinator-id", "", "Coordinator lease hol
 var flagLeaseTTLSeconds = flag.Int64("lease-ttl-seconds", int64(defaultCoordinatorLeaseTTL/time.Second), "Coordinator lease TTL in seconds")
 var flagLeaseRenewSeconds = flag.Int64("lease-renew-seconds", int64(defaultCoordinatorLeaseRenewInterval/time.Second), "Coordinator lease renewal interval in seconds")
 var flagStandby = flag.Bool("standby", false, "If set, stay alive as passive standby when another coordinator holds the lease")
+var flagScalingMinShards = flag.Int("scaling-min-shards", 0, "Minimum shard count for scaling recommendations; defaults to current shard count")
+var flagScalingMaxShards = flag.Int("scaling-max-shards", 0, "Maximum shard count for scaling recommendations; defaults to current shard count")
+var flagScalingTargetRowsPerShard = flag.Int("scaling-target-rows-per-shard", db.TABLE_HEIGHT, "Target logical rows per shard for scaling recommendations")
+var flagScalingUpDensity = flag.Float64("scaling-up-density", defaultScaleUpDensityThreshold, "Request-density threshold for grow recommendations")
+var flagScalingDownDensity = flag.Float64("scaling-down-density", defaultScaleDownDensityThreshold, "Request-density threshold for shrink recommendations")
+var flagScalingMaxShardMultiplier = flag.Int("scaling-max-shard-multiplier", defaultMaxShardMultiplier, "Maximum shard-count multiplier for grow/shrink recommendations")
 
 var shardFlags shardListType
 
@@ -86,8 +92,20 @@ func main() {
 	}
 	leaseTTL := time.Duration(*flagLeaseTTLSeconds) * time.Second
 	leaseRenewInterval := time.Duration(*flagLeaseRenewSeconds) * time.Second
+	scalingConfig, err := resolveScalingPolicyConfig(
+		len(shards),
+		*flagScalingMinShards,
+		*flagScalingMaxShards,
+		*flagScalingTargetRowsPerShard,
+		*flagScalingUpDensity,
+		*flagScalingDownDensity,
+		*flagScalingMaxShardMultiplier,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	coord, err := newCoordinatorWithStandbyConfig(
+	coord, err := newCoordinatorWithStandbyAndScalingConfig(
 		shards,
 		nil,
 		controlStore,
@@ -97,6 +115,7 @@ func main() {
 		leaseTTL,
 		leaseRenewInterval,
 		*flagStandby,
+		scalingConfig,
 	)
 	if err != nil {
 		log.Fatal(err)

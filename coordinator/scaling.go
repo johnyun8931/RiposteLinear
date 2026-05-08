@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"strings"
 
 	"bitbucket.org/henrycg/riposte/db"
 )
@@ -51,6 +53,39 @@ func defaultScalingPolicyConfig(currentShardCount int) ScalingPolicyConfig {
 		ScaleDownDensityThreshold: defaultScaleDownDensityThreshold,
 		MaxShardMultiplier:        defaultMaxShardMultiplier,
 	}
+}
+
+func resolveScalingPolicyConfig(currentShardCount int, minShards int, maxShards int, targetRowsPerShard int, scaleUpDensity float64, scaleDownDensity float64, maxShardMultiplier int) (ScalingPolicyConfig, error) {
+	if minShards == 0 {
+		minShards = currentShardCount
+	}
+	if maxShards == 0 {
+		maxShards = currentShardCount
+	}
+	config := ScalingPolicyConfig{
+		MinShards:                 minShards,
+		MaxShards:                 maxShards,
+		TargetRowsPerShard:        targetRowsPerShard,
+		ScaleUpDensityThreshold:   scaleUpDensity,
+		ScaleDownDensityThreshold: scaleDownDensity,
+		MaxShardMultiplier:        maxShardMultiplier,
+	}
+	if currentShardCount <= 0 {
+		return ScalingPolicyConfig{}, fmt.Errorf("current shard count must be positive")
+	}
+	if config.TargetRowsPerShard == 0 {
+		config.TargetRowsPerShard = db.TABLE_HEIGHT
+	}
+	metrics := EpochScalingMetrics{
+		CurrentShardCount:    currentShardCount,
+		AcceptedRequestCount: int64(currentShardCount * config.TargetRowsPerShard * 2),
+		DurationSeconds:      1,
+	}
+	rec := ComputeNextDatasetScale(metrics, config)
+	if strings.HasPrefix(rec.Reason, "invalid ") {
+		return ScalingPolicyConfig{}, errors.New(rec.Reason)
+	}
+	return config, nil
 }
 
 func ComputeNextDatasetScale(metrics EpochScalingMetrics, config ScalingPolicyConfig) ScalingRecommendation {

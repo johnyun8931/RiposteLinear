@@ -99,6 +99,29 @@ func shardConfigItem(config ShardConfigRecord) map[string]ddbtypes.AttributeValu
 	}
 }
 
+func scalingRecommendationItem(record ScalingRecommendationRecord) map[string]ddbtypes.AttributeValue {
+	values := scalingRecommendationToAttributes(record)
+	key := record.Key
+	if key == "" {
+		key = epochScalingRecommendationKey(record.EpochID)
+	}
+	return map[string]ddbtypes.AttributeValue{
+		dynamoControlPKName:            &ddbtypes.AttributeValueMemberS{Value: key},
+		"epoch_id":                     values[":epoch_id"],
+		"accepted_request_count":       values[":accepted_request_count"],
+		"duration_secs":                values[":duration_secs"],
+		"current_shard_count":          values[":current_shard_count"],
+		"recommended_shard_count":      values[":recommended_shard_count"],
+		"target_rows_per_shard":        values[":target_rows_per_shard"],
+		"request_density":              values[":request_density"],
+		"action":                       values[":action"],
+		"reason":                       values[":reason"],
+		"proposed_global_table_height": values[":proposed_global_table_height"],
+		"shard_config_version":         values[":shard_config_version"],
+		"created_unix_ms":              values[":created_unix_ms"],
+	}
+}
+
 func TestDynamoDBControlStoreAcquireLeaseUsesConditionalUpdate(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
 	fake := &fakeDynamoDBControlClient{
@@ -302,6 +325,116 @@ func TestDynamoDBControlStoreEpochShardConfigRejectsDifferentRewrite(t *testing.
 	}, 3), 7))
 	if err == nil || !strings.Contains(err.Error(), "different config") {
 		t.Fatalf("expected different config error, got %v", err)
+	}
+}
+
+func TestDynamoDBControlStoreScalingRecommendation(t *testing.T) {
+	created := time.Unix(4000, 0).UTC()
+	record := scalingRecommendationRecord(
+		EpochScalingMetrics{EpochID: 7, CurrentShardCount: 2, AcceptedRequestCount: 2048, DurationSeconds: 60},
+		ScalingRecommendation{CurrentShardCount: 2, RecommendedShardCount: 4, TargetRowsPerShard: db.TABLE_HEIGHT, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
+		5,
+		created,
+	)
+	fake := &fakeDynamoDBControlClient{}
+	fake.updateItem = func(input *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+		pk := input.Key[dynamoControlPKName].(*ddbtypes.AttributeValueMemberS).Value
+		switch pk {
+		case epochScalingRecommendationKey(7):
+			if input.ConditionExpression == nil || !strings.Contains(aws.ToString(input.ConditionExpression), "recommendation_hash = :recommendation_hash") {
+				t.Fatalf("expected immutable recommendation condition, got %v", aws.ToString(input.ConditionExpression))
+			}
+		case latestScalingRecommendationKey:
+			if input.ConditionExpression == nil || !strings.Contains(aws.ToString(input.ConditionExpression), "epoch_id <= :epoch_id") {
+				t.Fatalf("expected latest recommendation epoch condition, got %v", aws.ToString(input.ConditionExpression))
+			}
+		default:
+			t.Fatalf("unexpected scaling recommendation key %q", pk)
+		}
+		if input.ExpressionAttributeValues[":recommendation_hash"] == nil {
+			t.Fatal("expected recommendation hash attribute")
+		}
+		return &dynamodb.UpdateItemOutput{}, nil
+	}
+	fake.getItem = func(input *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+		pk := input.Key[dynamoControlPKName].(*ddbtypes.AttributeValueMemberS).Value
+		item := scalingRecommendationItem(record)
+		item[dynamoControlPKName] = &ddbtypes.AttributeValueMemberS{Value: pk}
+		return &dynamodb.GetItemOutput{Item: item}, nil
+	}
+	store, err := newDynamoDBControlStore(fake, "control")
+	if err != nil {
+		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+	}
+
+	if err := store.PutScalingRecommendation(record); err != nil {
+		t.Fatalf("PutScalingRecommendation failed: %v", err)
+	}
+	if len(fake.updateInputs) != 2 {
+		t.Fatalf("expected epoch and latest updates, got %d", len(fake.updateInputs))
+	}
+	got, ok, err := store.GetEpochScalingRecommendation(7)
+	if err != nil || !ok || !scalingRecommendationRecordsEqual(got, record) {
+		t.Fatalf("unexpected epoch scaling recommendation ok=%t err=%v record=%+v", ok, err, got)
+	}
+	latest, ok, err := store.GetLatestScalingRecommendation()
+	wantLatest := record
+	wantLatest.Key = latestScalingRecommendationKey
+	if err != nil || !ok || !scalingRecommendationRecordsEqual(latest, wantLatest) {
+		t.Fatalf("unexpected latest scaling recommendation ok=%t err=%v record=%+v", ok, err, latest)
+	}
+}
+
+func TestDynamoDBControlStoreScalingRecommendationRejectsDifferentRewrite(t *testing.T) {
+	conditionalErr := &ddbtypes.ConditionalCheckFailedException{}
+	fake := &fakeDynamoDBControlClient{
+		updateItem: func(input *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			if input.Key[dynamoControlPKName].(*ddbtypes.AttributeValueMemberS).Value == epochScalingRecommendationKey(7) {
+				return nil, conditionalErr
+			}
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	}
+	store, err := newDynamoDBControlStore(fake, "control")
+	if err != nil {
+		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+	}
+	record := scalingRecommendationRecord(
+		EpochScalingMetrics{EpochID: 7, CurrentShardCount: 1, AcceptedRequestCount: 8, DurationSeconds: 60},
+		ScalingRecommendation{CurrentShardCount: 1, RecommendedShardCount: 2, TargetRowsPerShard: 2, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
+		1,
+		time.Unix(4000, 0).UTC(),
+	)
+
+	err = store.PutScalingRecommendation(record)
+	if err == nil || !strings.Contains(err.Error(), "different record") {
+		t.Fatalf("expected different record error, got %v", err)
+	}
+}
+
+func TestDynamoDBControlStoreScalingRecommendationIgnoresOlderLatest(t *testing.T) {
+	conditionalErr := &ddbtypes.ConditionalCheckFailedException{}
+	fake := &fakeDynamoDBControlClient{
+		updateItem: func(input *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			if input.Key[dynamoControlPKName].(*ddbtypes.AttributeValueMemberS).Value == latestScalingRecommendationKey {
+				return nil, conditionalErr
+			}
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	}
+	store, err := newDynamoDBControlStore(fake, "control")
+	if err != nil {
+		t.Fatalf("newDynamoDBControlStore failed: %v", err)
+	}
+	record := scalingRecommendationRecord(
+		EpochScalingMetrics{EpochID: 7, CurrentShardCount: 1, AcceptedRequestCount: 8, DurationSeconds: 60},
+		ScalingRecommendation{CurrentShardCount: 1, RecommendedShardCount: 2, TargetRowsPerShard: 2, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
+		1,
+		time.Unix(4000, 0).UTC(),
+	)
+
+	if err := store.PutScalingRecommendation(record); err != nil {
+		t.Fatalf("expected stale latest update to be ignored, got %v", err)
 	}
 }
 

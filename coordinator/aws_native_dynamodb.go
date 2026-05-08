@@ -96,8 +96,24 @@ func intAttr(item map[string]ddbtypes.AttributeValue, name string) int {
 	return int(int64Attr(item, name))
 }
 
+func float64Attr(item map[string]ddbtypes.AttributeValue, name string) float64 {
+	attr, ok := item[name].(*ddbtypes.AttributeValueMemberN)
+	if !ok {
+		return 0
+	}
+	value, err := strconv.ParseFloat(attr.Value, 64)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
 func numberAttr(value int64) ddbtypes.AttributeValue {
 	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(value, 10)}
+}
+
+func floatNumberAttr(value float64) ddbtypes.AttributeValue {
+	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatFloat(value, 'g', -1, 64)}
 }
 
 func isConditionalCheckFailed(err error) bool {
@@ -490,6 +506,105 @@ func (s *dynamoDBControlStore) putShardConfigAtKey(pk string, config ShardConfig
 			return errors.New("epoch shard config already exists with different config")
 		}
 		return errors.New("stale shard config version")
+	}
+	return err
+}
+
+func scalingRecommendationToAttributes(record ScalingRecommendationRecord) map[string]ddbtypes.AttributeValue {
+	return map[string]ddbtypes.AttributeValue{
+		":epoch_id":                     numberAttr(record.EpochID),
+		":accepted_request_count":       numberAttr(record.AcceptedRequestCount),
+		":duration_secs":                numberAttr(record.DurationSeconds),
+		":current_shard_count":          numberAttr(int64(record.CurrentShardCount)),
+		":recommended_shard_count":      numberAttr(int64(record.RecommendedShardCount)),
+		":target_rows_per_shard":        numberAttr(int64(record.TargetRowsPerShard)),
+		":request_density":              floatNumberAttr(record.RequestDensity),
+		":action":                       &ddbtypes.AttributeValueMemberS{Value: record.Action},
+		":reason":                       &ddbtypes.AttributeValueMemberS{Value: record.Reason},
+		":proposed_global_table_height": numberAttr(int64(record.ProposedGlobalTableHeight)),
+		":shard_config_version":         numberAttr(record.ShardConfigVersion),
+		":created_unix_ms":              numberAttr(record.CreatedAt.UnixMilli()),
+	}
+}
+
+func scalingRecommendationFromItem(item map[string]ddbtypes.AttributeValue) ScalingRecommendationRecord {
+	return ScalingRecommendationRecord{
+		Key:                       stringAttr(item, dynamoControlPKName),
+		EpochID:                   int64Attr(item, "epoch_id"),
+		AcceptedRequestCount:      int64Attr(item, "accepted_request_count"),
+		DurationSeconds:           int64Attr(item, "duration_secs"),
+		CurrentShardCount:         intAttr(item, "current_shard_count"),
+		RecommendedShardCount:     intAttr(item, "recommended_shard_count"),
+		TargetRowsPerShard:        intAttr(item, "target_rows_per_shard"),
+		RequestDensity:            float64Attr(item, "request_density"),
+		Action:                    stringAttr(item, "action"),
+		Reason:                    stringAttr(item, "reason"),
+		ProposedGlobalTableHeight: intAttr(item, "proposed_global_table_height"),
+		ShardConfigVersion:        int64Attr(item, "shard_config_version"),
+		CreatedAt:                 time.UnixMilli(int64Attr(item, "created_unix_ms")).UTC(),
+	}
+}
+
+func (s *dynamoDBControlStore) PutScalingRecommendation(record ScalingRecommendationRecord) error {
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now().UTC()
+	}
+	record.Key = epochScalingRecommendationKey(record.EpochID)
+	if err := validateScalingRecommendationRecord(record); err != nil {
+		return err
+	}
+	if err := s.putScalingRecommendationAtKey(record.Key, record, true); err != nil {
+		return err
+	}
+	latest := record
+	latest.Key = latestScalingRecommendationKey
+	return s.putScalingRecommendationAtKey(latestScalingRecommendationKey, latest, false)
+}
+
+func (s *dynamoDBControlStore) GetLatestScalingRecommendation() (ScalingRecommendationRecord, bool, error) {
+	return s.getScalingRecommendation(latestScalingRecommendationKey)
+}
+
+func (s *dynamoDBControlStore) GetEpochScalingRecommendation(epochID int64) (ScalingRecommendationRecord, bool, error) {
+	return s.getScalingRecommendation(epochScalingRecommendationKey(epochID))
+}
+
+func (s *dynamoDBControlStore) getScalingRecommendation(pk string) (ScalingRecommendationRecord, bool, error) {
+	item, ok, err := s.getItem(pk)
+	if err != nil || !ok {
+		return ScalingRecommendationRecord{}, false, err
+	}
+	record := scalingRecommendationFromItem(item)
+	if err := validateScalingRecommendationRecord(record); err != nil {
+		return ScalingRecommendationRecord{}, false, err
+	}
+	return record, true, nil
+}
+
+func (s *dynamoDBControlStore) putScalingRecommendationAtKey(pk string, record ScalingRecommendationRecord, immutable bool) error {
+	ctx, cancel := s.operationContext()
+	defer cancel()
+	condition := "attribute_not_exists(pk) OR epoch_id <= :epoch_id"
+	if immutable {
+		condition = "attribute_not_exists(pk) OR recommendation_hash = :recommendation_hash"
+	}
+	values := scalingRecommendationToAttributes(record)
+	values[":recommendation_hash"] = &ddbtypes.AttributeValueMemberS{Value: scalingRecommendationFingerprint(record)}
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           aws.String(s.table),
+		Key:                 dynamoKey(pk),
+		UpdateExpression:    aws.String("SET epoch_id = :epoch_id, accepted_request_count = :accepted_request_count, duration_secs = :duration_secs, current_shard_count = :current_shard_count, recommended_shard_count = :recommended_shard_count, target_rows_per_shard = :target_rows_per_shard, request_density = :request_density, #action = :action, reason = :reason, proposed_global_table_height = :proposed_global_table_height, shard_config_version = :shard_config_version, created_unix_ms = :created_unix_ms, recommendation_hash = :recommendation_hash"),
+		ConditionExpression: aws.String(condition),
+		ExpressionAttributeNames: map[string]string{
+			"#action": "action",
+		},
+		ExpressionAttributeValues: values,
+	})
+	if err != nil && isConditionalCheckFailed(err) {
+		if immutable {
+			return errors.New("scaling recommendation already exists with different record")
+		}
+		return nil
 	}
 	return err
 }

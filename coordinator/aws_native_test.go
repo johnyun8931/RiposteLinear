@@ -142,6 +142,53 @@ func TestMemoryControlStoreEpochShardConfigSnapshot(t *testing.T) {
 	}
 }
 
+func TestMemoryControlStoreScalingRecommendation(t *testing.T) {
+	store := newMemoryControlStore(1)
+	created := time.Unix(4000, 0).UTC()
+	record := scalingRecommendationRecord(
+		EpochScalingMetrics{EpochID: 2, CurrentShardCount: 1, AcceptedRequestCount: 8, DurationSeconds: 60},
+		ScalingRecommendation{CurrentShardCount: 1, RecommendedShardCount: 2, TargetRowsPerShard: 2, RequestDensity: 4, Action: scalingActionGrow, Reason: "grow"},
+		3,
+		created,
+	)
+
+	if err := store.PutScalingRecommendation(record); err != nil {
+		t.Fatalf("PutScalingRecommendation failed: %v", err)
+	}
+	got, ok, err := store.GetEpochScalingRecommendation(2)
+	if err != nil || !ok || !scalingRecommendationRecordsEqual(got, record) {
+		t.Fatalf("unexpected epoch scaling recommendation ok=%t err=%v record=%+v", ok, err, got)
+	}
+	latest, ok, err := store.GetLatestScalingRecommendation()
+	wantLatest := record
+	wantLatest.Key = latestScalingRecommendationKey
+	if err != nil || !ok || !scalingRecommendationRecordsEqual(latest, wantLatest) {
+		t.Fatalf("unexpected latest scaling recommendation ok=%t err=%v record=%+v", ok, err, latest)
+	}
+	if err := store.PutScalingRecommendation(record); err != nil {
+		t.Fatalf("idempotent PutScalingRecommendation failed: %v", err)
+	}
+	changed := record
+	changed.Reason = "changed"
+	if err := store.PutScalingRecommendation(changed); err == nil {
+		t.Fatal("expected conflicting scaling recommendation to fail")
+	}
+
+	older := scalingRecommendationRecord(
+		EpochScalingMetrics{EpochID: 1, CurrentShardCount: 1, AcceptedRequestCount: 2, DurationSeconds: 60},
+		ScalingRecommendation{CurrentShardCount: 1, RecommendedShardCount: 1, TargetRowsPerShard: 2, RequestDensity: 1, Action: scalingActionKeep, Reason: "old"},
+		3,
+		created.Add(-time.Minute),
+	)
+	if err := store.PutScalingRecommendation(older); err != nil {
+		t.Fatalf("older PutScalingRecommendation failed: %v", err)
+	}
+	latest, ok, err = store.GetLatestScalingRecommendation()
+	if err != nil || !ok || latest.EpochID != 2 {
+		t.Fatalf("expected latest to remain epoch 2, ok=%t err=%v record=%+v", ok, err, latest)
+	}
+}
+
 func TestMemoryIngestionQueueEnqueueReceiveAck(t *testing.T) {
 	queue := newMemoryIngestionQueue()
 	ctx := context.Background()

@@ -144,3 +144,39 @@ func TestComputeNextDatasetScaleInvalidInputsKeep(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveScalingPolicyConfigDefaultsShardBounds(t *testing.T) {
+	config, err := resolveScalingPolicyConfig(2, 0, 0, 0, defaultScaleUpDensityThreshold, defaultScaleDownDensityThreshold, defaultMaxShardMultiplier)
+	if err != nil {
+		t.Fatalf("resolveScalingPolicyConfig failed: %v", err)
+	}
+	if config.MinShards != 2 || config.MaxShards != 2 || config.TargetRowsPerShard != db.TABLE_HEIGHT {
+		t.Fatalf("unexpected default scaling config: %+v", config)
+	}
+}
+
+func TestResolveScalingPolicyConfigRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		min    int
+		max    int
+		target int
+		up     float64
+		down   float64
+		mult   int
+	}{
+		{name: "bad bounds", min: 4, max: 2, target: db.TABLE_HEIGHT, up: 4, down: 1, mult: 2},
+		{name: "current over max", min: 1, max: 1, target: db.TABLE_HEIGHT, up: 4, down: 1, mult: 2},
+		{name: "bad target", min: 1, max: 2, target: -1, up: 4, down: 1, mult: 2},
+		{name: "bad thresholds", min: 1, max: 2, target: db.TABLE_HEIGHT, up: 1, down: 1, mult: 2},
+		{name: "bad multiplier", min: 1, max: 2, target: db.TABLE_HEIGHT, up: 4, down: 1, mult: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := resolveScalingPolicyConfig(2, tt.min, tt.max, tt.target, tt.up, tt.down, tt.mult); err == nil {
+				t.Fatal("expected invalid scaling config to fail")
+			}
+		})
+	}
+}

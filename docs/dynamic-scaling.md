@@ -22,12 +22,11 @@ logical dataset size is explicit in the coordinator shard map: each shard
 contributes one full local table of rows, so `global_table_height =
 shard_count * db.TABLE_HEIGHT`.
 
-The current coordinator metrics are local and in-memory. During an active epoch,
-the coordinator counts an upload only after `Upload3` succeeds and the routed
-session is removed. Rejected uploads, failed uploads, attempted client requests,
-and incomplete sessions are not counted. At epoch completion, the coordinator
-computes and caches a recommendation from that completed epoch. Until metrics
-are persisted later, a coordinator restart loses this scaling history.
+During an active epoch, the coordinator counts an upload only after `Upload3`
+succeeds and the routed session is removed. Rejected uploads, failed uploads,
+attempted client requests, and incomplete sessions are not counted. At epoch
+completion, the active coordinator computes and caches a recommendation from
+that completed epoch, then persists it to the control store.
 
 Verification scripts capture the coordinator's status JSON after completed
 sharded epochs. The scaling fields to inspect are:
@@ -41,6 +40,17 @@ sharded epochs. The scaling fields to inspect are:
 
 AWS benchmark collection includes these fields in `comparison-summary.md` when
 `status-completed-coordinator.json` is available for the sharded measured phase.
+
+When DynamoDB is the control store, recommendations are stored separately from
+the authoritative shard topology:
+
+```text
+pk = scaling#epoch#<epoch_id>
+pk = scaling#latest
+```
+
+These records are proposals only. They do not update `pk="shard-config"`, do
+not provision new shard machines, and do not change routing.
 
 ## Initial Policy Shape
 
@@ -87,10 +97,23 @@ count:
 logical_rows = shard_count * target_rows_per_shard
 ```
 
+The coordinator exposes policy knobs for local/AWS experiments:
+
+```text
+-scaling-min-shards
+-scaling-max-shards
+-scaling-target-rows-per-shard
+-scaling-up-density
+-scaling-down-density
+-scaling-max-shard-multiplier
+```
+
+By default, min/max shards both equal the current configured shard count, so the
+policy remains budget-safe unless a larger cap is explicitly configured.
+
 ## Current Boundary
 
-This document is scaffolding only. Existing per-shard table dimensions are
-compile-time constants, runtime local table resizing is not implemented, and
-recommendations are not applied to the coordinator shard map yet. Applying a
-new shard count at epoch boundaries and recording metrics durably remain future
-work.
+Existing per-shard table dimensions are compile-time constants, runtime local
+table resizing is not implemented, and persisted recommendations are not applied
+to the coordinator shard map yet. Applying a new shard count at epoch boundaries
+remains future work.

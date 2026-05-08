@@ -938,6 +938,49 @@ func TestCoordinatorCompleteEpochCachesScalingRecommendation(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCompleteEpochPersistsScalingRecommendation(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := &fakeShardClient{}
+	startTime := time.Now().UTC().Truncate(time.Second)
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	coord.scalingConfig = ScalingPolicyConfig{
+		MinShards:                 1,
+		MaxShards:                 4,
+		TargetRowsPerShard:        2,
+		ScaleUpDensityThreshold:   4,
+		ScaleDownDensityThreshold: 1,
+		MaxShardMultiplier:        2,
+	}
+	beforeConfig, ok, err := store.GetShardConfig()
+	if err != nil || !ok {
+		t.Fatalf("expected initial shard config, ok=%t err=%v", ok, err)
+	}
+	startCoordinatorEpoch(t, coord, active, 1, startTime, 60)
+	for i := 0; i < 8; i++ {
+		completeCoordinatorUpload(t, coord, 1)
+	}
+
+	coord.completeEpoch()
+
+	record, ok, err := store.GetEpochScalingRecommendation(1)
+	if err != nil || !ok {
+		t.Fatalf("expected persisted epoch scaling recommendation, ok=%t err=%v", ok, err)
+	}
+	if record.Action != scalingActionGrow || record.RecommendedShardCount != 2 || record.ProposedGlobalTableHeight != 4 || record.ShardConfigVersion != beforeConfig.Version {
+		t.Fatalf("unexpected persisted scaling recommendation: %+v", record)
+	}
+	latest, ok, err := store.GetLatestScalingRecommendation()
+	if err != nil || !ok || latest.EpochID != 1 {
+		t.Fatalf("expected latest scaling recommendation for epoch 1, ok=%t err=%v record=%+v", ok, err, latest)
+	}
+	afterConfig, ok, err := store.GetShardConfig()
+	if err != nil || !ok || !shardConfigRecordsEqual(afterConfig, beforeConfig) {
+		t.Fatalf("expected shard config unchanged, ok=%t err=%v before=%+v after=%+v", ok, err, beforeConfig, afterConfig)
+	}
+}
+
 func TestCoordinatorCompleteEpochSkipsStoreMutationWithStaleLease(t *testing.T) {
 	store := newMemoryControlStore(1)
 	startTime := time.Now().UTC().Truncate(time.Second)
@@ -964,6 +1007,9 @@ func TestCoordinatorCompleteEpochSkipsStoreMutationWithStaleLease(t *testing.T) 
 	}
 	if coord.epoch.State != db.EpochStateActive {
 		t.Fatalf("expected stale coordinator local epoch to remain active, got %+v", coord.epoch)
+	}
+	if _, ok, err := store.GetEpochScalingRecommendation(1); err != nil || ok {
+		t.Fatalf("expected no scaling recommendation after stale completion, ok=%t err=%v", ok, err)
 	}
 }
 

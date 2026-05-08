@@ -233,7 +233,9 @@ func (c *Coordinator) completeEpochDecision() completeEpochDecision {
 	return decision
 }
 
-func (c *Coordinator) commitCompletedEpoch(epochID int64) bool {
+func (c *Coordinator) commitCompletedEpoch(epochID int64) (EpochScalingMetrics, ScalingRecommendation, bool) {
+	var metrics EpochScalingMetrics
+	var recommendation ScalingRecommendation
 	completed := false
 	c.actorCall(func() {
 		if c.epoch.State != db.EpochStateActive || c.epoch.ID != epochID {
@@ -251,10 +253,12 @@ func (c *Coordinator) commitCompletedEpoch(epochID int64) bool {
 			c.lastScalingRecommendation = ComputeNextDatasetScale(c.lastScalingMetrics, c.scalingConfig)
 			c.hasLastScalingMetrics = true
 			c.hasActiveScalingMetrics = false
+			metrics = c.lastScalingMetrics
+			recommendation = c.lastScalingRecommendation
 		}
 		completed = true
 	})
-	return completed
+	return metrics, recommendation, completed
 }
 
 func (c *Coordinator) scalingStatusSnapshot(currentShardCount int) (EpochScalingMetrics, ScalingRecommendation) {

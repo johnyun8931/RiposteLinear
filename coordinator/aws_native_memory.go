@@ -21,10 +21,16 @@ type memoryControlStore struct {
 	shardConfig      ShardConfigRecord
 	hasShardConfig   bool
 	epochShardConfig map[int64]ShardConfigRecord
+	scalingByEpoch   map[int64]ScalingRecommendationRecord
+	latestScaling    ScalingRecommendationRecord
+	hasLatestScaling bool
 }
 
 func newMemoryControlStore(shardConfigVersion int64) *memoryControlStore {
-	return &memoryControlStore{epochShardConfig: make(map[int64]ShardConfigRecord)}
+	return &memoryControlStore{
+		epochShardConfig: make(map[int64]ShardConfigRecord),
+		scalingByEpoch:   make(map[int64]ScalingRecommendationRecord),
+	}
 }
 
 func (s *memoryControlStore) AcquireLease(now time.Time, holder string, ttl time.Duration) (CoordinatorLease, error) {
@@ -188,6 +194,51 @@ func (s *memoryControlStore) PutEpochShardConfig(epochID int64, config ShardConf
 	config.Shards = append([]ShardConfig(nil), config.Shards...)
 	s.epochShardConfig[epochID] = config
 	return nil
+}
+
+func (s *memoryControlStore) PutScalingRecommendation(record ScalingRecommendationRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := validateScalingRecommendationRecord(record); err != nil {
+		return err
+	}
+	record.Key = epochScalingRecommendationKey(record.EpochID)
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now().UTC()
+	}
+	if existing, ok := s.scalingByEpoch[record.EpochID]; ok {
+		if !scalingRecommendationRecordsEqual(existing, record) {
+			return errors.New("scaling recommendation already exists with different record")
+		}
+	} else {
+		s.scalingByEpoch[record.EpochID] = record
+	}
+	latest := record
+	latest.Key = latestScalingRecommendationKey
+	if !s.hasLatestScaling || record.EpochID >= s.latestScaling.EpochID {
+		s.latestScaling = latest
+		s.hasLatestScaling = true
+	}
+	return nil
+}
+
+func (s *memoryControlStore) GetLatestScalingRecommendation() (ScalingRecommendationRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasLatestScaling {
+		return ScalingRecommendationRecord{}, false, nil
+	}
+	return s.latestScaling, true, nil
+}
+
+func (s *memoryControlStore) GetEpochScalingRecommendation(epochID int64) (ScalingRecommendationRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.scalingByEpoch[epochID]
+	if !ok {
+		return ScalingRecommendationRecord{}, false, nil
+	}
+	return record, true, nil
 }
 
 type memoryIngestionQueue struct {
