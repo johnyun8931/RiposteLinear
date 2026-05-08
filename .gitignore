@@ -12,6 +12,9 @@ aws-eval/keys/
 aws-eval/bin/
 aws-eval/results/
 aws-eval/*.pem
+aws-eval/terraform/.terraform/
+aws-eval/terraform/*.tfstate
+aws-eval/terraform/*.tfstate.*
 
 # added by kevwjin to provide spec w/o git tracking to llms
 *.txt
