@@ -240,6 +240,14 @@ func setEpochCycleReadyForNext(t *testing.T, store ControlStore, epochID int64, 
 	}
 }
 
+func assertEpochCycleState(t *testing.T, store ControlStore, want string) {
+	t.Helper()
+	cycle, ok, err := store.GetEpochCycle()
+	if err != nil || !ok || cycle.State != want {
+		t.Fatalf("expected epoch cycle %s, ok=%t err=%v cycle=%+v", want, ok, err, cycle)
+	}
+}
+
 func activeOnlyShard(id, start, end int) ShardConfig {
 	return ShardConfig{
 		ID:       id,
@@ -992,8 +1000,43 @@ func TestCoordinatorCompleteEpochMirrorsControlStore(t *testing.T) {
 		t.Fatalf("expected completed control-store epoch not accepting, accepting=%t err=%v", accepting, err)
 	}
 	cycle, ok, err := coord.controlStore.GetEpochCycle()
-	if err != nil || !ok || cycle.State != controlstore.EpochCycleStateRecommendationReady || cycle.EpochID != reply.EpochID {
-		t.Fatalf("expected recommendation-ready cycle, ok=%t err=%v cycle=%+v", ok, err, cycle)
+	if err != nil || !ok || cycle.State != controlstore.EpochCycleStateScalingSkipped || cycle.EpochID != reply.EpochID {
+		t.Fatalf("expected scaling-skipped cycle, ok=%t err=%v cycle=%+v", ok, err, cycle)
+	}
+	if !strings.Contains(cycle.Reason, "keep") {
+		t.Fatalf("expected keep skip reason, got %+v", cycle)
+	}
+}
+
+func TestCoordinatorStartEpochSucceedsAfterAutoSkippedKeepRecommendation(t *testing.T) {
+	startTime := time.Now().UTC().Truncate(time.Second)
+	active := &fakeShardClient{startReply: db.StartEpochReply{
+		EpochID:      1,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    startTime.Unix(),
+		EndUnix:      startTime.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+	}}
+	coord := mustCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: active})
+
+	if err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: startTime.Unix()}, &db.StartEpochReply{}); err != nil {
+		t.Fatalf("StartEpoch failed: %v", err)
+	}
+	coord.completeEpoch()
+	assertEpochCycleState(t, coord.controlStore, controlstore.EpochCycleStateScalingSkipped)
+
+	secondStart := startTime.Add(2 * time.Minute)
+	active.startReply = db.StartEpochReply{
+		EpochID:      2,
+		State:        db.EpochStateActive.String(),
+		StartUnix:    secondStart.Unix(),
+		EndUnix:      secondStart.Add(time.Minute).Unix(),
+		DurationSecs: 60,
+	}
+	if err := coord.StartEpoch(&db.StartEpochArgs{DurationSeconds: 60, StartUnix: secondStart.Unix()}, &db.StartEpochReply{}); err != nil {
+		t.Fatalf("second StartEpoch failed after auto skip: %v", err)
 	}
 }
 
@@ -1075,6 +1118,7 @@ func TestCoordinatorCompleteEpochPersistsScalingRecommendation(t *testing.T) {
 	if err != nil || !ok || !shardConfigRecordsEqual(afterConfig, beforeConfig) {
 		t.Fatalf("expected shard config unchanged, ok=%t err=%v before=%+v after=%+v", ok, err, beforeConfig, afterConfig)
 	}
+	assertEpochCycleState(t, store, controlstore.EpochCycleStateRecommendationReady)
 }
 
 func TestCoordinatorApplyScalingRecommendationWritesNextShardConfig(t *testing.T) {
@@ -1208,9 +1252,110 @@ func TestCoordinatorApplyScalingRecommendationRejectsWithoutLease(t *testing.T) 
 	}
 }
 
+func TestCoordinatorSkipScalingRecommendationTransitionsToSkipped(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{activeOnlyShard(0, 0, db.TABLE_HEIGHT)}
+	initialConfig := shardConfigRecordFromShards(active, 1)
+	if err := store.PutShardConfig(initialConfig); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
+		t.Fatalf("PutScalingRecommendation failed: %v", err)
+	}
+	setEpochCycleRecommendationReady(t, store, 1, 1)
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}, 1: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	var reply db.SkipScalingRecommendationReply
+	if err := coord.SkipScalingRecommendation(&db.SkipScalingRecommendationArgs{}, &reply); err != nil {
+		t.Fatalf("SkipScalingRecommendation failed: %v", err)
+	}
+	if !reply.Skipped || reply.RecommendationEpochID != 1 || reply.ShardConfigVersion != 1 || reply.Action != scalingActionGrow {
+		t.Fatalf("unexpected skip reply: %+v", reply)
+	}
+	assertEpochCycleState(t, store, controlstore.EpochCycleStateScalingSkipped)
+	config, ok, err := store.GetShardConfig()
+	if err != nil || !ok || !shardConfigRecordsEqual(config, initialConfig) {
+		t.Fatalf("expected skip to leave shard config unchanged, ok=%t err=%v got=%+v want=%+v", ok, err, config, initialConfig)
+	}
+}
+
+func TestCoordinatorSkipScalingRecommendationRejectsWithoutLease(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{activeOnlyShard(0, 0, db.TABLE_HEIGHT)}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(active, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
+		t.Fatalf("PutScalingRecommendation failed: %v", err)
+	}
+	setEpochCycleRecommendationReady(t, store, 1, 1)
+	activeCoord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}, 1: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+	_ = activeCoord
+	passive := mustStandbyCoordinator(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}, 1: &fakeShardClient{}}, store, "coord-b", testLeaseTTL, testLeaseRenewInterval)
+
+	err := passive.SkipScalingRecommendation(&db.SkipScalingRecommendationArgs{}, &db.SkipScalingRecommendationReply{})
+	if err == nil || err.Error() != coordinatorWireNotActive {
+		t.Fatalf("expected coordinator not active, got %v", err)
+	}
+}
+
+func TestCoordinatorSkipScalingRecommendationRejectsActiveEpoch(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{activeOnlyShard(0, 0, db.TABLE_HEIGHT)}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(active, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
+		t.Fatalf("PutScalingRecommendation failed: %v", err)
+	}
+	setEpochCycleRecommendationReady(t, store, 1, 1)
+	epoch := db.EpochMeta{ID: 2, State: db.EpochStateActive, StartTime: time.Now().UTC(), EndTime: time.Now().UTC().Add(time.Minute), DurationSeconds: 60}
+	if err := store.StartEpoch(epoch, 1); err != nil {
+		t.Fatalf("StartEpoch failed: %v", err)
+	}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}, 1: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	err := coord.SkipScalingRecommendation(&db.SkipScalingRecommendationArgs{}, &db.SkipScalingRecommendationReply{})
+	if err == nil || !strings.Contains(err.Error(), "epoch is active") {
+		t.Fatalf("expected active epoch rejection, got %v", err)
+	}
+}
+
+func TestCoordinatorSkipScalingRecommendationRejectsWrongCycle(t *testing.T) {
+	store := newMemoryControlStore(1)
+	active := []ShardConfig{activeOnlyShard(0, 0, db.TABLE_HEIGHT)}
+	if err := store.PutShardConfig(shardConfigRecordFromShards(active, 1)); err != nil {
+		t.Fatalf("PutShardConfig failed: %v", err)
+	}
+	if err := store.PutScalingRecommendation(testScalingRecommendation(1, 1, scalingActionGrow, 1, 2)); err != nil {
+		t.Fatalf("PutScalingRecommendation failed: %v", err)
+	}
+	coord := mustCoordinatorWithLease(t, []ShardConfig{
+		activeOnlyShard(0, 0, db.TABLE_HEIGHT),
+		activeOnlyShard(1, db.TABLE_HEIGHT, 2*db.TABLE_HEIGHT),
+	}, map[int]shardClient{0: &fakeShardClient{}, 1: &fakeShardClient{}}, store, "coord-a", testLeaseTTL, testLeaseRenewInterval)
+
+	err := coord.SkipScalingRecommendation(&db.SkipScalingRecommendationArgs{}, &db.SkipScalingRecommendationReply{})
+	if err == nil || !strings.Contains(err.Error(), controlstore.EpochCycleStateIdle) {
+		t.Fatalf("expected wrong cycle rejection, got %v", err)
+	}
+}
+
 func TestValidateAdminFlagsRejectsApplyAndDryRunTogether(t *testing.T) {
-	err := validateAdminFlags(0, false, false, true, true, "127.0.0.1:7000")
-	if err == nil || !strings.Contains(err.Error(), "-apply-scaling-recommendation") {
+	err := validateAdminFlags(0, false, false, true, true, false, "127.0.0.1:7000")
+	if err == nil || !strings.Contains(err.Error(), "scaling recommendation admin command") {
 		t.Fatalf("expected mutually exclusive apply flags error, got %v", err)
 	}
 }
@@ -1823,7 +1968,6 @@ func TestCoordinatorStartEpochResetsActiveScalingMetricsAndKeepsLastRecommendati
 	completeCoordinatorUpload(t, coord, 1)
 	coord.completeEpoch()
 	lastRecommendation := coord.lastScalingRecommendation
-	setEpochCycleReadyForNext(t, coord.controlStore, 1, currentShardConfigVersion(coord.controlStore))
 
 	startCoordinatorEpoch(t, coord, active, 2, startTime.Add(2*time.Minute), 60)
 

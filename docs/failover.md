@@ -101,13 +101,15 @@ Manual scaling apply is exposed as an admin RPC through:
 ```bash
 coordinator -admin-target <addr> -dry-run-scaling-recommendation
 coordinator -admin-target <addr> -apply-scaling-recommendation
+coordinator -admin-target <addr> -skip-scaling-recommendation
 ```
 
-Only the current lease holder can apply a recommendation. The apply step rejects
-active or accepting epochs, missing/stale/`keep` recommendations, and
+Only the current lease holder can apply or skip a recommendation. The apply step
+rejects active or accepting epochs, missing/stale/`keep` recommendations, and
 recommendations that require shard IDs not present in the configured endpoint
-inventory. Successful apply writes a new version of `pk="shard-config"` only;
-epoch-bound shard-config snapshots remain immutable.
+inventory. Successful apply writes a new version of `pk="shard-config"` only.
+Skipping records that the decision is complete without changing topology.
+Epoch-bound shard-config snapshots remain immutable.
 
 The AWS-side autoscaler is deliberately not a direct topology writer. It reads
 the DynamoDB control records to decide whether a recommendation is worth trying,
@@ -125,8 +127,12 @@ That boundary keeps one authoritative topology writer:
 The epoch-cycle record is not a full workflow engine. It records durable
 milestones and gates the next `StartEpoch`: after the first epoch, a new epoch
 should start only after the previous recommendation reached `scaling_applied` or
-`scaling_skipped`. A later timer-driven scheduler can use those milestones to
-run repeated epochs without local operator scripts.
+`scaling_skipped`. `scaling_skipped` means the scaling decision completed with
+no topology change; it does not mean the epoch was skipped. The coordinator
+auto-skips `keep` recommendations after persisting them, while operators can
+explicitly skip `grow` or `shrink` recommendations. A later timer-driven
+scheduler can use those milestones to run repeated epochs without local
+operator scripts.
 
 A later design could make the autoscaler the direct topology writer, but only if
 the lease/fencing and topology mutation rules move into a shared owner so the

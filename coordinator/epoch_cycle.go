@@ -52,6 +52,26 @@ func transitionEpochCycleRecommendationReady(controlStore ControlStore, epochID 
 	})
 }
 
+func transitionEpochCycleScalingSkipped(controlStore ControlStore, epochID int64, shardConfigVersion int64, reason string) error {
+	if reason == "" {
+		reason = "scaling recommendation skipped"
+	}
+	if err := putEpochCycleTransition(controlStore, controlstore.EpochCycleStateRecommendationReady, controlstore.EpochCycleStateScalingInProgress, EpochCycleRecord{
+		EpochID:                      epochID,
+		ShardConfigVersion:           shardConfigVersion,
+		ScalingRecommendationEpochID: epochID,
+		Reason:                       "scaling skip started",
+	}); err != nil {
+		return err
+	}
+	return putEpochCycleTransition(controlStore, controlstore.EpochCycleStateScalingInProgress, controlstore.EpochCycleStateScalingSkipped, EpochCycleRecord{
+		EpochID:                      epochID,
+		ShardConfigVersion:           shardConfigVersion,
+		ScalingRecommendationEpochID: epochID,
+		Reason:                       reason,
+	})
+}
+
 func transitionEpochCycleFailed(controlStore ControlStore, from string, epochID int64, shardConfigVersion int64, reason string) {
 	if err := putEpochCycleTransition(controlStore, from, controlstore.EpochCycleStateFailed, EpochCycleRecord{
 		EpochID:            epochID,

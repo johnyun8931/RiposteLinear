@@ -322,6 +322,16 @@ type ApplyScalingRecommendationReply struct {
 	Reason                    string `json:"reason"`
 }
 
+type SkipScalingRecommendationArgs struct{}
+
+type SkipScalingRecommendationReply struct {
+	Skipped               bool   `json:"skipped"`
+	RecommendationEpochID int64  `json:"recommendation_epoch_id"`
+	ShardConfigVersion    int64  `json:"shard_config_version"`
+	Action                string `json:"action"`
+	Reason                string `json:"reason"`
+}
+
 type AbortEpochArgs struct {
 	EpochID int64
 }

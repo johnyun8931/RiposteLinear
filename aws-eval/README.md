@@ -189,9 +189,10 @@ table height, and active shard addresses. Each started epoch also gets an
 immutable `shard-config#epoch#<epoch_id>` topology snapshot, and the `epoch`
 record points at it with `shard_config_key`. Completed epochs may also write
 `scaling#epoch#<epoch_id>` and `scaling#latest` proposal records; operators can
-dry-run or apply an applicable latest recommendation with
-`coordinator -admin-target <addr> -dry-run-scaling-recommendation` or
-`coordinator -admin-target <addr> -apply-scaling-recommendation` between epochs.
+dry-run, apply, or explicitly skip an applicable latest recommendation with
+`coordinator -admin-target <addr> -dry-run-scaling-recommendation`,
+`coordinator -admin-target <addr> -apply-scaling-recommendation`, or
+`coordinator -admin-target <addr> -skip-scaling-recommendation` between epochs.
 Extra `-shard` flags are spare endpoint inventory, not active topology, until a
 new `shard-config` version includes them. When the session store uses the same
 table, it also stores transient `session#<global_uuid>` records for

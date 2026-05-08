@@ -28,6 +28,7 @@ var flagEpochStatus = flag.Bool("epoch-status", false, "If set, query coordinato
 var flagStatus = flag.Bool("status", false, "If set, query coordinator status over admin RPC and exit")
 var flagApplyScalingRecommendation = flag.Bool("apply-scaling-recommendation", false, "If set, apply the latest scaling recommendation to the next shard config and exit")
 var flagDryRunScalingRecommendation = flag.Bool("dry-run-scaling-recommendation", false, "If set, validate the latest scaling recommendation without updating the next shard config and exit")
+var flagSkipScalingRecommendation = flag.Bool("skip-scaling-recommendation", false, "If set, skip the latest scaling recommendation without updating the next shard config and exit")
 var flagControlStore = flag.String("control-store", "memory", "Control store backend: memory or dynamodb")
 var flagControlTable = flag.String("control-table", "", "DynamoDB table name for -control-store dynamodb")
 var flagSessionStore = flag.String("session-store", "memory", "Session store backend: memory or dynamodb")
@@ -54,8 +55,8 @@ func init() {
 func main() {
 	flag.Parse()
 
-	if adminCommandRequested(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation) {
-		if err := validateAdminFlags(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation, *flagAdminTarget); err != nil {
+	if adminCommandRequested(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation, *flagSkipScalingRecommendation) {
+		if err := validateAdminFlags(*flagStartEpoch, *flagEpochStatus, *flagStatus, *flagApplyScalingRecommendation, *flagDryRunScalingRecommendation, *flagSkipScalingRecommendation, *flagAdminTarget); err != nil {
 			log.Fatal(err)
 		}
 		runAdminCommand()
@@ -207,19 +208,25 @@ func buildSessionStore() (SessionStore, string, error) {
 	}
 }
 
-func adminCommandRequested(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool) bool {
-	return startEpochSeconds > 0 || epochStatus || status || applyScaling || dryRunScaling
+func adminCommandRequested(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool, skipScaling bool) bool {
+	return startEpochSeconds > 0 || epochStatus || status || applyScaling || dryRunScaling || skipScaling
 }
 
-func validateAdminFlags(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool, adminTarget string) error {
-	if !adminCommandRequested(startEpochSeconds, epochStatus, status, applyScaling, dryRunScaling) {
+func validateAdminFlags(startEpochSeconds int64, epochStatus bool, status bool, applyScaling bool, dryRunScaling bool, skipScaling bool, adminTarget string) error {
+	if !adminCommandRequested(startEpochSeconds, epochStatus, status, applyScaling, dryRunScaling, skipScaling) {
 		return nil
 	}
 	if adminTarget == "" {
 		return errors.New("Must specify -admin-target for admin RPC commands")
 	}
-	if applyScaling && dryRunScaling {
-		return errors.New("must specify only one of -apply-scaling-recommendation or -dry-run-scaling-recommendation")
+	scalingCommands := 0
+	for _, enabled := range []bool{applyScaling, dryRunScaling, skipScaling} {
+		if enabled {
+			scalingCommands++
+		}
+	}
+	if scalingCommands > 1 {
+		return errors.New("must specify only one scaling recommendation admin command")
 	}
 	return nil
 }
@@ -287,6 +294,22 @@ func runAdminCommand() {
 			reply.PreviousGlobalTableHeight,
 			reply.NewGlobalTableHeight,
 			reply.Status,
+			reply.Reason,
+		)
+		return
+	}
+
+	if *flagSkipScalingRecommendation {
+		var reply db.SkipScalingRecommendationReply
+		err = client.Call("Server.SkipScalingRecommendation", &db.SkipScalingRecommendationArgs{}, &reply)
+		if err != nil {
+			log.Fatal("Could not skip scaling recommendation: ", err)
+		}
+		log.Printf("skipped=%t recommendation_epoch=%d shard_config_version=%d action=%s reason=%s",
+			reply.Skipped,
+			reply.RecommendationEpochID,
+			reply.ShardConfigVersion,
+			reply.Action,
 			reply.Reason,
 		)
 		return

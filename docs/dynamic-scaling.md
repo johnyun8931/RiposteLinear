@@ -65,17 +65,25 @@ from `idle`, and later accepts only a settled previous outcome such as
 `scaling_applied` or `scaling_skipped`. This keeps the durable state tied to
 real milestones instead of advancing through synthetic workflow states.
 
+`scaling_skipped` means the scaling decision is complete without changing
+topology; it does not mean the epoch was skipped. The coordinator automatically
+records `scaling_skipped` after persisting a `keep` recommendation because no
+topology mutation is needed. For `grow` or `shrink`, an operator must either
+apply the recommendation or explicitly skip it.
+
 The manual apply path promotes a valid `scaling#latest` proposal into
 `pk="shard-config"` only when no epoch is active or accepting:
 
 ```bash
 coordinator -admin-target <addr> -dry-run-scaling-recommendation
 coordinator -admin-target <addr> -apply-scaling-recommendation
+coordinator -admin-target <addr> -skip-scaling-recommendation
 ```
 
 Dry-run performs the same applicability checks and proposal build without
-writing `pk="shard-config"`. Applying a recommendation only changes the next
-authoritative shard topology. It does not modify historical
+writing `pk="shard-config"`. Applying a recommendation changes the next
+authoritative shard topology. Skipping a recommendation records the decision as
+complete without changing topology. Neither path modifies historical
 `shard-config#epoch#<epoch_id>` snapshots and it does not create new machines.
 Extra `-shard` flags are treated as spare endpoint inventory; they are inactive
 until a manually applied shard config includes them. Upload routing and epoch
@@ -104,14 +112,18 @@ Current apply ownership is:
 
 1. The autoscaler waits for `epoch-cycle = recommendation_ready`.
 2. The autoscaler reads `scaling#latest`, `shard-config`, and `epoch`.
-3. The autoscaler skips missing, stale, `keep`, active, or accepting cases and
-   records `scaling_skipped` when running with `-apply`.
+3. The coordinator has already auto-skipped `keep` recommendations, so
+   `recommendation_ready` normally means `grow` or `shrink`.
 4. The autoscaler calls coordinator `ApplyScalingRecommendation(DryRun=true)`.
 5. If dry-run is applicable and `-apply` is set, the autoscaler records
    `scaling_in_progress` and calls
    `ApplyScalingRecommendation(DryRun=false)`.
 6. The coordinator verifies it still holds the lease, repeats the safety checks,
    writes `pk="shard-config"`, and records `scaling_applied`.
+
+An operator can also intentionally decline a `grow` or `shrink` proposal with
+`SkipScalingRecommendation`, which records `scaling_skipped` and leaves
+`pk="shard-config"` unchanged.
 
 This duplication of checks is intentional. The autoscaler check is a cheap
 preflight and log signal. The coordinator check is the authoritative guard

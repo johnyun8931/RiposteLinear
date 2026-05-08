@@ -779,6 +779,12 @@ func (c *Coordinator) completeEpoch() {
 		}
 		if err := transitionEpochCycleRecommendationReady(controlStore, decision.epochID, shardConfigVersion); err != nil {
 			log.Printf("Recommendation-ready epoch %d cycle transition failed: %v", decision.epochID, err)
+			return
+		}
+		if recommendation.Action == scalingActionKeep {
+			if err := transitionEpochCycleScalingSkipped(controlStore, decision.epochID, shardConfigVersion, "scaling recommendation keep; no topology change"); err != nil {
+				log.Printf("Keep-skip epoch %d cycle transition failed: %v", decision.epochID, err)
+			}
 		}
 	}
 }
@@ -892,6 +898,45 @@ func (c *Coordinator) ApplyScalingRecommendation(args *db.ApplyScalingRecommenda
 		return err
 	}
 	populateApplyScalingRecommendationReply(reply, evaluation, true)
+	return nil
+}
+
+func (c *Coordinator) SkipScalingRecommendation(_ *db.SkipScalingRecommendationArgs, reply *db.SkipScalingRecommendationReply) error {
+	if err := c.requireCoordinatorLease(); err != nil {
+		return coordinatorWireError(errCoordinatorNotActive)
+	}
+	if cycleState := epochCycleState(c.controlStore); cycleState != controlstore.EpochCycleStateRecommendationReady {
+		return fmt.Errorf("epoch cycle state %s does not allow scaling skip", cycleState)
+	}
+	epoch, ok := c.controlStore.CurrentEpoch()
+	if ok {
+		accepting, err := c.controlStore.Accepting(epoch.ID)
+		if err != nil {
+			return err
+		}
+		if epoch.State == db.EpochStateActive || accepting {
+			return errors.New("cannot skip scaling recommendation while epoch is active")
+		}
+	}
+	recommendation, ok, err := c.controlStore.GetLatestScalingRecommendation()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("missing scaling recommendation")
+	}
+	shardConfigVersion := currentShardConfigVersion(c.controlStore)
+	reason := fmt.Sprintf("operator skipped %s recommendation", recommendation.Action)
+	if err := transitionEpochCycleScalingSkipped(c.controlStore, recommendation.EpochID, shardConfigVersion, reason); err != nil {
+		return err
+	}
+	*reply = db.SkipScalingRecommendationReply{
+		Skipped:               true,
+		RecommendationEpochID: recommendation.EpochID,
+		ShardConfigVersion:    shardConfigVersion,
+		Action:                recommendation.Action,
+		Reason:                reason,
+	}
 	return nil
 }
 
