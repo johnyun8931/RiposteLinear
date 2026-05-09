@@ -1,23 +1,26 @@
 # Riposte AWS Evaluation
 
 This directory contains a Terraform + AWS CLI + SSH evaluation harness for the
-current sharded coordinator topology.
+current sharded coordinator topology and this branch's read-path/failover work.
 
 It is intentionally operational, not permanent infrastructure:
 
-- no ALB / HTTPS proxy layer
-- no active-passive or checkpoint work
-- no health-check protocol changes
+- the write path remains the existing coordinator/shard RPC path
+- the read path uses HTTP read servers behind a public Application Load Balancer
+- read servers are stateless and reload S3-published epoch tables
+- read-server recovery is demonstrated with Auto Scaling Group crash replacement
 
 The goal is to answer two questions on real EC2 hosts:
 
 1. does the coordinator + 2-shard topology run correctly across machines?
 2. does the routed 2-shard path beat the single-shard baseline under the same
    client shape?
+3. can stateless read servers serve S3-published epoch tables through an ALB?
+4. do reads continue when one read server crashes and the ASG replaces it?
 
 ## Topology
 
-The harness launches six EC2 instances in one subnet / one AZ:
+The write-path harness launches six EC2 instances in one subnet / one AZ:
 
 - `1` coordinator
 - `4` shard servers
@@ -28,13 +31,25 @@ The harness launches six EC2 instances in one subnet / one AZ:
 - `1` client/load-generator
 
 Application traffic stays on private IPs. Public IPs are used only for SSH and
-`scp`.
+`scp`, unless the optional write-path NLB is enabled.
+
+The read-path harness adds:
+
+- one public Application Load Balancer for HTTP reads
+- one ALB target group with `/healthz` checks
+- a readserver launch template
+- a readserver Auto Scaling Group
+- a result-table S3 bucket used by shard leaders and read servers
+
+Every read server loads every active shard table from S3. This makes the v1 read
+tier stateless: any healthy ALB target can answer any `(x,y)` read.
 
 Default instance types:
 
 - coordinator: `c7i.large`
 - shard nodes: `c7i.large`
 - client: `c7i.xlarge`
+- read servers: `c7i.large`
 
 Default region:
 
@@ -91,6 +106,34 @@ The benchmark stops at the first invalid phase. For example, if
 `baseline-warmup` fails validation, the measured phases are skipped because the
 baseline lifecycle is already unhealthy.
 
+## Read Path Shape
+
+Shard leaders can publish the merged epoch table to S3 after every merge. The
+published read artifacts use stable keys so the latest epoch overwrites the
+previous one:
+
+```text
+s3://<bucket>/<prefix>/shards/<shard_id>/current/table.bin
+s3://<bucket>/<prefix>/shards/<shard_id>/current/manifest.json
+```
+
+`table.bin` is uploaded first, and `manifest.json` is the commit point. The
+manifest records the epoch ID, shard ID, global row range, table dimensions,
+byte length, SHA-256, table key, and publish timestamp.
+
+The `readserver` binary polls shard manifests, downloads new table binaries,
+validates size and checksum, and atomically swaps the in-memory table. It
+exposes:
+
+- `GET /healthz`: returns `200` only after all configured shard tables are loaded
+- `GET /status`: reports loaded epochs, shard ranges, server ID, refresh status,
+  and last error
+- `GET /read?x=<column>&y=<global_row>`: returns the selected message as JSON
+
+The read API is HTTP JSON and is fronted by an ALB. This gives request-level
+CloudWatch metrics, HTTP response-code graphs, `/healthz` readiness checks, and
+clear ALB target-health evidence during failover.
+
 ## Generated Local Files
 
 Generated files are git-ignored:
@@ -105,7 +148,8 @@ Generated files are git-ignored:
 - AWS CLI v2 authenticated with EC2, IAM, ELBv2, DynamoDB, and SSM AMI-lookup
   permissions
 - `go`, `ssh`, `scp`, `curl`, `python3`, `file`, `terraform`
-- enough AWS quota for six On-Demand instances in one AZ
+- enough AWS quota for the six write-path On-Demand instances plus the
+  readserver ASG desired capacity
 
 ## Workflow
 
@@ -140,8 +184,13 @@ Runs Terraform from `aws-eval/terraform/` and writes compatibility state to
 - optionally, an internet-facing Network Load Balancer for public coordinator
   RPC ingress when `PUBLIC_ENTRY_BACKEND=nlb`
 - six tagged EC2 instances
+- an internet-facing Application Load Balancer for HTTP reads
+- a readserver target group, launch template, and Auto Scaling Group
+- a result-table S3 bucket for published read tables and the deployed readserver
+  binary
 - optional DynamoDB control/session tables when they do not already exist
 - optional coordinator IAM role/profile for DynamoDB runtime access
+- IAM role/profile and policy for read servers to load S3 table artifacts
 
 The wrapper preserves the old shell interface: set the same env vars as before,
 then run `01-launch.sh`. Terraform variables are generated under
@@ -162,7 +211,13 @@ Builds Linux binaries locally and copies:
 
 - `~/server` to each shard node
 - `~/coordinator` to the coordinator node
+- `~/autoscaler` to the coordinator node
 - `~/client` to the client node
+- `~/readload` to the client node
+
+It also builds the `readserver` binary and uploads it to the result-table S3
+bucket. Readserver EC2 instances download this binary during boot through their
+launch template user-data.
 
 ### Optional DynamoDB Tables
 
@@ -401,6 +456,43 @@ to become promotable, stops the active shard 0 leader, force-promotes shard 0's
 standby pair, starts a second epoch, and verifies row `0` lands in the promoted
 standby result path.
 
+To validate read-server failover through the read ALB:
+
+```bash
+./aws-eval/12-validate-read-failover.sh
+```
+
+This publishes a deterministic read table through the write path, waits for the
+read ALB to have healthy targets, starts sustained read load through the ALB,
+terminates one readserver instance, verifies reads continue through the
+remaining target, waits for ASG replacement, and renders CloudWatch graphs under
+the result directory. This demonstrates crash replacement, not traffic-based
+autoscaling.
+
+To run a flat read-load benchmark through the ALB:
+
+```bash
+./aws-eval/13-run-read-load.sh
+```
+
+Default read-load settings are:
+
+```bash
+READ_LOAD_DURATION_SECONDS=120
+READ_LOAD_CONCURRENCY=128
+READ_LOAD_TIMEOUT_MS=2000
+```
+
+To run a longer staged read-load profile:
+
+```bash
+./aws-eval/14-run-read-load-profile.sh
+```
+
+This runs baseline, spike, and cooldown phases and saves both local load
+summaries and CloudWatch graph images. It is the preferred script for showing
+how request volume and tail latency change under a temporary read spike.
+
 To validate the in-cloud autoscaler-driven apply path instead of direct local
 admin apply:
 
@@ -483,6 +575,19 @@ Outputs:
   sharded measured coordinator status artifact is present
 - raw logs per node
 - copied result JSON files under `leader-results/`
+- ALB target-health and readserver status artifacts when read-path resources
+  exist
+
+Read-path scripts also write result folders such as:
+
+```text
+aws-eval/results/read-failover-<timestamp>/
+aws-eval/results/read-load-<timestamp>/
+aws-eval/results/read-load-profile-<timestamp>/
+```
+
+These include summaries, ALB target-health snapshots, CloudWatch metric widget
+PNGs, and report-ready notes when generated.
 
 ### 7. Teardown
 
@@ -492,10 +597,16 @@ Run teardown even if earlier steps fail:
 ./aws-eval/06-teardown.sh
 ```
 
-This runs `terraform destroy` for the six instances, temporary key pair,
-security group, IAM role/profile, NLB resources, and any DynamoDB tables
-Terraform created for the run. Local state, keys, binaries, and copied results
-remain in ignored paths for audit/debug.
+This runs `terraform destroy` for the six write-path instances, temporary key
+pair, security group, IAM role/profile, read ALB, readserver ASG, launch
+template, result-table S3 bucket, optional NLB resources, and any DynamoDB
+tables Terraform created for the run. Local state, keys, binaries, and copied
+results remain in ignored paths for audit/debug.
+
+On Windows/WSL, if `terraform` is installed on Windows but not visible inside
+WSL, use the cached Linux Terraform binary under `aws-eval/.state/` or run
+Terraform from PowerShell with Windows paths. State files may be CRLF-formatted;
+the helper scripts normalize sourced state values.
 
 ## Useful Overrides
 
@@ -529,6 +640,18 @@ POST_EPOCH_FLUSH_SECONDS=12
 CLIENT_EXIT_GRACE_SECONDS=30
 PUBLIC_ENTRY_BACKEND=none
 PUBLIC_ENTRY_MULTI_COORDINATOR=0
+READ_SERVER_INSTANCE_TYPE=c7i.large
+READ_SERVER_DESIRED_CAPACITY=2
+READ_SERVER_MIN_SIZE=1
+READ_SERVER_MAX_SIZE=4
+READ_SERVER_PORT=8080
+READ_ALB_PORT=80
+RESULT_TABLE_S3_BUCKET=
+RESULT_TABLE_S3_PREFIX=
+READ_LOAD_DURATION_SECONDS=120
+READ_LOAD_CONCURRENCY=128
+READ_FAILOVER_LOAD_DURATION_SECONDS=600
+READ_FAILOVER_LOAD_CONCURRENCY=64
 TF_VAR_vpc_id=vpc-...
 TF_VAR_subnet_id=subnet-...
 TF_VAR_ssh_cidr=203.0.113.10/32
