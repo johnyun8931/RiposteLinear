@@ -486,6 +486,10 @@ func dialStandbyShardLeader(leaderAddr string, timeout time.Duration) (closeable
 
 func (c *Coordinator) connectShards() error {
 	shardConfig := shardConfigForStatus(c.controlStore, c.availableShards)
+	return c.connectShardConfig(shardConfig)
+}
+
+func (c *Coordinator) connectShardConfig(shardConfig ShardConfigRecord) error {
 	for _, shard := range shardConfig.Shards {
 		if _, ok := c.clients[shard.ID]; ok {
 			continue
@@ -913,6 +917,10 @@ func (c *Coordinator) ApplyScalingRecommendation(args *db.ApplyScalingRecommenda
 		}
 	} else if cycleState != controlstore.EpochCycleStateScalingInProgress {
 		return fmt.Errorf("epoch cycle state %s does not allow scaling apply", cycleState)
+	}
+	if err := c.connectShardConfig(evaluation.proposed); err != nil {
+		transitionEpochCycleFailed(c.controlStore, controlstore.EpochCycleStateScalingInProgress, evaluation.recommendation.EpochID, evaluation.current.Version, err.Error())
+		return err
 	}
 	if err := c.controlStore.PutShardConfig(evaluation.proposed); err != nil {
 		transitionEpochCycleFailed(c.controlStore, controlstore.EpochCycleStateScalingInProgress, evaluation.recommendation.EpochID, evaluation.current.Version, err.Error())

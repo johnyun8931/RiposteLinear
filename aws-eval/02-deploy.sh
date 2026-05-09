@@ -30,6 +30,7 @@ for host in \
 done
 
 info "copying server binary to shard nodes"
+copy_to_remote "$BIN_DIR/server" "$COORDINATOR_PUBLIC_IP" "~/server"
 copy_to_remote "$BIN_DIR/server" "$SHARD0_LEADER_PUBLIC_IP" "~/server"
 copy_to_remote "$BIN_DIR/server" "$SHARD0_FOLLOWER_PUBLIC_IP" "~/server"
 copy_to_remote "$BIN_DIR/server" "$SHARD1_LEADER_PUBLIC_IP" "~/server"
@@ -42,11 +43,23 @@ copy_to_remote "$BIN_DIR/autoscaler" "$COORDINATOR_PUBLIC_IP" "~/autoscaler"
 info "copying client binary"
 copy_to_remote "$BIN_DIR/client" "$CLIENT_PUBLIC_IP" "~/client"
 
-remote_cmd "$COORDINATOR_PUBLIC_IP" "chmod +x ~/coordinator ~/autoscaler"
+remote_cmd "$COORDINATOR_PUBLIC_IP" "chmod +x ~/coordinator ~/autoscaler ~/server"
 remote_cmd "$SHARD0_LEADER_PUBLIC_IP" "chmod +x ~/server"
 remote_cmd "$SHARD0_FOLLOWER_PUBLIC_IP" "chmod +x ~/server"
 remote_cmd "$SHARD1_LEADER_PUBLIC_IP" "chmod +x ~/server"
 remote_cmd "$SHARD1_FOLLOWER_PUBLIC_IP" "chmod +x ~/server"
 remote_cmd "$CLIENT_PUBLIC_IP" "chmod +x ~/client"
+
+if cloudwatch_observability_enabled; then
+  configure_cloudwatch_agent "$COORDINATOR_PUBLIC_IP" "coordinator"
+  configure_cloudwatch_agent "$SHARD0_LEADER_PUBLIC_IP" "shard0-leader"
+  configure_cloudwatch_agent "$SHARD0_FOLLOWER_PUBLIC_IP" "shard0-follower"
+  configure_cloudwatch_agent "$SHARD1_LEADER_PUBLIC_IP" "shard1-leader"
+  configure_cloudwatch_agent "$SHARD1_FOLLOWER_PUBLIC_IP" "shard1-follower"
+  configure_cloudwatch_agent "$CLIENT_PUBLIC_IP" "client"
+  if [[ -n "${CLOUDWATCH_DASHBOARD_NAME:-}" ]]; then
+    info "CloudWatch dashboard: https://${AWS_REGION}.console.aws.amazon.com/cloudwatch/home?region=${AWS_REGION}#dashboards:name=${CLOUDWATCH_DASHBOARD_NAME}"
+  fi
+fi
 
 info "deploy complete"

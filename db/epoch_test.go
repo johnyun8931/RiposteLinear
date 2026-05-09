@@ -94,6 +94,31 @@ func (q *ackFailingCompletedUploadQueue) Stats() IngestionQueueStats {
 	return IngestionQueueStats{Inflight: 1}
 }
 
+type ackRecordingCompletedUploadQueue struct {
+	acks int
+}
+
+func (q *ackRecordingCompletedUploadQueue) Backend() string {
+	return "ack-recording"
+}
+
+func (q *ackRecordingCompletedUploadQueue) Enqueue(context.Context, CompletedUploadMessage) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (q *ackRecordingCompletedUploadQueue) Receive(context.Context, int) ([]QueuedCompletedUploadMessage, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (q *ackRecordingCompletedUploadQueue) Ack(context.Context, string) error {
+	q.acks++
+	return nil
+}
+
+func (q *ackRecordingCompletedUploadQueue) Stats() IngestionQueueStats {
+	return IngestionQueueStats{}
+}
+
 type completeFailingCompletedUploadLedger struct{}
 
 func (l *completeFailingCompletedUploadLedger) Backend() string {
@@ -811,6 +836,45 @@ func TestIngestionWorkerSkipsAlreadyCommittedDuplicate(t *testing.T) {
 	}
 	if status.CompletedUploadDuplicateSkipCount != 1 || status.IngestionAckCount != 1 || status.IngestionProcessedCount != 0 {
 		t.Fatalf("unexpected duplicate diagnostics: %+v", status)
+	}
+}
+
+func TestDemoFailIngestionAckOnceLeavesMessageForDuplicateRedelivery(t *testing.T) {
+	s := newTestLeaderServer()
+	queue := &ackRecordingCompletedUploadQueue{}
+	if err := s.SetCompletedUploadQueue(queue); err != nil {
+		t.Fatalf("set queue failed: %v", err)
+	}
+	s.SetDemoFailIngestionAckOnce(true)
+	processCount := 0
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		processCount++
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		return nil
+	}
+
+	msg := CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 101}
+	s.processIngestionJob(QueuedCompletedUploadMessage{Message: msg, ReceiptHandle: "first"})
+	if queue.acks != 0 {
+		t.Fatalf("injected ack failure should leave first delivery unacked, got %d ack(s)", queue.acks)
+	}
+
+	s.processIngestionJob(QueuedCompletedUploadMessage{Message: msg, ReceiptHandle: "redelivered"})
+	if queue.acks != 1 {
+		t.Fatalf("redelivery should ack after duplicate skip, got %d ack(s)", queue.acks)
+	}
+	if processCount != 1 {
+		t.Fatalf("redelivery should not reprocess committed upload, processed %d time(s)", processCount)
+	}
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionAckErrors != 1 || status.IngestionAckCount != 1 || status.CompletedUploadCommittedCount != 1 || status.CompletedUploadDuplicateSkipCount != 1 {
+		t.Fatalf("unexpected demo ack failure diagnostics: %+v", status)
 	}
 }
 

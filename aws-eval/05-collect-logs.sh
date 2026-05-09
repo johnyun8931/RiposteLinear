@@ -118,6 +118,10 @@ INGESTION_SQS_SHARD1_STANDBY_QUEUE_URL="${INGESTION_SQS_SHARD1_STANDBY_QUEUE_URL
 COMPLETED_UPLOAD_LEDGER_BACKEND="$COMPLETED_UPLOAD_LEDGER_BACKEND" \
 COMPLETED_UPLOAD_LEDGER_TABLE="$COMPLETED_UPLOAD_LEDGER_TABLE" \
 COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS="$COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS" \
+CLOUDWATCH_OBSERVABILITY="${CLOUDWATCH_OBSERVABILITY:-0}" \
+CLOUDWATCH_LOG_GROUP="${CLOUDWATCH_LOG_GROUP:-}" \
+CLOUDWATCH_DASHBOARD_NAME="${CLOUDWATCH_DASHBOARD_NAME:-}" \
+CLOUDWATCH_LOG_RETENTION_DAYS="${CLOUDWATCH_LOG_RETENTION_DAYS:-7}" \
 NLB_NAME="${NLB_NAME:-}" \
 NLB_DNS_NAME="${NLB_DNS_NAME:-}" \
 NLB_ARN="${NLB_ARN:-}" \
@@ -217,6 +221,12 @@ payload = {
         "completed_upload_ledger_backend": os.environ["COMPLETED_UPLOAD_LEDGER_BACKEND"],
         "completed_upload_ledger_table": os.environ["COMPLETED_UPLOAD_LEDGER_TABLE"],
         "completed_upload_processing_ttl_seconds": int(os.environ["COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS"]),
+        "cloudwatch": {
+            "enabled": os.environ["CLOUDWATCH_OBSERVABILITY"],
+            "log_group": os.environ["CLOUDWATCH_LOG_GROUP"],
+            "dashboard_name": os.environ["CLOUDWATCH_DASHBOARD_NAME"],
+            "log_retention_days": int(os.environ["CLOUDWATCH_LOG_RETENTION_DAYS"]),
+        },
         "nlb": {
             "name": os.environ["NLB_NAME"],
             "dns_name": os.environ["NLB_DNS_NAME"],

@@ -7,6 +7,8 @@ locals {
   completed_upload_ledger_dynamodb_enabled = var.completed_upload_ledger_backend == "dynamodb"
   completed_upload_ledger_table_name       = var.completed_upload_ledger_table != "" ? var.completed_upload_ledger_table : var.dynamodb_control_table
   dynamodb_runtime_enabled                 = var.control_store_backend == "dynamodb" || var.session_store_backend == "dynamodb" || local.completed_upload_ledger_dynamodb_enabled
+  cloudwatch_observability_enabled         = contains(["1", "true"], lower(var.cloudwatch_observability))
+  cloudwatch_log_group_name                = "/riposte/aws-eval/${var.run_id}"
   session_table_name                       = var.dynamodb_session_table != "" ? var.dynamodb_session_table : var.dynamodb_control_table
   session_table_region                     = var.dynamodb_session_region != "" ? var.dynamodb_session_region : var.dynamodb_control_region
   dynamodb_table_arns = distinct(concat(
@@ -20,15 +22,36 @@ locals {
       "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${local.completed_upload_ledger_table_name}",
     ] : []
   ))
-  public_entry_enabled       = var.public_entry_backend == "nlb"
-  multi_coordinator          = local.public_entry_enabled && contains(["1", "true"], lower(var.public_entry_multi_coordinator))
-  nlb_suffix                 = substr(var.run_id, max(0, length(var.run_id) - 16), 16)
-  nlb_name                   = substr("riposte-${local.nlb_suffix}", 0, 32)
-  nlb_target_group_name      = substr("riposte-tg-${local.nlb_suffix}", 0, 32)
-  ingestion_sqs_enabled      = var.ingestion_queue_backend == "sqs"
-  hot_standby_ingestion      = local.ingestion_sqs_enabled && contains(["1", "true"], lower(var.hot_standby_ingestion))
-  server_aws_runtime_enabled = local.ingestion_sqs_enabled || local.completed_upload_ledger_dynamodb_enabled
-  ingestion_bucket_name      = var.ingestion_s3_bucket != "" ? var.ingestion_s3_bucket : lower(substr("${var.project_tag}-${var.run_id}-ingestion", 0, 63))
+  public_entry_enabled        = var.public_entry_backend == "nlb"
+  multi_coordinator           = local.public_entry_enabled && contains(["1", "true"], lower(var.public_entry_multi_coordinator))
+  nlb_suffix                  = substr(var.run_id, max(0, length(var.run_id) - 16), 16)
+  nlb_name                    = substr("riposte-${local.nlb_suffix}", 0, 32)
+  nlb_target_group_name       = substr("riposte-tg-${local.nlb_suffix}", 0, 32)
+  ingestion_sqs_enabled       = var.ingestion_queue_backend == "sqs"
+  hot_standby_ingestion       = local.ingestion_sqs_enabled && contains(["1", "true"], lower(var.hot_standby_ingestion))
+  server_aws_runtime_enabled  = local.ingestion_sqs_enabled || local.completed_upload_ledger_dynamodb_enabled || local.cloudwatch_observability_enabled
+  coordinator_runtime_enabled = local.dynamodb_runtime_enabled || local.cloudwatch_observability_enabled
+  cloudwatch_policy_statements = local.cloudwatch_observability_enabled ? tolist([
+    {
+      Effect = "Allow"
+      Action = [
+        "logs:CreateLogStream",
+        "logs:DescribeLogStreams",
+        "logs:PutLogEvents",
+      ]
+      Resource = [
+        "${aws_cloudwatch_log_group.eval[0].arn}:*",
+      ]
+    },
+    {
+      Effect = "Allow"
+      Action = [
+        "logs:DescribeLogGroups",
+      ]
+      Resource = ["*"]
+    },
+  ]) : tolist([])
+  ingestion_bucket_name = var.ingestion_s3_bucket != "" ? var.ingestion_s3_bucket : lower(substr("${var.project_tag}-${var.run_id}-ingestion", 0, 63))
   ingestion_sqs_queue_arns = local.ingestion_sqs_enabled ? concat([
     aws_sqs_queue.ingestion_shard0[0].arn,
     aws_sqs_queue.ingestion_shard1[0].arn,
@@ -78,7 +101,8 @@ locals {
         ]
         Resource = ["arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${local.completed_upload_ledger_table_name}"]
       },
-    ] : []
+    ] : [],
+    local.cloudwatch_policy_statements
   )
 }
 
@@ -149,8 +173,79 @@ resource "aws_vpc_security_group_egress_rule" "all" {
 
 data "aws_caller_identity" "current" {}
 
+resource "aws_cloudwatch_log_group" "eval" {
+  count = local.cloudwatch_observability_enabled ? 1 : 0
+
+  name              = local.cloudwatch_log_group_name
+  retention_in_days = var.cloudwatch_log_retention_days
+
+  tags = local.common_tags
+}
+
+resource "aws_cloudwatch_dashboard" "eval" {
+  count = local.cloudwatch_observability_enabled ? 1 : 0
+
+  dashboard_name = "riposte-aws-eval-${var.run_id}"
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "log"
+        x      = 0
+        y      = 0
+        width  = 24
+        height = 6
+        properties = {
+          region = var.aws_region
+          title  = "Failure demo events"
+          query  = "SOURCE '${local.cloudwatch_log_group_name}' | fields @timestamp, scenario, event, detail, @message | filter role = 'demo-event' or @message like /demo|fail|promot|lease|Coordinator not active|Shard session lost/ | sort @timestamp desc | limit 100"
+          view   = "table"
+        }
+      },
+      {
+        type   = "log"
+        x      = 0
+        y      = 6
+        width  = 12
+        height = 6
+        properties = {
+          region = var.aws_region
+          title  = "Coordinator role and lease"
+          query  = "SOURCE '${local.cloudwatch_log_group_name}' | fields @timestamp, scenario, target, status.role, status.lease_holder, status.lease_active, status.active_holder | filter role = 'coordinator-status' | sort @timestamp desc | limit 100"
+          view   = "table"
+        }
+      },
+      {
+        type   = "log"
+        x      = 12
+        y      = 6
+        width  = 12
+        height = 6
+        properties = {
+          region = var.aws_region
+          title  = "Shard promotion readiness"
+          query  = "SOURCE '${local.cloudwatch_log_group_name}' | fields @timestamp, scenario, target, status.replica_id, status.ingestion_queue_depth, status.ingestion_inflight_count, status.completed_upload_committed_count, status.completed_upload_duplicate_skip_count, status.ingestion_ack_error_count | filter role = 'shard-status' | sort @timestamp desc | limit 100"
+          view   = "table"
+        }
+      },
+      {
+        type   = "log"
+        x      = 0
+        y      = 12
+        width  = 24
+        height = 6
+        properties = {
+          region = var.aws_region
+          title  = "Process logs: errors, promotion, SQS, ledger"
+          query  = "SOURCE '${local.cloudwatch_log_group_name}' | fields @timestamp, @logStream, @message | filter @message like /Error|failed|promot|ledger|ingestion|lease|standby|active/ | sort @timestamp desc | limit 200"
+          view   = "table"
+        }
+      },
+    ]
+  })
+}
+
 resource "aws_iam_role" "coordinator" {
-  count = local.dynamodb_runtime_enabled ? 1 : 0
+  count = local.coordinator_runtime_enabled ? 1 : 0
 
   name = var.coordinator_iam_role_name
   assume_role_policy = jsonencode({
@@ -170,14 +265,14 @@ resource "aws_iam_role" "coordinator" {
 }
 
 resource "aws_iam_role_policy" "coordinator_dynamodb" {
-  count = local.dynamodb_runtime_enabled ? 1 : 0
+  count = local.coordinator_runtime_enabled ? 1 : 0
 
   name = var.coordinator_iam_policy_name
   role = aws_iam_role.coordinator[0].id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
+    Statement = concat(
+      local.dynamodb_runtime_enabled ? [{
         Effect = "Allow"
         Action = [
           "dynamodb:DescribeTable",
@@ -186,16 +281,57 @@ resource "aws_iam_role_policy" "coordinator_dynamodb" {
           "dynamodb:DeleteItem",
         ]
         Resource = local.dynamodb_table_arns
-      }
-    ]
+      }] : [],
+      local.cloudwatch_policy_statements
+    )
   })
 }
 
 resource "aws_iam_instance_profile" "coordinator" {
-  count = local.dynamodb_runtime_enabled ? 1 : 0
+  count = local.coordinator_runtime_enabled ? 1 : 0
 
   name = var.coordinator_iam_instance_profile_name
   role = aws_iam_role.coordinator[0].name
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role" "client_cloudwatch" {
+  count = local.cloudwatch_observability_enabled ? 1 : 0
+
+  name = substr("${var.project_tag}-${var.run_id}-client-cloudwatch", 0, 64)
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "client_cloudwatch" {
+  count = local.cloudwatch_observability_enabled ? 1 : 0
+
+  name = "RiposteClientCloudWatchLogs"
+  role = aws_iam_role.client_cloudwatch[0].id
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = local.cloudwatch_policy_statements
+  })
+}
+
+resource "aws_iam_instance_profile" "client_cloudwatch" {
+  count = local.cloudwatch_observability_enabled ? 1 : 0
+
+  name = substr("${var.project_tag}-${var.run_id}-client-cloudwatch", 0, 128)
+  role = aws_iam_role.client_cloudwatch[0].name
 
   tags = local.common_tags
 }
@@ -348,7 +484,7 @@ resource "aws_instance" "coordinator" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
-  iam_instance_profile        = local.dynamodb_runtime_enabled ? aws_iam_instance_profile.coordinator[0].name : null
+  iam_instance_profile        = local.coordinator_runtime_enabled ? aws_iam_instance_profile.coordinator[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-coordinator"
@@ -458,6 +594,7 @@ resource "aws_instance" "client" {
   subnet_id                   = var.subnet_id
   vpc_security_group_ids      = [aws_security_group.eval.id]
   associate_public_ip_address = true
+  iam_instance_profile        = local.cloudwatch_observability_enabled ? aws_iam_instance_profile.client_cloudwatch[0].name : null
 
   tags = merge(local.common_tags, {
     Name = "${var.project_tag}-client"

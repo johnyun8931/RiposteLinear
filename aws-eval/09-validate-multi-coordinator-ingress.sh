@@ -27,6 +27,7 @@ COORDINATOR_A_HOLDER="$(coordinator_holder_id)-a"
 COORDINATOR_B_HOLDER="$(coordinator_holder_id)-b"
 
 cleanup() {
+  stop_cloudwatch_status_pollers "$MULTI_LOGS_REMOTE"
   kill_all_remote_processes
 }
 trap cleanup EXIT
@@ -68,7 +69,7 @@ reset_dynamodb_validation_state() {
   local pk session_pks
 
   info "resetting transient DynamoDB validation state"
-  for pk in lease epoch; do
+  for pk in lease epoch epoch-cycle scaling#latest scaling#epoch#1 scaling#epoch#2 shard-config#epoch#1 shard-config#epoch#2; do
     aws_control_region dynamodb delete-item \
       --table-name "$(dynamodb_control_table)" \
       --key "{\"pk\":{\"S\":\"$pk\"}}" >/dev/null
@@ -135,6 +136,8 @@ reset_all_remote_workspaces
 kill_all_remote_processes
 mkdir -p "$MULTI_LOCAL_DIR"
 reset_dynamodb_validation_state
+start_cloudwatch_status_pollers "coordinator-failover" "$MULTI_LOGS_REMOTE"
+write_cloudwatch_demo_event "coordinator-failover" "$MULTI_LOGS_REMOTE" "scenario_start" "multi-coordinator failover validation started"
 
 info "starting sharded servers for multi-coordinator ingress validation"
 start_remote_server "$SHARD0_FOLLOWER_PUBLIC_IP" 1 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$MULTI_RESULTS_REMOTE/shard0" "$MULTI_LOGS_REMOTE/shard0-follower.log"
@@ -143,6 +146,8 @@ start_remote_server "$SHARD1_FOLLOWER_PUBLIC_IP" 1 1 "$(server_pair_csv "$SHARD1
 start_remote_server "$SHARD1_LEADER_PUBLIC_IP" 0 1 "$(server_pair_csv "$SHARD1_LEADER_PRIVATE_IP" "$SHARD1_LEADER_PORT" "$SHARD1_FOLLOWER_PRIVATE_IP" "$SHARD1_FOLLOWER_PORT")" "$MULTI_RESULTS_REMOTE/shard1" "$MULTI_LOGS_REMOTE/shard1-leader.log"
 remote_wait_for_port "$SHARD0_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD0_LEADER_PORT"
 remote_wait_for_port "$SHARD1_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD1_LEADER_PORT"
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard0_leader_addr)" 60
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard1_leader_addr)" 60
 
 info "starting coordinator A active candidate and coordinator B standby"
 start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$MULTI_LOGS_REMOTE/coordinator-a.log" "$COORDINATOR_A_HOLDER" "$MULTI_LEASE_TTL_SECONDS" "$MULTI_LEASE_RENEW_SECONDS" "$MULTI_LOGS_REMOTE/coordinator-a.pid"
@@ -192,8 +197,10 @@ copy_from_remote "$SHARD0_LEADER_PUBLIC_IP" "$MULTI_RESULTS_REMOTE/shard0/$(resu
 assert_result_contains_slot "$local_epoch1_shard0" 0 0 256 0 1 "passive-route"
 
 info "stopping coordinator A and waiting for coordinator B promotion"
+write_cloudwatch_demo_event "coordinator-failover" "$MULTI_LOGS_REMOTE" "kill_coordinator_a" "stopping active coordinator A"
 stop_remote_pid "$MULTI_LOGS_REMOTE/coordinator-a.pid"
 wait_for_coordinator_role "$(coordinator_standby_addr)" active "$((MULTI_LEASE_TTL_SECONDS + 60))" || die "coordinator B did not become active after coordinator A stopped"
+write_cloudwatch_demo_event "coordinator-failover" "$MULTI_LOGS_REMOTE" "coordinator_b_promoted" "standby coordinator acquired lease"
 capture_status b-promoted "$(coordinator_standby_addr)"
 assert_role "$MULTI_LOCAL_DIR/status-b-promoted.json" active
 capture_dynamodb_snapshot b-promoted
@@ -208,6 +215,7 @@ local_epoch2_shard1="$MULTI_LOCAL_DIR/epoch2-$(result_file_name "$epoch2" 1)"
 copy_from_remote "$SHARD1_LEADER_PUBLIC_IP" "$MULTI_RESULTS_REMOTE/shard1/$(result_file_name "$epoch2" 1)" "$local_epoch2_shard1"
 assert_result_contains_slot "$local_epoch2_shard1" 1 256 512 256 2 "promoted-route"
 capture_dynamodb_snapshot epoch2-completed
+write_cloudwatch_demo_event "coordinator-failover" "$MULTI_LOGS_REMOTE" "scenario_complete" "writes completed after coordinator promotion"
 
 cat <<EOF
 AWS multi-coordinator ingress validation passed.

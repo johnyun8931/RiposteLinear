@@ -15,6 +15,8 @@ aws-eval/*.pem
 aws-eval/terraform/.terraform/
 aws-eval/terraform/*.tfstate
 aws-eval/terraform/*.tfstate.*
+aws-eval/plotting/.venv/
+__pycache__/
 
 # added by kevwjin to provide spec w/o git tracking to llms
 *.txt

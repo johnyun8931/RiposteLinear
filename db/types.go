@@ -592,6 +592,8 @@ type Server struct {
 	ingestionDiagnostics         ingestionDiagnostics
 	processUploadFn              processCompletedUploadFunc
 	commitUploadFn               commitCompletedUploadFunc
+	demoFailIngestionAckOnce     bool
+	demoFailedIngestionAck       bool
 }
 
 func init() {

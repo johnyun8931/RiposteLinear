@@ -45,6 +45,7 @@ var flagIngestionWorkerErrorBackoffMs = flag.Int("ingestion-worker-error-backoff
 var flagCompletedUploadLedger = flag.String("completed-upload-ledger", "memory", "Completed upload processing ledger backend")
 var flagCompletedUploadLedgerTable = flag.String("completed-upload-ledger-table", "", "DynamoDB table name for -completed-upload-ledger dynamodb")
 var flagCompletedUploadProcessingTTLSeconds = flag.Int("completed-upload-processing-ttl-seconds", 900, "Completed upload processing ledger lease TTL in seconds")
+var flagDemoFailIngestionAckOnce = flag.Bool("demo-fail-ingestion-ack-once", false, "Demo-only: fail the first completed-upload ingestion ack after ledger commit")
 var flagAWSRegion = flag.String("aws-region", "", "AWS SDK region override")
 var flagAdminTarget = flag.String("admin-target", "", "Target leader address for admin RPC commands")
 var flagStartEpoch = flag.Int64("start-epoch-seconds", 0, "If set, issue an admin RPC to start an epoch for the given duration in seconds and exit")
@@ -159,6 +160,7 @@ func main() {
 	if err := slotTable.SetCompletedUploadProcessingTTL(time.Duration(*flagCompletedUploadProcessingTTLSeconds) * time.Second); err != nil {
 		log.Fatal(err)
 	}
+	slotTable.SetDemoFailIngestionAckOnce(*flagDemoFailIngestionAckOnce)
 	slotTable.SetResultsDir(*flagResultsDir)
 	slotTable.Initialize(&a, &a)
 	rpc.Register(slotTable)

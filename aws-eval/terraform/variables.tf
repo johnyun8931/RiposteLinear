@@ -302,3 +302,13 @@ variable "server_ingestion_iam_policy_name" {
   type    = string
   default = "RiposteCompletedUploadIngestion"
 }
+
+variable "cloudwatch_observability" {
+  type    = string
+  default = "0"
+}
+
+variable "cloudwatch_log_retention_days" {
+  type    = number
+  default = 7
+}

@@ -36,6 +36,7 @@ COORDINATOR_LEASE_TTL_SECONDS="${COORDINATOR_LEASE_TTL_SECONDS:-30}"
 COORDINATOR_LEASE_RENEW_SECONDS="${COORDINATOR_LEASE_RENEW_SECONDS:-10}"
 COORDINATOR_INITIAL_ACTIVE_SHARDS="${COORDINATOR_INITIAL_ACTIVE_SHARDS:-0}"
 COORDINATOR_EXTRA_ARGS="${COORDINATOR_EXTRA_ARGS:-}"
+SERVER_EXTRA_ARGS="${SERVER_EXTRA_ARGS:-}"
 PUBLIC_ENTRY_BACKEND="${PUBLIC_ENTRY_BACKEND:-none}"
 PUBLIC_ENTRY_MULTI_COORDINATOR="${PUBLIC_ENTRY_MULTI_COORDINATOR:-0}"
 INGESTION_QUEUE_BACKEND="${INGESTION_QUEUE_BACKEND:-memory}"
@@ -49,6 +50,8 @@ COMPLETED_UPLOAD_LEDGER_BACKEND="${COMPLETED_UPLOAD_LEDGER_BACKEND:-memory}"
 COMPLETED_UPLOAD_LEDGER_TABLE="${COMPLETED_UPLOAD_LEDGER_TABLE:-$DYNAMODB_CONTROL_TABLE}"
 COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS="${COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS:-900}"
 SERVER_INGESTION_IAM_POLICY_NAME="${SERVER_INGESTION_IAM_POLICY_NAME:-RiposteCompletedUploadIngestion}"
+CLOUDWATCH_OBSERVABILITY="${CLOUDWATCH_OBSERVABILITY:-0}"
+CLOUDWATCH_LOG_RETENTION_DAYS="${CLOUDWATCH_LOG_RETENTION_DAYS:-7}"
 
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
 COORDINATOR_STANDBY_PORT="${COORDINATOR_STANDBY_PORT:-8631}"
@@ -171,6 +174,54 @@ copy_from_remote() {
     sleep "$((attempt < 5 ? attempt : 5))"
   done
   return "$status"
+}
+
+configure_cloudwatch_agent() {
+  local host="$1"
+  local label="$2"
+  local config_file
+  if ! cloudwatch_observability_enabled; then
+    return 0
+  fi
+  [[ -n "${CLOUDWATCH_LOG_GROUP:-}" ]] || die "CLOUDWATCH_LOG_GROUP missing from state while CloudWatch observability is enabled"
+  config_file="$(mktemp)"
+  cat >"$config_file" <<JSON
+{
+  "agent": {
+    "run_as_user": "root"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/tmp/riposte-eval/**/*.log",
+            "log_group_name": "$CLOUDWATCH_LOG_GROUP",
+            "log_stream_name": "{instance_id}/process",
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/tmp/riposte-eval/**/*.json",
+            "log_group_name": "$CLOUDWATCH_LOG_GROUP",
+            "log_stream_name": "{instance_id}/json",
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/tmp/riposte-eval/**/*.jsonl",
+            "log_group_name": "$CLOUDWATCH_LOG_GROUP",
+            "log_stream_name": "{instance_id}/jsonl",
+            "timezone": "UTC"
+          }
+        ]
+      }
+    }
+  }
+}
+JSON
+  info "configuring CloudWatch Agent on $label"
+  copy_to_remote "$config_file" "$host" "/tmp/riposte-cloudwatch-agent.json"
+  rm -f "$config_file"
+  remote_cmd "$host" "set -e; if [[ ! -x /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl ]]; then sudo apt-get update -y >/tmp/riposte-cloudwatch-apt.log 2>&1; wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -O /tmp/amazon-cloudwatch-agent.deb; sudo dpkg -i /tmp/amazon-cloudwatch-agent.deb >/tmp/riposte-cloudwatch-dpkg.log 2>&1; fi; sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/tmp/riposte-cloudwatch-agent.json >/tmp/riposte-cloudwatch-agent.log 2>&1"
 }
 
 wait_for_ssh() {
@@ -362,6 +413,10 @@ sqs_ingestion_enabled() {
 
 hot_standby_ingestion_enabled() {
   sqs_ingestion_enabled && [[ "$HOT_STANDBY_INGESTION" == "1" || "$HOT_STANDBY_INGESTION" == "true" ]]
+}
+
+cloudwatch_observability_enabled() {
+  [[ "$CLOUDWATCH_OBSERVABILITY" == "1" || "$CLOUDWATCH_OBSERVABILITY" == "true" ]]
 }
 
 server_ingestion_iam_role_name() {
@@ -831,6 +886,34 @@ raise SystemExit(1)
 PY"
 }
 
+wait_for_server_peer_ready() {
+  local host="$1"
+  local target_addr="$2"
+  local timeout="${3:-60}"
+  local deadline=$((SECONDS + timeout))
+  local out state
+
+  while true; do
+    set +e
+    out="$(remote_cmd "$host" "~/server -admin-target '$target_addr' -status 2>/dev/null")"
+    set -e
+    state="$(printf '%s\n' "$out" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("peer_state", ""))
+except Exception:
+    print("")
+' 2>/dev/null || true)"
+    if [[ "$state" == "ready" ]]; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      printf '%s\n' "$out" >&2
+      die "server at $target_addr did not report peer_state=ready before timeout"
+    fi
+    sleep 1
+  done
+}
+
 phase_dir() {
   printf '%s/%s' "$REMOTE_PHASES_DIR" "$1"
 }
@@ -866,7 +949,7 @@ start_remote_server() {
   local global_row_start=$((shard_id * ROWS_PER_SHARD))
   local ingestion_args
   ingestion_args="$(server_ingestion_queue_args "$shard_id" "$replica_id")"
-  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -global-row-start '$global_row_start' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv'$ingestion_args > '${log_path}.nohup' 2>&1 &"
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -global-row-start '$global_row_start' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv'$ingestion_args $SERVER_EXTRA_ARGS > '${log_path}.nohup' 2>&1 &"
 }
 
 start_remote_coordinator() {
@@ -1053,6 +1136,100 @@ capture_remote_status_json() {
   local bin
   bin="$(admin_binary_for_kind "$kind")"
   remote_cmd "$host" "mkdir -p '$(dirname "$output_path")'; $bin -admin-target '$target_addr' -status > '$output_path'"
+}
+
+start_cloudwatch_status_pollers() {
+  local scenario="$1"
+  local log_dir="$2"
+  local interval="${3:-5}"
+  if ! cloudwatch_observability_enabled; then
+    return 0
+  fi
+  local poller_dir="$log_dir/cloudwatch"
+  info "starting CloudWatch status pollers for scenario=$scenario"
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$poller_dir'; cat > '$poller_dir/status-poller.py' <<'PY'
+import datetime
+import json
+import os
+import subprocess
+import sys
+import time
+
+run_id = os.environ.get('RUN_ID', '')
+scenario = os.environ.get('SCENARIO', '')
+interval = float(os.environ.get('INTERVAL', '5'))
+targets = json.loads(os.environ.get('TARGETS', '[]'))
+out_dir = os.environ.get('OUT_DIR', '.')
+
+def poll(kind, target):
+    binary = os.path.expanduser('~/coordinator' if kind == 'coordinator' else '~/server')
+    try:
+        raw = subprocess.check_output([binary, '-admin-target', target, '-status'], stderr=subprocess.STDOUT, timeout=4)
+        return True, json.loads(raw.decode('utf-8'))
+    except Exception as exc:
+        return False, {'error': str(exc)}
+
+while True:
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    for target in targets:
+        ok, status = poll(target['kind'], target['addr'])
+        line = {
+            'ts': now,
+            'run_id': run_id,
+            'scenario': scenario,
+            'role': target['role'],
+            'target': target['name'],
+            'addr': target['addr'],
+            'ok': ok,
+            'status': status,
+        }
+        path = os.path.join(out_dir, target['role'] + '.jsonl')
+        with open(path, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(line, sort_keys=True) + '\n')
+    time.sleep(interval)
+PY
+TARGETS_JSON='[
+  {\"role\":\"coordinator-status\",\"kind\":\"coordinator\",\"name\":\"coordinator-a\",\"addr\":\"$(coordinator_addr)\"},
+  {\"role\":\"coordinator-status\",\"kind\":\"coordinator\",\"name\":\"coordinator-b\",\"addr\":\"$(coordinator_standby_addr)\"},
+  {\"role\":\"shard-status\",\"kind\":\"server\",\"name\":\"shard0-active\",\"addr\":\"$(shard0_leader_addr)\"},
+  {\"role\":\"shard-status\",\"kind\":\"server\",\"name\":\"shard1-active\",\"addr\":\"$(shard1_leader_addr)\"},
+  {\"role\":\"shard-status\",\"kind\":\"server\",\"name\":\"shard0-standby\",\"addr\":\"$(shard0_standby_leader_addr)\"},
+  {\"role\":\"shard-status\",\"kind\":\"server\",\"name\":\"shard1-standby\",\"addr\":\"$(shard1_standby_leader_addr)\"}
+]'
+RUN_ID='$RUN_ID' SCENARIO='$scenario' INTERVAL='$interval' TARGETS=\"\$TARGETS_JSON\" OUT_DIR='$poller_dir' nohup python3 '$poller_dir/status-poller.py' > '$poller_dir/status-poller.log' 2>&1 & echo \$! > '$poller_dir/status-poller.pid'"
+}
+
+stop_cloudwatch_status_pollers() {
+  local log_dir="$1"
+  if ! cloudwatch_observability_enabled; then
+    return 0
+  fi
+  local poller_dir="$log_dir/cloudwatch"
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "if [[ -f '$poller_dir/status-poller.pid' ]]; then kill \"\$(cat '$poller_dir/status-poller.pid')\" >/dev/null 2>&1 || true; fi" || true
+}
+
+write_cloudwatch_demo_event() {
+  local scenario="$1"
+  local log_dir="$2"
+  local event="$3"
+  local detail="${4:-}"
+  if ! cloudwatch_observability_enabled; then
+    return 0
+  fi
+  local poller_dir="$log_dir/cloudwatch"
+  remote_cmd "$COORDINATOR_PUBLIC_IP" "mkdir -p '$poller_dir'; RUN_ID=$(quote "$RUN_ID") SCENARIO=$(quote "$scenario") EVENT=$(quote "$event") DETAIL=$(quote "$detail") python3 - <<'PY' >> '$poller_dir/demo-events.jsonl'
+import datetime
+import json
+import os
+print(json.dumps({
+    'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'run_id': os.environ.get('RUN_ID', ''),
+    'scenario': os.environ.get('SCENARIO', ''),
+    'role': 'demo-event',
+    'event': os.environ.get('EVENT', ''),
+    'detail': os.environ.get('DETAIL', ''),
+}, sort_keys=True))
+PY"
 }
 
 extract_field() {

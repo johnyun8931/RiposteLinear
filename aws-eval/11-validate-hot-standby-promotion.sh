@@ -103,10 +103,17 @@ remote_wait_for_port "$SHARD0_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD0_LEADER_PORT
 remote_wait_for_port "$SHARD1_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD1_LEADER_PORT"
 remote_wait_for_port "$SHARD0_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD0_STANDBY_LEADER_PORT"
 remote_wait_for_port "$SHARD1_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD1_STANDBY_LEADER_PORT"
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard0_leader_addr)" 60
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard1_leader_addr)" 60
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard0_standby_leader_addr)" 60
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard1_standby_leader_addr)" 60
 
 info "starting coordinator"
 start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$PROMOTE_LOGS_REMOTE/coordinator.log"
 remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_PORT"
+if public_entry_enabled; then
+  wait_for_nlb_target_healthy 180 "$COORDINATOR_PORT"
+fi
 
 info "starting epoch 1 and warming standby completed-upload state"
 start_line="$(retry_start_epoch coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$PROMOTE_EPOCH_SECONDS")"

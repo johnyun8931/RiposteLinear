@@ -28,6 +28,7 @@ AUTO_PROMOTE_FAILURE_THRESHOLD="${AUTO_PROMOTE_FAILURE_THRESHOLD:-2}"
 AUTO_PROMOTE_COOLDOWN_SECONDS="${AUTO_PROMOTE_COOLDOWN_SECONDS:-30}"
 
 cleanup() {
+  stop_cloudwatch_status_pollers "$AUTO_LOGS_REMOTE"
   kill_all_remote_processes
 }
 trap cleanup EXIT
@@ -123,6 +124,8 @@ PY
 reset_all_remote_workspaces
 kill_all_remote_processes
 mkdir -p "$AUTO_LOCAL_DIR"
+start_cloudwatch_status_pollers "shard-auto-promotion" "$AUTO_LOGS_REMOTE"
+write_cloudwatch_demo_event "shard-auto-promotion" "$AUTO_LOGS_REMOTE" "scenario_start" "automatic hot standby promotion validation started"
 
 info "starting active and hot-standby shard processes for auto-promotion validation"
 start_remote_server "$SHARD0_FOLLOWER_PUBLIC_IP" 1 0 "$(server_pair_csv "$SHARD0_LEADER_PRIVATE_IP" "$SHARD0_LEADER_PORT" "$SHARD0_FOLLOWER_PRIVATE_IP" "$SHARD0_FOLLOWER_PORT")" "$AUTO_RESULTS_REMOTE/shard0" "$AUTO_LOGS_REMOTE/shard0-follower.log"
@@ -138,6 +141,10 @@ remote_wait_for_port "$SHARD0_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD0_LEADER_PORT
 remote_wait_for_port "$SHARD1_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD1_LEADER_PORT"
 remote_wait_for_port "$SHARD0_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD0_STANDBY_LEADER_PORT"
 remote_wait_for_port "$SHARD1_LEADER_PUBLIC_IP" "127.0.0.1" "$SHARD1_STANDBY_LEADER_PORT"
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard0_leader_addr)" 60
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard1_leader_addr)" 60
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard0_standby_leader_addr)" 60
+wait_for_server_peer_ready "$COORDINATOR_PUBLIC_IP" "$(shard1_standby_leader_addr)" 60
 
 info "starting coordinator with automatic hot-standby promotion enabled"
 old_coordinator_extra_args="$COORDINATOR_EXTRA_ARGS"
@@ -145,6 +152,9 @@ COORDINATOR_EXTRA_ARGS="$COORDINATOR_EXTRA_ARGS -auto-promote-shard-standby -aut
 start_remote_coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$AUTO_LOGS_REMOTE/coordinator.log"
 COORDINATOR_EXTRA_ARGS="$old_coordinator_extra_args"
 remote_wait_for_port "$COORDINATOR_PUBLIC_IP" "127.0.0.1" "$COORDINATOR_PORT"
+if public_entry_enabled; then
+  wait_for_nlb_target_healthy 180 "$COORDINATOR_PORT"
+fi
 
 info "starting epoch 1 and warming standby completed-upload state"
 start_line="$(retry_start_epoch coordinator "$COORDINATOR_PUBLIC_IP" "$(coordinator_addr)" "$AUTO_EPOCH_SECONDS")"
@@ -156,8 +166,10 @@ wait_for_sqs_ingestion_drain 120
 capture_auto_status "before-auto-promotion"
 
 info "stopping active shard 0 leader and waiting for automatic standby promotion"
+write_cloudwatch_demo_event "shard-auto-promotion" "$AUTO_LOGS_REMOTE" "kill_shard0_active" "stopping active shard 0 leader"
 stop_active_shard0_leader
 wait_for_auto_promotion
+write_cloudwatch_demo_event "shard-auto-promotion" "$AUTO_LOGS_REMOTE" "shard0_auto_promoted" "control-store shard config switched to standby leader"
 capture_auto_status "after-auto-promotion"
 copy_to_remote "$AUTO_LOCAL_DIR/shard-config-after-auto-promotion.json" "$COORDINATOR_PUBLIC_IP" "$AUTO_LOGS_REMOTE/shard-config-after-auto-promotion.json"
 
@@ -172,6 +184,7 @@ wait_for_epoch_complete server "$SHARD0_LEADER_PUBLIC_IP" "$(shard0_standby_lead
 local_promoted_result="$AUTO_LOCAL_DIR/epoch2-auto-promoted-$(result_file_name "$epoch2" 0)"
 copy_from_remote "$SHARD0_LEADER_PUBLIC_IP" "$AUTO_RESULTS_REMOTE/shard0-standby/$(result_file_name "$epoch2" 0)" "$local_promoted_result"
 assert_result_contains_slot "$local_promoted_result" 0 0 256 0 2 "auto-promoted-standby"
+write_cloudwatch_demo_event "shard-auto-promotion" "$AUTO_LOGS_REMOTE" "scenario_complete" "post-promotion write reached promoted standby"
 
 cat <<EOF
 AWS automatic hot standby promotion validation passed.

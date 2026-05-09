@@ -299,6 +299,15 @@ active switchover. Coordinator status reports per-shard `auto_promotion_*`
 fields so operators can see whether a shard is blocked, eligible, or was
 promoted automatically.
 
+AWS eval has an opt-in CloudWatch demo layer for the current failure paths.
+`CLOUDWATCH_OBSERVABILITY=1` creates a per-run log group and dashboard, installs
+the CloudWatch Agent during deploy, and ships process logs plus JSONL status
+poller output. The demo scripts cover coordinator failover, shard
+auto-promotion, and SQS redelivery/idempotence. The SQS idempotence demo uses
+the server-only `-demo-fail-ingestion-ack-once` flag to fail the first queue ack
+after ledger commit; it is disabled by default and should not be used in normal
+smoke or benchmark runs.
+
 Future slices can close the partial-upload gap in increasing order of
 complexity:
 

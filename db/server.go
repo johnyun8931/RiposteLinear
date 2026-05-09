@@ -552,6 +552,12 @@ func (t *Server) processIngestionJob(item QueuedCompletedUploadMessage) {
 		return
 	}
 	t.recordCompletedUploadCommitted()
+	if t.shouldDemoFailIngestionAckOnce() {
+		err := errors.New("demo ingestion ack failure")
+		log.Printf("Error acking ingestion uuid %d: %v", msg.Uuid, err)
+		t.recordIngestionError("ack", err)
+		return
+	}
 	if err := t.ingestionQueue.Ack(context.Background(), item.ReceiptHandle); err != nil {
 		log.Printf("Error acking ingestion uuid %d: %v", msg.Uuid, err)
 		t.recordIngestionError("ack", err)
@@ -1194,6 +1200,23 @@ func (t *Server) SetCompletedUploadProcessingTTL(ttl time.Duration) error {
 	}
 	t.completedUploadProcessingTTL = ttl
 	return nil
+}
+
+func (t *Server) SetDemoFailIngestionAckOnce(enabled bool) {
+	t.ingestionDiagnostics.mu.Lock()
+	defer t.ingestionDiagnostics.mu.Unlock()
+	t.demoFailIngestionAckOnce = enabled
+	t.demoFailedIngestionAck = false
+}
+
+func (t *Server) shouldDemoFailIngestionAckOnce() bool {
+	t.ingestionDiagnostics.mu.Lock()
+	defer t.ingestionDiagnostics.mu.Unlock()
+	if !t.demoFailIngestionAckOnce || t.demoFailedIngestionAck {
+		return false
+	}
+	t.demoFailedIngestionAck = true
+	return true
 }
 
 func (t *Server) DoNothing(args *int, reply *int) error {

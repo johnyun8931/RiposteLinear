@@ -118,5 +118,10 @@ output "state_env" {
     SERVER_INGESTION_IAM_ROLE_NAME             = var.server_ingestion_iam_role_name
     SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME = var.server_ingestion_iam_instance_profile_name
     SERVER_INGESTION_IAM_POLICY_NAME           = var.server_ingestion_iam_policy_name
+
+    CLOUDWATCH_OBSERVABILITY      = var.cloudwatch_observability
+    CLOUDWATCH_LOG_RETENTION_DAYS = var.cloudwatch_log_retention_days
+    CLOUDWATCH_LOG_GROUP          = local.cloudwatch_observability_enabled ? aws_cloudwatch_log_group.eval[0].name : ""
+    CLOUDWATCH_DASHBOARD_NAME     = local.cloudwatch_observability_enabled ? aws_cloudwatch_dashboard.eval[0].dashboard_name : ""
   }
 }

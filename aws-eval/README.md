@@ -305,6 +305,44 @@ copies current ingestion artifacts under `aws/ingestion/`. Completed shard
 status JSON includes processed, acked, ingestion error, ledger commit,
 duplicate-skip, and ledger error counters.
 
+### Optional CloudWatch Demo Observability
+
+CloudWatch shipping is opt-in and does not affect normal smoke/benchmark
+behavior:
+
+```bash
+CLOUDWATCH_OBSERVABILITY=1 \
+CLOUDWATCH_LOG_RETENTION_DAYS=7 \
+./aws-eval/01-launch.sh
+./aws-eval/02-deploy.sh
+```
+
+Terraform creates `/riposte/aws-eval/<run_id>` and a dashboard named
+`riposte-aws-eval-<run_id>`. Deploy installs the CloudWatch Agent on the
+coordinator, shard, and client instances, then ships process logs plus JSON
+status/event files from `/tmp/riposte-eval/**`. Local artifacts remain the
+source of exact audit evidence; CloudWatch is the live demo view.
+
+The three CloudWatch demo scripts are:
+
+```bash
+./aws-eval/13-demo-coordinator-failover-cloudwatch.sh
+./aws-eval/14-demo-shard-auto-promotion-cloudwatch.sh
+./aws-eval/15-demo-sqs-idempotence-cloudwatch.sh
+```
+
+They reuse the existing validated failure paths and add periodic JSONL status
+polling plus demo event markers. The expected proof points are:
+
+- coordinator failover: coordinator role/lease holder changes and writes
+  continue through the NLB
+- shard auto-promotion: shard 0 active becomes unreachable, auto-promotion
+  status changes, shard config switches to the standby, and a later write
+  succeeds on the promoted pair
+- SQS idempotence: `ingestion_ack_error_count` increments once,
+  `completed_upload_duplicate_skip_count` increments after redelivery, and the
+  queue drains
+
 ### 4. Smoke
 
 ```bash
@@ -414,6 +452,12 @@ the coordinator with `-auto-promote-shard-standby`. After shard 0's active
 leader is stopped, the script waits for the coordinator to promote the standby
 through the control-store shard config, then verifies the next epoch routes row
 `0` to the auto-promoted standby result path.
+
+To run the same failure-path demos with CloudWatch status/event logs and a
+dashboard, launch/deploy with `CLOUDWATCH_OBSERVABILITY=1`, then run scripts
+`13`, `14`, and `15`. Script `15` enables the demo-only server flag
+`-demo-fail-ingestion-ack-once`, which fails the first queue ack after ledger
+commit and proves redelivery is handled by duplicate-skip plus eventual ack.
 
 To validate the in-cloud autoscaler-driven apply path instead of direct local
 admin apply:
