@@ -1,0 +1,1263 @@
+package db
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newTestLeaderServer() *Server {
+	s := NewServer(0, []string{"127.0.0.1:9000", "127.0.0.1:9001"})
+	s.incoming1 = make(chan bool, 1)
+	s.incoming2 = make(chan bool, 1)
+	s.incoming3 = make(chan bool, 1)
+	s.incoming1 <- true
+	s.incoming2 <- true
+	s.incoming3 <- true
+	s.setPeerConnectionState(PeerConnectionsReady, nil)
+	return s
+}
+
+func newTestLeaderServerWithPeerState(state PeerConnectionState, err error) *Server {
+	s := newTestLeaderServer()
+	s.setPeerConnectionState(state, err)
+	return s
+}
+
+func waitForEpochState(t *testing.T, s *Server, want DbState) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for epoch state %s, got %s", want.String(), s.currentEpochMeta().State.String())
+		case <-tick.C:
+			if s.currentEpochMeta().State == want {
+				return
+			}
+		}
+	}
+}
+
+func receiveQueuedIngestion(t *testing.T, s *Server) QueuedCompletedUploadMessage {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	items, err := s.ingestionQueue.Receive(ctx, 1)
+	if err != nil {
+		t.Fatalf("receive ingestion item failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one ingestion item, got %d", len(items))
+	}
+	return items[0]
+}
+
+func ackQueuedIngestion(t *testing.T, s *Server) {
+	t.Helper()
+	item := receiveQueuedIngestion(t, s)
+	if err := s.ingestionQueue.Ack(context.Background(), item.ReceiptHandle); err != nil {
+		t.Fatalf("ack ingestion item failed: %v", err)
+	}
+	s.notifyIngestionQueueDrained()
+}
+
+type ackFailingCompletedUploadQueue struct {
+	item QueuedCompletedUploadMessage
+}
+
+func (q *ackFailingCompletedUploadQueue) Backend() string {
+	return "ack-failing"
+}
+
+func (q *ackFailingCompletedUploadQueue) Enqueue(context.Context, CompletedUploadMessage) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (q *ackFailingCompletedUploadQueue) Receive(context.Context, int) ([]QueuedCompletedUploadMessage, error) {
+	return []QueuedCompletedUploadMessage{q.item}, nil
+}
+
+func (q *ackFailingCompletedUploadQueue) Ack(context.Context, string) error {
+	return errors.New("ack failed")
+}
+
+func (q *ackFailingCompletedUploadQueue) Stats() IngestionQueueStats {
+	return IngestionQueueStats{Inflight: 1}
+}
+
+type ackRecordingCompletedUploadQueue struct {
+	acks int
+}
+
+func (q *ackRecordingCompletedUploadQueue) Backend() string {
+	return "ack-recording"
+}
+
+func (q *ackRecordingCompletedUploadQueue) Enqueue(context.Context, CompletedUploadMessage) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (q *ackRecordingCompletedUploadQueue) Receive(context.Context, int) ([]QueuedCompletedUploadMessage, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (q *ackRecordingCompletedUploadQueue) Ack(context.Context, string) error {
+	q.acks++
+	return nil
+}
+
+func (q *ackRecordingCompletedUploadQueue) Stats() IngestionQueueStats {
+	return IngestionQueueStats{}
+}
+
+type completeFailingCompletedUploadLedger struct{}
+
+func (l *completeFailingCompletedUploadLedger) Backend() string {
+	return "complete-failing"
+}
+
+func (l *completeFailingCompletedUploadLedger) BeginProcessing(context.Context, CompletedUploadMessage, time.Time, time.Duration) (CompletedUploadLedgerBeginResult, error) {
+	return CompletedUploadLedgerBeginResult{Lease: CompletedUploadProcessingLease{ShardID: 0, EpochID: 1, Uuid: 12, AttemptID: "attempt"}}, nil
+}
+
+func (l *completeFailingCompletedUploadLedger) CompleteProcessing(context.Context, CompletedUploadProcessingLease, time.Time) error {
+	return errors.New("ledger complete failed")
+}
+
+type busyCompletedUploadLedger struct{}
+
+func (l *busyCompletedUploadLedger) Backend() string {
+	return "busy"
+}
+
+func (l *busyCompletedUploadLedger) BeginProcessing(context.Context, CompletedUploadMessage, time.Time, time.Duration) (CompletedUploadLedgerBeginResult, error) {
+	return CompletedUploadLedgerBeginResult{}, errCompletedUploadProcessingBusy
+}
+
+func (l *busyCompletedUploadLedger) CompleteProcessing(context.Context, CompletedUploadProcessingLease, time.Time) error {
+	return nil
+}
+
+func TestUploadRejectedWithoutActiveEpoch(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var reply UploadReply1
+	err := s.Upload1(&UploadArgs1{}, &reply)
+	if err == nil || err.Error() != "No active epoch" {
+		t.Fatalf("expected no active epoch error, got %v", err)
+	}
+}
+
+func TestUpload1RejectsLocalRouteRowOutsideTable(t *testing.T) {
+	s := newTestLeaderServer()
+	var start StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &start); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	err := s.Upload1(&UploadArgs1{RouteRow: TABLE_HEIGHT}, &UploadReply1{})
+	if err == nil || !strings.Contains(err.Error(), "outside local table height") {
+		t.Fatalf("expected local route row error, got %v", err)
+	}
+}
+
+func TestUpload1UsesAssignedSessionWhenProvided(t *testing.T) {
+	s := newTestLeaderServer()
+	var start StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &start); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	var hashKey [32]byte
+	hashKey[0] = 9
+	var reply UploadReply1
+	if err := s.Upload1(&UploadArgs1{
+		UseAssignedSession: true,
+		AssignedUUID:       42,
+		AssignedHashKey:    hashKey,
+	}, &reply); err != nil {
+		t.Fatalf("Upload1 failed: %v", err)
+	}
+	if reply.Uuid != 42 || reply.HashKey != hashKey {
+		t.Fatalf("expected assigned session in reply, got %+v", reply)
+	}
+	if err := s.Upload2(&UploadArgs2{Uuid: reply.Uuid, HashKey: reply.HashKey}, &UploadReply2{}); err != nil {
+		t.Fatalf("Upload2 with assigned session failed: %v", err)
+	}
+}
+
+func TestStartEpochSetsActiveState(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	meta := s.currentEpochMeta()
+	if meta.State != EpochStateActive {
+		t.Fatalf("expected active state, got %v", meta.State)
+	}
+	if reply.EpochID != 1 {
+		t.Fatalf("expected epoch id 1, got %d", reply.EpochID)
+	}
+	if !s.acceptingWrites() {
+		t.Fatal("expected writes to be accepted")
+	}
+}
+
+func TestStartEpochHonorsCoordinatorMetadataAndAbort(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{
+		DurationSeconds: 30,
+		EpochID:         9,
+		StartUnix:       170,
+	}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+
+	meta := s.currentEpochMeta()
+	if meta.ID != 9 {
+		t.Fatalf("expected epoch id 9, got %d", meta.ID)
+	}
+	if !meta.StartTime.Equal(time.Unix(170, 0).UTC()) {
+		t.Fatalf("unexpected start time %v", meta.StartTime)
+	}
+
+	var abortReply AbortEpochReply
+	if err := s.AbortEpoch(&AbortEpochArgs{EpochID: 9}, &abortReply); err != nil {
+		t.Fatalf("abort epoch failed: %v", err)
+	}
+	meta = s.currentEpochMeta()
+	if meta.State != EpochStateNoActive || meta.ID != 0 {
+		t.Fatalf("expected no-active epoch after abort, got %+v", meta)
+	}
+}
+
+func TestFinishEpochTransitionsToCompleted(t *testing.T) {
+	s := newTestLeaderServer()
+	s.mergeFn = func() (string, error) { return "", nil }
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	if err := s.finishEpoch(); err != nil {
+		t.Fatalf("finish epoch failed: %v", err)
+	}
+	meta := s.currentEpochMeta()
+	if meta.State != EpochStateCompleted {
+		t.Fatalf("expected completed state, got %v", meta.State)
+	}
+	if s.acceptingWrites() {
+		t.Fatal("expected writes to be rejected after epoch completion")
+	}
+}
+
+func TestUpload2RejectsBogusUUID(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var reply UploadReply2
+	err := s.Upload2(&UploadArgs2{Uuid: 12345}, &reply)
+	if err == nil || err.Error() != "Bogus UUID" {
+		t.Fatalf("expected bogus uuid error, got %v", err)
+	}
+}
+
+func TestUpload3RejectsBogusUUID(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var reply UploadReply3
+	err := s.Upload3(&UploadArgs3{Uuid: 12345}, &reply)
+	if err == nil || err.Error() != "Bogus UUID" {
+		t.Fatalf("expected bogus uuid error, got %v", err)
+	}
+}
+
+func TestStartEpochRejectsNonPositiveDuration(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var reply StartEpochReply
+	err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 0}, &reply)
+	if err == nil || err.Error() != "Epoch duration must be positive" {
+		t.Fatalf("expected duration error, got %v", err)
+	}
+}
+
+func TestStartEpochRejectsWhilePeerConnectionsStillInitializing(t *testing.T) {
+	s := newTestLeaderServerWithPeerState(PeerConnectionsConnecting, nil)
+
+	var reply StartEpochReply
+	err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply)
+	if err == nil || err.Error() != "leader not ready for start epoch: peer RPC connections still initializing" {
+		t.Fatalf("expected readiness error, got %v", err)
+	}
+}
+
+func TestStartEpochRejectsAfterPeerConnectionFailure(t *testing.T) {
+	s := newTestLeaderServerWithPeerState(PeerConnectionsFailed, errors.New("dial tcp 127.0.0.1:9001: connect: refused"))
+
+	var reply StartEpochReply
+	err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply)
+	if err == nil || !strings.Contains(err.Error(), "leader not ready for start epoch: peer RPC connection setup failed:") {
+		t.Fatalf("expected peer connection failure, got %v", err)
+	}
+}
+
+func TestStartEpochRejectsWhileActive(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var first StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &first); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	var second StartEpochReply
+	err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &second)
+	if err == nil || err.Error() != "An epoch is already in progress" {
+		t.Fatalf("expected in-progress error, got %v", err)
+	}
+}
+
+func TestEpochStatusReportsLifecycle(t *testing.T) {
+	s := newTestLeaderServer()
+	s.mergeFn = func() (string, error) { return "/tmp/epoch-000001-server-0.json", nil }
+
+	var status EpochStatusReply
+	if err := s.EpochStatus(&EpochStatusArgs{}, &status); err != nil {
+		t.Fatalf("initial status failed: %v", err)
+	}
+	if status.State != EpochStateNoActive.String() || status.Accepting {
+		t.Fatalf("unexpected initial status: %+v", status)
+	}
+
+	var startReply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &startReply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	if err := s.EpochStatus(&EpochStatusArgs{}, &status); err != nil {
+		t.Fatalf("active status failed: %v", err)
+	}
+	if status.State != EpochStateActive.String() || !status.Accepting || status.EpochID != 1 {
+		t.Fatalf("unexpected active status: %+v", status)
+	}
+
+	if err := s.finishEpoch(); err != nil {
+		t.Fatalf("finish epoch failed: %v", err)
+	}
+	if err := s.EpochStatus(&EpochStatusArgs{}, &status); err != nil {
+		t.Fatalf("completed status failed: %v", err)
+	}
+	if status.State != EpochStateCompleted.String() || status.Accepting {
+		t.Fatalf("unexpected completed status: %+v", status)
+	}
+	if status.LastResult != "/tmp/epoch-000001-server-0.json" {
+		t.Fatalf("unexpected result path %q", status.LastResult)
+	}
+}
+
+func TestStatusReportsLeaderPeerReadinessAndEpochState(t *testing.T) {
+	s := newTestLeaderServerWithPeerState(PeerConnectionsConnecting, nil)
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("initial status failed: %v", err)
+	}
+	if !status.Healthy || !status.IsLeader || status.ServerIndex != 0 || status.ShardID != 0 {
+		t.Fatalf("unexpected initial status identity: %+v", status)
+	}
+	if status.State != EpochStateNoActive.String() || status.PeerState != PeerConnectionsConnecting.String() {
+		t.Fatalf("unexpected initial status: %+v", status)
+	}
+
+	s.setPeerConnectionState(PeerConnectionsReady, nil)
+	var startReply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &startReply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("active status failed: %v", err)
+	}
+	if !status.Healthy || status.EpochID != startReply.EpochID || status.State != EpochStateActive.String() || !status.Accepting {
+		t.Fatalf("unexpected active status: %+v", status)
+	}
+	if status.PeerState != PeerConnectionsReady.String() {
+		t.Fatalf("unexpected peer state: %+v", status)
+	}
+
+	s.setPeerConnectionState(PeerConnectionsFailed, errors.New("dial failed"))
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("failed-peer status failed: %v", err)
+	}
+	if status.Healthy || status.PeerState != PeerConnectionsFailed.String() || status.PeerError != "dial failed" {
+		t.Fatalf("unexpected failed-peer status: %+v", status)
+	}
+}
+
+func TestStatusReportsCompletedLastResultPath(t *testing.T) {
+	s := newTestLeaderServer()
+	s.mergeFn = func() (string, error) { return "/tmp/status-result.json", nil }
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	if err := s.finishEpoch(); err != nil {
+		t.Fatalf("finish epoch failed: %v", err)
+	}
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.State != EpochStateCompleted.String() || status.Accepting {
+		t.Fatalf("unexpected completed status: %+v", status)
+	}
+	if status.LastResult != "/tmp/status-result.json" {
+		t.Fatalf("unexpected last result path: %q", status.LastResult)
+	}
+}
+
+func TestStatusReportsFollowerRoleWithoutLeaderControlState(t *testing.T) {
+	s := NewServer(1, []string{"127.0.0.1:9000", "127.0.0.1:9001"})
+	s.SetShardID(7)
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("follower status failed: %v", err)
+	}
+	if !status.Healthy || status.IsLeader || status.ServerIndex != 1 || status.ShardID != 7 {
+		t.Fatalf("unexpected follower identity: %+v", status)
+	}
+	if status.State != EpochStateNoActive.String() || status.PeerState != "not_applicable" {
+		t.Fatalf("unexpected follower status: %+v", status)
+	}
+}
+
+func TestFinishEpochMergeFailureLeavesEpochIncomplete(t *testing.T) {
+	s := newTestLeaderServer()
+	s.mergeFn = func() (string, error) { return "", errors.New("merge failed") }
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	err := s.finishEpoch()
+	if err == nil || err.Error() != "merge failed" {
+		t.Fatalf("expected merge failure, got %v", err)
+	}
+
+	var status EpochStatusReply
+	if err := s.EpochStatus(&EpochStatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.State != EpochStateMerging.String() {
+		t.Fatalf("expected merging state after failed merge, got %+v", status)
+	}
+	if status.Accepting {
+		t.Fatalf("expected writes to be rejected after failed merge, got %+v", status)
+	}
+	if status.LastResult != "" {
+		t.Fatalf("expected no result path after failed merge, got %q", status.LastResult)
+	}
+}
+
+func TestFinishEpochRejectsWhenPeerConnectionsNotReady(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+	s.setPeerConnectionState(PeerConnectionsConnecting, nil)
+
+	err := s.finishEpoch()
+	if err == nil || err.Error() != "leader not ready for merge: peer RPC connections still initializing" {
+		t.Fatalf("expected readiness error from finishEpoch, got %v", err)
+	}
+}
+
+func TestUpload3EnqueuesCompletedUploadJob(t *testing.T) {
+	s := newTestLeaderServer()
+
+	var startReply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &startReply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	var up1Reply UploadReply1
+	up1Args := &UploadArgs1{RouteRow: 7}
+	if err := s.Upload1(up1Args, &up1Reply); err != nil {
+		t.Fatalf("upload1 failed: %v", err)
+	}
+
+	up2Args := &UploadArgs2{Uuid: up1Reply.Uuid, HashKey: up1Reply.HashKey}
+	var up2Reply UploadReply2
+	if err := s.Upload2(up2Args, &up2Reply); err != nil {
+		t.Fatalf("upload2 failed: %v", err)
+	}
+
+	up3Args := &UploadArgs3{Uuid: up1Reply.Uuid, HashKey: up1Reply.HashKey}
+	var up3Reply UploadReply3
+	if err := s.Upload3(up3Args, &up3Reply); err != nil {
+		t.Fatalf("upload3 failed: %v", err)
+	}
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 1 || stats.Inflight != 0 {
+		t.Fatalf("expected one queued ingestion item, got %+v", stats)
+	}
+
+	replyCh := make(chan takeAcceptedSessionResult, 1)
+	s.controlCh <- takeAcceptedSessionCommand{uuid: up1Reply.Uuid, reply: replyCh}
+	session := <-replyCh
+	if session.ok || session.session != nil {
+		t.Fatalf("expected accepted session to be removed after enqueue, got %+v", session.session)
+	}
+
+	item := receiveQueuedIngestion(t, s)
+	msg := item.Message
+	if msg.EpochID != startReply.EpochID || msg.ShardID != s.ShardID || msg.Uuid != up1Reply.Uuid {
+		t.Fatalf("unexpected ingestion identity: %+v", msg)
+	}
+	if msg.HashKey != up1Reply.HashKey || msg.Challenge != up2Reply.Challenge {
+		t.Fatalf("unexpected ingestion session material")
+	}
+	if msg.LocalRow != 7 || msg.GlobalRow != s.globalRowStart+7 || msg.Args1.RouteRow != 7 {
+		t.Fatalf("unexpected ingestion row data: %+v", msg)
+	}
+	if msg.Args2.Uuid != up1Reply.Uuid || msg.Args3.Uuid != up1Reply.Uuid {
+		t.Fatalf("expected consistent uuids in queued upload, got %+v", msg)
+	}
+	if err := s.ingestionQueue.Ack(context.Background(), item.ReceiptHandle); err != nil {
+		t.Fatalf("ack queued ingestion failed: %v", err)
+	}
+}
+
+func TestClosingRejectsUpload1ButAllowsAdmittedUploadToFinish(t *testing.T) {
+	s := newTestLeaderServer()
+	mergeDone := make(chan struct{}, 1)
+	s.mergeFn = func() (string, error) {
+		mergeDone <- struct{}{}
+		return "", nil
+	}
+
+	var startReply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &startReply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	var admitted UploadReply1
+	if err := s.Upload1(&UploadArgs1{}, &admitted); err != nil {
+		t.Fatalf("admitted upload1 failed: %v", err)
+	}
+
+	finishDone := make(chan error, 1)
+	go func() {
+		finishDone <- s.finishEpoch()
+	}()
+	waitForEpochState(t, s, EpochStateClosing)
+
+	var rejected UploadReply1
+	err := s.Upload1(&UploadArgs1{}, &rejected)
+	if err == nil || err.Error() != "No active epoch" {
+		t.Fatalf("expected upload1 to reject during closing, got %v", err)
+	}
+
+	if err := s.Upload2(&UploadArgs2{Uuid: admitted.Uuid, HashKey: admitted.HashKey}, &UploadReply2{}); err != nil {
+		t.Fatalf("upload2 for admitted uuid failed during closing: %v", err)
+	}
+	if err := s.Upload3(&UploadArgs3{Uuid: admitted.Uuid, HashKey: admitted.HashKey}, &UploadReply3{}); err != nil {
+		t.Fatalf("upload3 for admitted uuid failed during closing: %v", err)
+	}
+
+	ackQueuedIngestion(t, s)
+
+	select {
+	case err := <-finishDone:
+		if err != nil {
+			t.Fatalf("finish epoch failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("finish epoch did not complete after admitted upload drained")
+	}
+	select {
+	case <-mergeDone:
+	default:
+		t.Fatal("expected merge to run after admitted upload drained")
+	}
+}
+
+func TestClosingDoesNotMergeBeforeAdmittedUploadsDrain(t *testing.T) {
+	s := newTestLeaderServer()
+	mergeStarted := make(chan struct{}, 1)
+	s.mergeFn = func() (string, error) {
+		mergeStarted <- struct{}{}
+		return "", nil
+	}
+
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &StartEpochReply{}); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+	var admitted UploadReply1
+	if err := s.Upload1(&UploadArgs1{}, &admitted); err != nil {
+		t.Fatalf("upload1 failed: %v", err)
+	}
+
+	finishDone := make(chan error, 1)
+	go func() {
+		finishDone <- s.finishEpoch()
+	}()
+	waitForEpochState(t, s, EpochStateClosing)
+
+	select {
+	case <-mergeStarted:
+		t.Fatal("merge started before admitted upload drained")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := s.Upload2(&UploadArgs2{Uuid: admitted.Uuid, HashKey: admitted.HashKey}, &UploadReply2{}); err != nil {
+		t.Fatalf("upload2 failed: %v", err)
+	}
+	if err := s.Upload3(&UploadArgs3{Uuid: admitted.Uuid, HashKey: admitted.HashKey}, &UploadReply3{}); err != nil {
+		t.Fatalf("upload3 failed: %v", err)
+	}
+	ackQueuedIngestion(t, s)
+
+	select {
+	case err := <-finishDone:
+		if err != nil {
+			t.Fatalf("finish epoch failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("finish epoch did not complete after drain")
+	}
+}
+
+func TestUpload3MemoryQueueReportsBacklogInsteadOfOverload(t *testing.T) {
+	s := newTestLeaderServer()
+
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &StartEpochReply{}); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	var up1 UploadReply1
+	if err := s.Upload1(&UploadArgs1{}, &up1); err != nil {
+		t.Fatalf("upload1 failed: %v", err)
+	}
+	if err := s.Upload2(&UploadArgs2{Uuid: up1.Uuid, HashKey: up1.HashKey}, &UploadReply2{}); err != nil {
+		t.Fatalf("upload2 failed: %v", err)
+	}
+	err := s.Upload3(&UploadArgs3{Uuid: up1.Uuid, HashKey: up1.HashKey}, &UploadReply3{})
+	if err != nil {
+		t.Fatalf("upload3 should enqueue into memory ingestion queue, got %v", err)
+	}
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionQueueBackend != memoryIngestionQueueBackend || status.IngestionQueueDepth != 1 || status.IngestionInflightCount != 0 {
+		t.Fatalf("unexpected ingestion status: %+v", status)
+	}
+
+	statusCh := make(chan error, 1)
+	go func() {
+		statusCh <- s.EpochStatus(&EpochStatusArgs{}, &EpochStatusReply{})
+	}()
+	select {
+	case err := <-statusCh:
+		if err != nil {
+			t.Fatalf("status failed after overload: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("leader control actor blocked after ingestion enqueue")
+	}
+}
+
+func TestIngestionWorkerAcksAfterSuccessfulProcessing(t *testing.T) {
+	s := newTestLeaderServer()
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		if msg.Uuid != 7 {
+			t.Fatalf("unexpected uuid %d", msg.Uuid)
+		}
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		if uuid != 7 || !shouldCommit {
+			t.Fatalf("unexpected commit uuid=%d shouldCommit=%t", uuid, shouldCommit)
+		}
+		return nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, Uuid: 7}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 0 {
+		t.Fatalf("expected successful processing to ack queue item, got %+v", stats)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionProcessedCount != 1 || status.IngestionAckCount != 1 || status.IngestionProcessErrors != 0 || status.IngestionAckErrors != 0 {
+		t.Fatalf("unexpected successful ingestion diagnostics: %+v", status)
+	}
+	if status.CompletedUploadCommittedCount != 1 || status.CompletedUploadLedgerCompleteErrors != 0 {
+		t.Fatalf("unexpected successful ledger diagnostics: %+v", status)
+	}
+}
+
+func TestIngestionWorkerLeavesFailedProcessingUnacked(t *testing.T) {
+	s := newTestLeaderServer()
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		return false, errors.New("prepare failed")
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		t.Fatal("commit should not run after prepare failure")
+		return nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, Uuid: 8}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 1 {
+		t.Fatalf("expected failed processing to leave item in flight, got %+v", stats)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionProcessedCount != 0 || status.IngestionAckCount != 0 || status.IngestionProcessErrors != 1 || status.IngestionLastError == "" || status.IngestionLastErrorUnix == 0 {
+		t.Fatalf("unexpected failed ingestion diagnostics: %+v", status)
+	}
+	if status.CompletedUploadCommittedCount != 0 {
+		t.Fatalf("failed processing should not mark committed: %+v", status)
+	}
+}
+
+func TestIngestionWorkerRecordsAckErrors(t *testing.T) {
+	s := newTestLeaderServer()
+	queue := &ackFailingCompletedUploadQueue{
+		item: QueuedCompletedUploadMessage{
+			Message:       CompletedUploadMessage{EpochID: 1, Uuid: 9},
+			ReceiptHandle: "receipt",
+		},
+	}
+	if err := s.SetCompletedUploadQueue(queue); err != nil {
+		t.Fatalf("set queue failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		return nil
+	}
+
+	s.processIngestionJob(queue.item)
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionProcessedCount != 1 || status.IngestionAckCount != 0 || status.IngestionAckErrors != 1 || status.IngestionLastError != "ack failed" {
+		t.Fatalf("unexpected ack error diagnostics: %+v", status)
+	}
+	if status.CompletedUploadCommittedCount != 1 {
+		t.Fatalf("ack failure should happen after ledger commit: %+v", status)
+	}
+}
+
+func TestIngestionWorkerSkipsAlreadyCommittedDuplicate(t *testing.T) {
+	s := newTestLeaderServer()
+	msg := CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 10}
+	begin, err := s.completedUploadLedger.BeginProcessing(context.Background(), msg, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("begin failed: %v", err)
+	}
+	if err := s.completedUploadLedger.CompleteProcessing(context.Background(), begin.Lease, time.Now().UTC()); err != nil {
+		t.Fatalf("complete failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		t.Fatal("duplicate should not be prepared again")
+		return false, nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), msg); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 0 {
+		t.Fatalf("expected duplicate to be acked, got %+v", stats)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.CompletedUploadDuplicateSkipCount != 1 || status.IngestionAckCount != 1 || status.IngestionProcessedCount != 0 {
+		t.Fatalf("unexpected duplicate diagnostics: %+v", status)
+	}
+}
+
+func TestDemoFailIngestionAckOnceLeavesMessageForDuplicateRedelivery(t *testing.T) {
+	s := newTestLeaderServer()
+	queue := &ackRecordingCompletedUploadQueue{}
+	if err := s.SetCompletedUploadQueue(queue); err != nil {
+		t.Fatalf("set queue failed: %v", err)
+	}
+	s.SetDemoFailIngestionAckOnce(true)
+	processCount := 0
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		processCount++
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		return nil
+	}
+
+	msg := CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 101}
+	s.processIngestionJob(QueuedCompletedUploadMessage{Message: msg, ReceiptHandle: "first"})
+	if queue.acks != 0 {
+		t.Fatalf("injected ack failure should leave first delivery unacked, got %d ack(s)", queue.acks)
+	}
+
+	s.processIngestionJob(QueuedCompletedUploadMessage{Message: msg, ReceiptHandle: "redelivered"})
+	if queue.acks != 1 {
+		t.Fatalf("redelivery should ack after duplicate skip, got %d ack(s)", queue.acks)
+	}
+	if processCount != 1 {
+		t.Fatalf("redelivery should not reprocess committed upload, processed %d time(s)", processCount)
+	}
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionAckErrors != 1 || status.IngestionAckCount != 1 || status.CompletedUploadCommittedCount != 1 || status.CompletedUploadDuplicateSkipCount != 1 {
+		t.Fatalf("unexpected demo ack failure diagnostics: %+v", status)
+	}
+}
+
+func TestStandbyIngestionWorkerCommitsWithStandbyReplica(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetReplicaID(CompletedUploadReplicaStandby); err != nil {
+		t.Fatalf("set replica failed: %v", err)
+	}
+	ledger := newMemoryCompletedUploadLedger()
+	if err := s.SetCompletedUploadLedger(ledger); err != nil {
+		t.Fatalf("set ledger failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		if msg.ReplicaID != CompletedUploadReplicaStandby {
+			t.Fatalf("expected standby replica during processing, got %+v", msg)
+		}
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		if uuid != 11 || !shouldCommit {
+			t.Fatalf("unexpected commit uuid=%d shouldCommit=%v", uuid, shouldCommit)
+		}
+		return nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 11}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	result, err := ledger.BeginProcessing(context.Background(), CompletedUploadMessage{ReplicaID: CompletedUploadReplicaActive, EpochID: 1, ShardID: 0, Uuid: 11}, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("active replica should remain independently processable: %v", err)
+	}
+	if result.AlreadyCommitted {
+		t.Fatalf("active replica should not be suppressed by standby commit: %+v", result)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.CompletedUploadCommittedCount != 1 || status.IngestionAckCount != 1 {
+		t.Fatalf("unexpected standby processing status: %+v", status)
+	}
+}
+
+func TestIngestionWorkerLeavesLedgerCompleteFailureUnacked(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetCompletedUploadLedger(&completeFailingCompletedUploadLedger{}); err != nil {
+		t.Fatalf("set ledger failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		return true, nil
+	}
+	s.commitUploadFn = func(uuid int64, shouldCommit bool) error {
+		return nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 12}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 1 {
+		t.Fatalf("expected ledger complete failure to leave item in flight, got %+v", stats)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.CompletedUploadLedgerCompleteErrors != 1 || status.IngestionAckCount != 0 {
+		t.Fatalf("unexpected ledger complete diagnostics: %+v", status)
+	}
+}
+
+func TestIngestionWorkerLeavesBusyLedgerUnacked(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetCompletedUploadLedger(&busyCompletedUploadLedger{}); err != nil {
+		t.Fatalf("set ledger failed: %v", err)
+	}
+	s.processUploadFn = func(msg CompletedUploadMessage) (bool, error) {
+		t.Fatal("busy ledger should not run prepare")
+		return false, nil
+	}
+	if _, err := s.ingestionQueue.Enqueue(context.Background(), CompletedUploadMessage{EpochID: 1, ShardID: 0, Uuid: 13}); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	item := receiveQueuedIngestion(t, s)
+	s.processIngestionJob(item)
+
+	stats := s.ingestionQueueStats()
+	if stats.Depth != 0 || stats.Inflight != 1 {
+		t.Fatalf("expected busy ledger to leave item in flight, got %+v", stats)
+	}
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.CompletedUploadLedgerBeginErrors != 1 || status.IngestionProcessedCount != 0 {
+		t.Fatalf("unexpected busy ledger diagnostics: %+v", status)
+	}
+}
+
+func TestIngestionDiagnosticsRecordReceiveError(t *testing.T) {
+	s := newTestLeaderServer()
+	s.recordIngestionError("receive", errors.New("receive failed"))
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.IngestionReceiveErrors != 1 || status.IngestionLastError != "receive failed" || status.IngestionLastErrorUnix == 0 {
+		t.Fatalf("unexpected receive error diagnostics: %+v", status)
+	}
+}
+
+func TestStatusReportsReplicaAndStandbyFanout(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetReplicaID(CompletedUploadReplicaStandby); err != nil {
+		t.Fatalf("set replica failed: %v", err)
+	}
+	s.SetStandbyIngestionFanoutConfigured(true)
+
+	var status StatusReply
+	if err := s.Status(&StatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.ReplicaID != CompletedUploadReplicaStandby {
+		t.Fatalf("unexpected replica id: %+v", status)
+	}
+	if !status.StandbyIngestionFanoutConfigured {
+		t.Fatalf("expected standby fanout status: %+v", status)
+	}
+}
+
+func TestStandbyReplicaRejectsDirectUploads(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetReplicaID(CompletedUploadReplicaStandby); err != nil {
+		t.Fatalf("set replica failed: %v", err)
+	}
+	if err := s.Upload1(&UploadArgs1{RouteRow: 0}, &UploadReply1{}); err == nil || err.Error() != "standby replica cannot accept direct uploads" {
+		t.Fatalf("expected standby direct upload rejection, got %v", err)
+	}
+}
+
+func TestStandbyReplicaBecomesActiveOnStartEpoch(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetReplicaID(CompletedUploadReplicaStandby); err != nil {
+		t.Fatalf("set replica failed: %v", err)
+	}
+	var start StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &start); err != nil {
+		t.Fatalf("StartEpoch failed: %v", err)
+	}
+	if s.replicaID != CompletedUploadReplicaActive {
+		t.Fatalf("expected promoted replica to become active, got %q", s.replicaID)
+	}
+	var reply UploadReply1
+	if err := s.Upload1(&UploadArgs1{RouteRow: 0}, &reply); err != nil {
+		t.Fatalf("expected promoted replica to accept uploads, got %v", err)
+	}
+}
+
+func TestSetIngestionWorkerConfigValidatesValues(t *testing.T) {
+	s := newTestLeaderServer()
+	if err := s.SetIngestionWorkerConfig(10, time.Millisecond); err != nil {
+		t.Fatalf("valid config failed: %v", err)
+	}
+	for _, batchSize := range []int{0, 11} {
+		if err := s.SetIngestionWorkerConfig(batchSize, time.Millisecond); err == nil {
+			t.Fatalf("expected invalid batch size %d to fail", batchSize)
+		}
+	}
+	if err := s.SetIngestionWorkerConfig(1, 0); err == nil {
+		t.Fatal("expected zero backoff to fail")
+	}
+}
+
+func TestFinishEpochWaitsForPublicationBarrier(t *testing.T) {
+	s := newTestLeaderServer()
+	mergeStarted := make(chan struct{}, 1)
+	s.mergeFn = func() (string, error) {
+		mergeStarted <- struct{}{}
+		return "", nil
+	}
+
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &StartEpochReply{}); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	s.amPublishingMutex.RLock()
+	finishDone := make(chan error, 1)
+	go func() {
+		finishDone <- s.finishEpoch()
+	}()
+
+	select {
+	case <-mergeStarted:
+		t.Fatal("merge started while publication barrier was held by worker")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	s.amPublishingMutex.RUnlock()
+	select {
+	case err := <-finishDone:
+		if err != nil {
+			t.Fatalf("finish epoch failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("finish epoch did not complete after publication barrier was released")
+	}
+}
+
+func TestFinishEpochUpdatesLastResultPath(t *testing.T) {
+	s := newTestLeaderServer()
+	s.mergeFn = func() (string, error) { return "/tmp/final-result.json", nil }
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	if err := s.finishEpoch(); err != nil {
+		t.Fatalf("finish epoch failed: %v", err)
+	}
+	if got := s.getLastResultPath(); got != "/tmp/final-result.json" {
+		t.Fatalf("expected last result path to be updated, got %q", got)
+	}
+}
+
+func TestEpochTimerAutomaticallyCompletesEpoch(t *testing.T) {
+	s := newTestLeaderServer()
+	done := make(chan struct{}, 1)
+	s.mergeFn = func() (string, error) {
+		done <- struct{}{}
+		return "/tmp/timer-result.json", nil
+	}
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 1}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for epoch timer to trigger merge")
+	}
+
+	var status EpochStatusReply
+	if err := s.EpochStatus(&EpochStatusArgs{}, &status); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.State != EpochStateCompleted.String() || status.Accepting {
+		t.Fatalf("unexpected timer-driven completed status: %+v", status)
+	}
+	if status.LastResult != "/tmp/timer-result.json" {
+		t.Fatalf("unexpected timer-driven result path: %q", status.LastResult)
+	}
+}
+
+func TestFinishEpochRunsMergeExactlyOnce(t *testing.T) {
+	s := newTestLeaderServer()
+	mergeCalls := 0
+	s.mergeFn = func() (string, error) {
+		mergeCalls++
+		return "", nil
+	}
+
+	var reply StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &reply); err != nil {
+		t.Fatalf("start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	if err := s.finishEpoch(); err != nil {
+		t.Fatalf("finish epoch failed: %v", err)
+	}
+	if mergeCalls != 1 {
+		t.Fatalf("expected one merge call, got %d", mergeCalls)
+	}
+
+	if err := s.finishEpoch(); err != nil {
+		t.Fatalf("second finish epoch failed: %v", err)
+	}
+	if mergeCalls != 1 {
+		t.Fatalf("expected merge to remain at one call, got %d", mergeCalls)
+	}
+}
+
+func TestSecondEpochCanStartAfterCompletion(t *testing.T) {
+	s := newTestLeaderServer()
+	s.mergeFn = func() (string, error) { return "", nil }
+
+	var first StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &first); err != nil {
+		t.Fatalf("first start epoch failed: %v", err)
+	}
+	s.stopEpochTimer()
+
+	if err := s.finishEpoch(); err != nil {
+		t.Fatalf("finish epoch failed: %v", err)
+	}
+
+	var second StartEpochReply
+	if err := s.StartEpoch(&StartEpochArgs{DurationSeconds: 60}, &second); err != nil {
+		t.Fatalf("second start epoch failed: %v", err)
+	}
+	defer s.stopEpochTimer()
+
+	if second.EpochID != first.EpochID+1 {
+		t.Fatalf("expected second epoch id %d, got %d", first.EpochID+1, second.EpochID)
+	}
+	if !s.acceptingWrites() {
+		t.Fatal("expected writes to be accepted in second epoch")
+	}
+}
+
+func TestWritePublishedResultCreatesDeterministicFile(t *testing.T) {
+	dir := t.TempDir()
+	s := NewServer(0, []string{"127.0.0.1:9000", "127.0.0.1:9001"})
+	s.SetShardID(3)
+	if err := s.SetGlobalRowStart(512); err != nil {
+		t.Fatalf("SetGlobalRowStart failed: %v", err)
+	}
+	s.SetResultsDir(dir)
+
+	var matrix BitMatrix
+	copy(matrix[2][3*SLOT_LENGTH:(3+1)*SLOT_LENGTH], []byte("hello"))
+	meta := EpochMeta{
+		ID:              7,
+		State:           EpochStateCompleted,
+		StartTime:       time.Unix(100, 0).UTC(),
+		EndTime:         time.Unix(160, 0).UTC(),
+		DurationSeconds: 60,
+	}
+	path, err := s.writePublishedResult(&matrix, meta, time.Unix(160, 0).UTC())
+	if err != nil {
+		t.Fatalf("writePublishedResult failed: %v", err)
+	}
+
+	expected := filepath.Join(dir, "epoch-000007-shard-3-server-0.json")
+	if path != expected {
+		t.Fatalf("expected result path %s, got %s", expected, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result file failed: %v", err)
+	}
+
+	var result PublishedResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("unmarshal result failed: %v", err)
+	}
+	if result.EpochID != 7 {
+		t.Fatalf("expected epoch id 7, got %d", result.EpochID)
+	}
+	if !result.StartTime.Equal(meta.StartTime) {
+		t.Fatalf("expected start time %v, got %v", meta.StartTime, result.StartTime)
+	}
+	if !result.EndTime.Equal(meta.EndTime) {
+		t.Fatalf("expected end time %v, got %v", meta.EndTime, result.EndTime)
+	}
+	if result.DurationSeconds != meta.DurationSeconds {
+		t.Fatalf("expected duration %d, got %d", meta.DurationSeconds, result.DurationSeconds)
+	}
+	if result.ShardID != 3 {
+		t.Fatalf("expected shard id 3, got %d", result.ShardID)
+	}
+	if result.GlobalStartRow != 512 || result.GlobalEndRow != 512+TABLE_HEIGHT {
+		t.Fatalf("unexpected global row range: [%d,%d)", result.GlobalStartRow, result.GlobalEndRow)
+	}
+	if result.NonZeroSlotCount != 1 || len(result.Slots) != 1 {
+		t.Fatalf("expected one non-zero slot, got count=%d slots=%d", result.NonZeroSlotCount, len(result.Slots))
+	}
+	if result.Slots[0].Row != 514 || result.Slots[0].Column != 3 {
+		t.Fatalf("unexpected slot coordinates: %+v", result.Slots[0])
+	}
+	expectedHex := hex.EncodeToString(matrix[2][3*SLOT_LENGTH : (3+1)*SLOT_LENGTH])
+	if result.Slots[0].MessageHex != expectedHex {
+		t.Fatalf("expected message hex %s, got %s", expectedHex, result.Slots[0].MessageHex)
+	}
+}

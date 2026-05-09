@@ -1,0 +1,11 @@
+[project]
+name = "riposte-eval-figures"
+version = "0.1.0"
+description = "Plotting tools for Riposte AWS evaluation results"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas",
+    "numpy",
+    "matplotlib",
+    "notebook",
+]

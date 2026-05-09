@@ -6,26 +6,51 @@ This software is for performance testing ONLY! It is full of security vulnerabil
 
 The purpose of this software is to evaluate the performance of the Riposte system, NOT to be used in a deployment scenario.
 
+# `linear` branch
 
+This branch contains the **most modern version of the Riposte code**, which is used in the variant of Riposte that appears in Henry Corrigan-Gibbs' [PhD dissertation](https://purl.stanford.edu/nm483fv2043). This is the cleanest and fastest variant of the scheme and you should use this version unless you have a good reason to prefer the historical ones from the original Riposte paper.
 
-## Overview
+An explanation of the branches in this repository is [here](https://bitbucket.org/henrycg/riposte/).
 
-This code accompanies a paper appearing at the IEEE Symposium
-on Security and Privacy ("Oakland") 2015:
+## How to build
 
-  "Riposte: An Anonymous Messaging System Handling Millions of Users"
-  Henry Corrigan-Gibbs, Dan Boneh, and David Mazieres
+1. Make sure that you have `go` installed:
+```
+go version
+```
 
-Please direct any questions, comments, or complaints about this
-code to henrycg@cs.stanford.edu.
+2. Clone the repository:
+```
+git clone https://bitbucket.org/henrycg/riposte/
+```
 
+3. Build the `client` and `server` binaries:
+```
+cd riposte
+cd client
+go build
+cd ..
+cd server
+go build
+cd ..
+```
 
+4. Now you should be able to run
+```
+server/server -help
+client/client -help
+```
+to run the client and server and see the command-line options.
 
-## Repository contents
+## Current implementation notes
 
-The code of this repository is split into three branches:
+There are two important correctness caveats in the current write-validation path:
 
-* [`linear`](https://bitbucket.org/henrycg/riposte/src/linear/): Contains the **most modern version of the code**, used in the variant of Riposte that appears in Henry Corrigan-Gibbs' [PhD dissertation](https://purl.stanford.edu/nm483fv2043). This is the cleanest and fastest variant of the scheme and you should use this version unless you have a good reason to prefer the historical ones from the original Riposte paper.
-* [`multiparty`](https://bitbucket.org/henrycg/riposte/src/multiparty/): Contains the **three-server Riposte code** used in the original Riposte paper from IEEE S&P 2015. As noted in the [extended version](https://arxiv.org/abs/1503.06115) of the paper, this original protocol has a bug. For the sake of the historical record, the code for the original buggy version that we evaluated is here.
-* [`DDH`](https://bitbucket.org/henrycg/riposte/src/DDH/) Contains the **k-server Riposte code** used in the original Riposte paper from IEEE S&P. This variant is much slower, but requires a weaker trust assumption than the three-party variant.
+1. Proof-validation failures are logged but do not currently flip the commit decision to
+   `false`. In `db/server.go`, `submitPrepares()` logs failed checks and still returns
+   `true` as `shouldCommit`.
 
+2. The bogus-write rollback path is intentionally unfinished. In `db/server.go`, `Commit()`
+   panics on `!com.Commit` and includes an `XXX` comment explaining that a production
+   implementation would need to expand the DPF key and XOR the malformed update back out
+   of the table shares.

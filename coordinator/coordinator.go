@@ -1,0 +1,1067 @@
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"log"
+	"math"
+	"net/rpc"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"bitbucket.org/henrycg/riposte/controlstore"
+	"bitbucket.org/henrycg/riposte/db"
+	"bitbucket.org/henrycg/riposte/utils"
+)
+
+type shardListType []string
+
+func (s *shardListType) String() string {
+	return strings.Join(*s, ";")
+}
+
+func (s *shardListType) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+type shardClient interface {
+	Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error
+	Upload2(args *db.UploadArgs2, reply *db.UploadReply2) error
+	Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error
+	StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochReply) error
+	EpochStatus(args *db.EpochStatusArgs, reply *db.EpochStatusReply) error
+	Status(args *db.StatusArgs, reply *db.StatusReply) error
+	AbortEpoch(args *db.AbortEpochArgs, reply *db.AbortEpochReply) error
+}
+
+type statusClient interface {
+	Status(args *db.StatusArgs, reply *db.StatusReply) error
+}
+
+type closeableStatusClient interface {
+	statusClient
+	Close() error
+}
+
+type rpcShardClient struct {
+	client *rpc.Client
+}
+
+func (r *rpcShardClient) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
+	return r.client.Call("Server.Upload1", args, reply)
+}
+
+func (r *rpcShardClient) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) error {
+	return r.client.Call("Server.Upload2", args, reply)
+}
+
+func (r *rpcShardClient) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error {
+	return r.client.Call("Server.Upload3", args, reply)
+}
+
+func (r *rpcShardClient) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochReply) error {
+	return r.client.Call("Server.StartEpoch", args, reply)
+}
+
+func (r *rpcShardClient) EpochStatus(args *db.EpochStatusArgs, reply *db.EpochStatusReply) error {
+	return r.client.Call("Server.EpochStatus", args, reply)
+}
+
+func (r *rpcShardClient) Status(args *db.StatusArgs, reply *db.StatusReply) error {
+	return r.client.Call("Server.Status", args, reply)
+}
+
+func (r *rpcShardClient) AbortEpoch(args *db.AbortEpochArgs, reply *db.AbortEpochReply) error {
+	return r.client.Call("Server.AbortEpoch", args, reply)
+}
+
+func (r *rpcShardClient) Close() error {
+	return r.client.Close()
+}
+
+const (
+	defaultShardStatusTimeout            = 2 * time.Second
+	defaultShardHealthInterval           = 5 * time.Second
+	defaultAutoPromotionCooldown         = 60 * time.Second
+	defaultAutoPromotionFailureThreshold = 3
+	defaultCoordinatorLeaseHolder        = "standalone"
+	defaultCoordinatorLeaseTTL           = 30 * time.Second
+	defaultCoordinatorLeaseRenewInterval = 10 * time.Second
+	coordinatorRoleActive                = "active"
+	coordinatorRolePassive               = "passive"
+	coordinatorRoleStale                 = "stale"
+)
+
+type Coordinator struct {
+	mu                  sync.Mutex
+	actor               *coordinatorActor
+	closed              bool
+	availableShards     []ShardConfig
+	shardByID           map[int]ShardConfig
+	clients             map[int]shardClient
+	sessions            map[int64]SessionRecord
+	epoch               db.EpochMeta
+	epochTimer          *time.Timer
+	controlStore        ControlStore
+	sessionStore        SessionStore
+	sessionStoreBackend string
+	leaseHolder         string
+	leaseTTL            time.Duration
+	lease               CoordinatorLease
+	role                string
+	leaseStopCh         chan struct{}
+	leaseDoneCh         chan struct{}
+
+	health              map[int]shardHealthSnapshot
+	healthInterval      time.Duration
+	healthTimeout       time.Duration
+	healthStopCh        chan struct{}
+	healthDoneCh        chan struct{}
+	autoPromotion       autoPromotionConfig
+	autoPromotionState  map[int]autoPromotionShardState
+	autoPromotionStopCh chan struct{}
+	autoPromotionDoneCh chan struct{}
+	shardLeaderDialer   func(addr string) (shardClient, error)
+	standbyLeaderDialer func(addr string, timeout time.Duration) (closeableStatusClient, error)
+
+	scalingConfig             ScalingPolicyConfig
+	activeScalingMetrics      EpochScalingMetrics
+	hasActiveScalingMetrics   bool
+	lastScalingMetrics        EpochScalingMetrics
+	lastScalingRecommendation ScalingRecommendation
+	hasLastScalingMetrics     bool
+}
+
+func parseShardConfig(value string) (ShardConfig, error) {
+	parts := strings.SplitN(value, ",", 6)
+	if len(parts) != 5 && len(parts) != 6 {
+		return ShardConfig{}, fmt.Errorf("invalid shard config %q", value)
+	}
+
+	id, err := parsePositiveInt(parts[0], true)
+	if err != nil {
+		return ShardConfig{}, err
+	}
+	start, err := parsePositiveInt(parts[1], true)
+	if err != nil {
+		return ShardConfig{}, err
+	}
+	end, err := parsePositiveInt(parts[2], false)
+	if err != nil {
+		return ShardConfig{}, err
+	}
+	activePair, err := parsePairConfig(parts[3], parts[4])
+	if err != nil {
+		return ShardConfig{}, fmt.Errorf("shard %d active pair: %w", id, err)
+	}
+
+	var standbyPair *PairConfig
+	if len(parts) == 6 {
+		standby, err := parseOptionalPairConfig(parts[5])
+		if err != nil {
+			return ShardConfig{}, fmt.Errorf("shard %d standby pair: %w", id, err)
+		}
+		standbyPair = standby
+	}
+
+	return ShardConfig{
+		ID:       id,
+		StartRow: start,
+		EndRow:   end,
+		Active:   activePair,
+		Standby:  standbyPair,
+	}, nil
+}
+
+func parsePairConfig(leaderAddr, followerAddr string) (PairConfig, error) {
+	leaderAddr = strings.TrimSpace(leaderAddr)
+	followerAddr = strings.TrimSpace(followerAddr)
+	if leaderAddr == "" || followerAddr == "" {
+		return PairConfig{}, errors.New("must specify both leader and follower addresses")
+	}
+	return PairConfig{
+		LeaderAddr:   leaderAddr,
+		FollowerAddr: followerAddr,
+	}, nil
+}
+
+func parseOptionalPairConfig(value string) (*PairConfig, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "-" {
+		return nil, nil
+	}
+	parts := strings.SplitN(value, "|", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid pair %q", value)
+	}
+	pair, err := parsePairConfig(parts[0], parts[1])
+	if err != nil {
+		return nil, err
+	}
+	return &pair, nil
+}
+
+func parsePositiveInt(raw string, allowZero bool) (int, error) {
+	value := 0
+	_, err := fmt.Sscanf(raw, "%d", &value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid integer %q", raw)
+	}
+	if value < 0 || (!allowZero && value == 0) {
+		return 0, fmt.Errorf("invalid non-negative integer %q", raw)
+	}
+	return value, nil
+}
+
+func validateShardMap(shards []ShardConfig) ([]ShardConfig, error) {
+	if len(shards) == 0 {
+		return nil, errors.New("must configure at least one shard")
+	}
+
+	sorted := append([]ShardConfig(nil), shards...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].StartRow == sorted[j].StartRow {
+			return sorted[i].ID < sorted[j].ID
+		}
+		return sorted[i].StartRow < sorted[j].StartRow
+	})
+
+	expectedStart := 0
+	seenIDs := make(map[int]bool)
+	for _, shard := range sorted {
+		if seenIDs[shard.ID] {
+			return nil, fmt.Errorf("duplicate shard id %d", shard.ID)
+		}
+		seenIDs[shard.ID] = true
+		if shard.StartRow < 0 {
+			return nil, fmt.Errorf("shard %d has negative start row %d", shard.ID, shard.StartRow)
+		}
+		if shard.EndRow-shard.StartRow != db.TABLE_HEIGHT {
+			return nil, fmt.Errorf("shard %d range [%d,%d) must have height %d", shard.ID, shard.StartRow, shard.EndRow, db.TABLE_HEIGHT)
+		}
+		if shard.Active.LeaderAddr == "" || shard.Active.FollowerAddr == "" {
+			return nil, fmt.Errorf("shard %d missing active pair addresses", shard.ID)
+		}
+		if shard.StartRow != expectedStart {
+			if shard.StartRow < expectedStart {
+				return nil, fmt.Errorf("shard %d overlaps previous range at row %d", shard.ID, shard.StartRow)
+			}
+			return nil, fmt.Errorf("shard map has gap before row %d", shard.StartRow)
+		}
+		expectedStart = shard.EndRow
+	}
+	if expectedStart != len(sorted)*db.TABLE_HEIGHT {
+		return nil, fmt.Errorf("shard map ends at row %d, want %d", expectedStart, len(sorted)*db.TABLE_HEIGHT)
+	}
+
+	return sorted, nil
+}
+
+func NewCoordinator(shards []ShardConfig, clients map[int]shardClient) (*Coordinator, error) {
+	return newCoordinatorWithStores(shards, clients, newMemoryControlStore(1), newMemorySessionStore(), "memory")
+}
+
+func newCoordinatorWithControlStore(shards []ShardConfig, clients map[int]shardClient, controlStore ControlStore) (*Coordinator, error) {
+	return newCoordinatorWithStores(shards, clients, controlStore, newMemorySessionStore(), "memory")
+}
+
+func newCoordinatorWithStores(shards []ShardConfig, clients map[int]shardClient, controlStore ControlStore, sessionStore SessionStore, sessionStoreBackend string) (*Coordinator, error) {
+	return newCoordinatorWithLeaseConfig(
+		shards,
+		clients,
+		controlStore,
+		sessionStore,
+		sessionStoreBackend,
+		defaultCoordinatorLeaseHolder,
+		defaultCoordinatorLeaseTTL,
+		defaultCoordinatorLeaseRenewInterval,
+	)
+}
+
+func newCoordinatorWithLeaseConfig(
+	shards []ShardConfig,
+	clients map[int]shardClient,
+	controlStore ControlStore,
+	sessionStore SessionStore,
+	sessionStoreBackend string,
+	leaseHolder string,
+	leaseTTL time.Duration,
+	leaseRenewInterval time.Duration,
+) (*Coordinator, error) {
+	return newCoordinatorWithStandbyConfig(shards, clients, controlStore, sessionStore, sessionStoreBackend, leaseHolder, leaseTTL, leaseRenewInterval, false)
+}
+
+func newCoordinatorWithStandbyConfig(
+	shards []ShardConfig,
+	clients map[int]shardClient,
+	controlStore ControlStore,
+	sessionStore SessionStore,
+	sessionStoreBackend string,
+	leaseHolder string,
+	leaseTTL time.Duration,
+	leaseRenewInterval time.Duration,
+	standby bool,
+) (*Coordinator, error) {
+	scalingConfig := ScalingPolicyConfig{
+		TargetRowsPerShard:        db.TABLE_HEIGHT,
+		ScaleUpDensityThreshold:   defaultScaleUpDensityThreshold,
+		ScaleDownDensityThreshold: defaultScaleDownDensityThreshold,
+		MaxShardMultiplier:        defaultMaxShardMultiplier,
+	}
+	return newCoordinatorWithStandbyAndScalingConfig(shards, clients, controlStore, sessionStore, sessionStoreBackend, leaseHolder, leaseTTL, leaseRenewInterval, standby, scalingConfig)
+}
+
+func newCoordinatorWithStandbyAndScalingConfig(
+	shards []ShardConfig,
+	clients map[int]shardClient,
+	controlStore ControlStore,
+	sessionStore SessionStore,
+	sessionStoreBackend string,
+	leaseHolder string,
+	leaseTTL time.Duration,
+	leaseRenewInterval time.Duration,
+	standby bool,
+	scalingConfig ScalingPolicyConfig,
+) (*Coordinator, error) {
+	return newCoordinatorWithStandbyScalingAndSeedConfig(shards, clients, controlStore, sessionStore, sessionStoreBackend, leaseHolder, leaseTTL, leaseRenewInterval, standby, scalingConfig, 0)
+}
+
+func newCoordinatorWithStandbyScalingAndSeedConfig(
+	shards []ShardConfig,
+	clients map[int]shardClient,
+	controlStore ControlStore,
+	sessionStore SessionStore,
+	sessionStoreBackend string,
+	leaseHolder string,
+	leaseTTL time.Duration,
+	leaseRenewInterval time.Duration,
+	standby bool,
+	scalingConfig ScalingPolicyConfig,
+	initialActiveShards int,
+) (*Coordinator, error) {
+	if controlStore == nil {
+		return nil, errors.New("control store is required")
+	}
+	if sessionStore == nil {
+		return nil, errors.New("session store is required")
+	}
+	if sessionStoreBackend == "" {
+		sessionStoreBackend = "unknown"
+	}
+	if err := validateCoordinatorLeaseConfig(leaseHolder, leaseTTL, leaseRenewInterval); err != nil {
+		return nil, err
+	}
+	validated, err := validateShardMap(shards)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := controlStore.AcquireLease(time.Now().UTC(), leaseHolder, leaseTTL)
+	if err != nil {
+		if !standby || !errors.Is(err, errLeaseHeld) {
+			return nil, fmt.Errorf("acquire coordinator lease: %w", err)
+		}
+	}
+	role := coordinatorRoleActive
+	if err != nil {
+		role = coordinatorRolePassive
+	}
+	seed, err := initialShardConfigSeed(validated, initialActiveShards)
+	if err != nil {
+		return nil, err
+	}
+	activeConfig, err := ensureShardConfig(controlStore, validated, seed, role == coordinatorRoleActive)
+	if err != nil {
+		return nil, err
+	}
+	resolvedScalingConfig, err := resolveScalingPolicyConfig(activeConfig.ShardCount, scalingConfig.MinShards, scalingConfig.MaxShards, scalingConfig.TargetRowsPerShard, scalingConfig.ScaleUpDensityThreshold, scalingConfig.ScaleDownDensityThreshold, scalingConfig.MaxShardMultiplier)
+	if err != nil {
+		return nil, err
+	}
+	coord := &Coordinator{
+		actor:               newCoordinatorActor(),
+		availableShards:     validated,
+		shardByID:           make(map[int]ShardConfig, len(validated)),
+		clients:             make(map[int]shardClient, len(validated)),
+		sessions:            make(map[int64]SessionRecord),
+		controlStore:        controlStore,
+		sessionStore:        sessionStore,
+		sessionStoreBackend: sessionStoreBackend,
+		leaseHolder:         leaseHolder,
+		leaseTTL:            leaseTTL,
+		lease:               lease,
+		role:                role,
+		leaseStopCh:         make(chan struct{}),
+		leaseDoneCh:         make(chan struct{}),
+		health:              make(map[int]shardHealthSnapshot, len(validated)),
+		healthInterval:      defaultShardHealthInterval,
+		healthTimeout:       defaultShardStatusTimeout,
+		healthStopCh:        make(chan struct{}),
+		healthDoneCh:        make(chan struct{}),
+		autoPromotionState:  make(map[int]autoPromotionShardState, len(validated)),
+		shardLeaderDialer:   dialShardLeader,
+		standbyLeaderDialer: dialStandbyShardLeader,
+		scalingConfig:       resolvedScalingConfig,
+	}
+	for _, shard := range validated {
+		coord.shardByID[shard.ID] = shard
+		if client, ok := clients[shard.ID]; ok {
+			coord.clients[shard.ID] = client
+		}
+	}
+	coord.startLeaseRenewal(leaseRenewInterval)
+	coord.startShardHealthMonitor()
+	return coord, nil
+}
+
+func (c *Coordinator) Close() {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	actor := c.actor
+	stopCh := c.leaseStopCh
+	doneCh := c.leaseDoneCh
+	healthStopCh := c.healthStopCh
+	healthDoneCh := c.healthDoneCh
+	autoPromotionStopCh := c.autoPromotionStopCh
+	autoPromotionDoneCh := c.autoPromotionDoneCh
+	c.leaseStopCh = nil
+	c.leaseDoneCh = nil
+	c.healthStopCh = nil
+	c.healthDoneCh = nil
+	c.autoPromotionStopCh = nil
+	c.autoPromotionDoneCh = nil
+	c.mu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
+		<-doneCh
+	}
+	if healthStopCh != nil {
+		close(healthStopCh)
+		<-healthDoneCh
+	}
+	if autoPromotionStopCh != nil {
+		close(autoPromotionStopCh)
+		<-autoPromotionDoneCh
+	}
+	if actor != nil {
+		actor.call(func() {
+			if c.epochTimer != nil {
+				c.epochTimer.Stop()
+				c.epochTimer = nil
+			}
+		})
+		c.mu.Lock()
+		if c.actor == actor {
+			c.actor = nil
+		}
+		c.mu.Unlock()
+		actor.stop()
+	}
+}
+
+func dialShardLeader(leaderAddr string) (shardClient, error) {
+	client, err := utils.DialHTTPWithTLS("tcp", leaderAddr, -1, []tls.Certificate{utils.LeaderCertificate})
+	if err != nil {
+		return nil, err
+	}
+	return &rpcShardClient{client: client}, nil
+}
+
+func dialStandbyShardLeader(leaderAddr string, timeout time.Duration) (closeableStatusClient, error) {
+	client, err := utils.DialHTTPWithTLSWithTimeout("tcp", leaderAddr, -1, []tls.Certificate{utils.LeaderCertificate}, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return &rpcShardClient{client: client}, nil
+}
+
+func (c *Coordinator) connectShards() error {
+	shardConfig := shardConfigForStatus(c.controlStore, c.availableShards)
+	return c.connectShardConfig(shardConfig)
+}
+
+func (c *Coordinator) connectShardConfig(shardConfig ShardConfigRecord) error {
+	for _, shard := range shardConfig.Shards {
+		if _, ok := c.clients[shard.ID]; ok {
+			continue
+		}
+		client, err := c.shardLeaderDialer(shard.Active.LeaderAddr)
+		if err != nil {
+			return fmt.Errorf("connect shard %d leader %s: %w", shard.ID, shard.Active.LeaderAddr, err)
+		}
+		c.clients[shard.ID] = client
+	}
+	return nil
+}
+
+func (c *Coordinator) cachedOrStoredSession(globalUUID int64) (SessionRecord, error) {
+	session, ok := c.cachedSession(globalUUID)
+	if ok {
+		return session, nil
+	}
+	session, err := c.sessionStore.GetSession(context.Background(), globalUUID)
+	if err != nil {
+		return SessionRecord{}, err
+	}
+	c.cacheSession(session)
+	return session, nil
+}
+
+func acceptingEpochFromControlStore(controlStore ControlStore) (db.EpochMeta, error) {
+	epoch, ok := controlStore.CurrentEpoch()
+	if !ok || epoch.State != db.EpochStateActive {
+		return db.EpochMeta{}, errCoordinatorNoActiveEpoch
+	}
+	accepting, err := controlStore.Accepting(epoch.ID)
+	if err != nil || !accepting {
+		return db.EpochMeta{}, errCoordinatorNoActiveEpoch
+	}
+	return epoch, nil
+}
+
+func currentEpochFromControlStore(controlStore ControlStore) (db.EpochMeta, error) {
+	epoch, ok := controlStore.CurrentEpoch()
+	if !ok || epoch.ID <= 0 {
+		return db.EpochMeta{}, errCoordinatorNoActiveEpoch
+	}
+	return epoch, nil
+}
+
+func (c *Coordinator) Upload1(args *db.UploadArgs1, reply *db.UploadReply1) error {
+	decision := c.upload1Decision()
+	if decision.err != nil {
+		return coordinatorWireError(decision.err)
+	}
+	epoch, err := acceptingEpochFromControlStore(decision.controlStore)
+	if err != nil {
+		return coordinatorWireError(err)
+	}
+	shardConfig, err := activeShardConfig(decision.controlStore)
+	if err != nil {
+		return err
+	}
+
+	shard, err := routeShard(shardConfig.Shards, args.RouteRow)
+	if err != nil {
+		return err
+	}
+	client := c.clients[shard.ID]
+	if client == nil {
+		return fmt.Errorf("missing shard client for shard %d", shard.ID)
+	}
+
+	localArgs := *args
+	localArgs.RouteRow = args.RouteRow - shard.StartRow
+
+	var session SessionRecord
+	persisted := false
+	for attempt := 0; attempt < 16; attempt++ {
+		globalUUID, err := utils.RandomInt64(math.MaxInt64)
+		if err != nil {
+			return err
+		}
+		if globalUUID <= 0 {
+			continue
+		}
+
+		var hashKey [32]byte
+		utils.RandBytes(hashKey[:])
+		session = SessionRecord{
+			EpochID:       epoch.ID,
+			ShardID:       shard.ID,
+			GlobalUUID:    globalUUID,
+			LocalUUID:     globalUUID,
+			HashKey:       hashKey,
+			GlobalRow:     args.RouteRow,
+			LocalRow:      localArgs.RouteRow,
+			ShardStartRow: shard.StartRow,
+			CreatedAt:     time.Now().UTC(),
+		}
+		err = c.sessionStore.PutSession(context.Background(), session)
+		if errors.Is(err, errSessionExists) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		persisted = true
+		break
+	}
+	if !persisted {
+		return coordinatorWireError(errCoordinatorSessionAllocation)
+	}
+
+	localArgs.UseAssignedSession = true
+	localArgs.AssignedUUID = session.LocalUUID
+	localArgs.AssignedHashKey = session.HashKey
+
+	var shardReply db.UploadReply1
+	if err := client.Upload1(&localArgs, &shardReply); err != nil {
+		if deleteErr := c.sessionStore.DeleteSession(context.Background(), session.GlobalUUID); deleteErr != nil && !errors.Is(deleteErr, errSessionMissing) {
+			log.Printf("Delete persisted session %d after shard Upload1 failure failed: %v", session.GlobalUUID, deleteErr)
+		}
+		return err
+	}
+	if shardReply.Uuid != session.LocalUUID || shardReply.HashKey != session.HashKey {
+		if deleteErr := c.sessionStore.DeleteSession(context.Background(), session.GlobalUUID); deleteErr != nil && !errors.Is(deleteErr, errSessionMissing) {
+			log.Printf("Delete persisted session %d after mismatched shard Upload1 reply failed: %v", session.GlobalUUID, deleteErr)
+		}
+		return coordinatorWireError(errCoordinatorAssignedSessionFailed)
+	}
+
+	c.cacheSession(session)
+	reply.Uuid = session.GlobalUUID
+	reply.HashKey = session.HashKey
+	return nil
+}
+
+func (c *Coordinator) Upload2(args *db.UploadArgs2, reply *db.UploadReply2) error {
+	session, err := c.cachedOrStoredSession(args.Uuid)
+	if err != nil || session.HashKey != args.HashKey {
+		return coordinatorWireError(errCoordinatorBogusUUID)
+	}
+	epoch, err := currentEpochFromControlStore(c.controlStore)
+	if err != nil || epoch.ID != session.EpochID {
+		return coordinatorWireError(errCoordinatorNoActiveEpoch)
+	}
+
+	client := c.clients[session.ShardID]
+	if client == nil {
+		return fmt.Errorf("missing shard client for shard %d", session.ShardID)
+	}
+	localArgs := *args
+	localArgs.Uuid = session.LocalUUID
+	if err := client.Upload2(&localArgs, reply); err != nil {
+		return coordinatorShardSessionError(err)
+	}
+	return nil
+}
+
+func (c *Coordinator) Upload3(args *db.UploadArgs3, reply *db.UploadReply3) error {
+	session, err := c.cachedOrStoredSession(args.Uuid)
+	if err != nil || session.HashKey != args.HashKey {
+		return coordinatorWireError(errCoordinatorBogusUUID)
+	}
+	epoch, err := currentEpochFromControlStore(c.controlStore)
+	if err != nil || epoch.ID != session.EpochID {
+		return coordinatorWireError(errCoordinatorNoActiveEpoch)
+	}
+
+	client := c.clients[session.ShardID]
+	if client == nil {
+		return fmt.Errorf("missing shard client for shard %d", session.ShardID)
+	}
+	localArgs := *args
+	localArgs.Uuid = session.LocalUUID
+	err = client.Upload3(&localArgs, reply)
+	if err != nil {
+		return coordinatorShardSessionError(err)
+	}
+
+	if err := c.sessionStore.DeleteSession(context.Background(), session.GlobalUUID); err != nil && !errors.Is(err, errSessionMissing) {
+		return err
+	}
+	c.recordUpload3Success(session)
+	return nil
+}
+
+func sameEpochReply(expected db.StartEpochReply, actual db.StartEpochReply) bool {
+	return expected.EpochID == actual.EpochID &&
+		expected.State == actual.State &&
+		expected.StartUnix == actual.StartUnix &&
+		expected.EndUnix == actual.EndUnix &&
+		expected.DurationSecs == actual.DurationSecs
+}
+
+func (c *Coordinator) StartEpoch(args *db.StartEpochArgs, reply *db.StartEpochReply) error {
+	if args.DurationSeconds <= 0 {
+		return coordinatorWireError(errCoordinatorInvalidEpochDuration)
+	}
+	if err := c.requireCoordinatorLease(); err != nil {
+		return coordinatorWireError(errCoordinatorNotActive)
+	}
+	if err := requireEpochCycleAllowsStart(c.controlStore); err != nil {
+		return err
+	}
+
+	latestEpochID := int64(0)
+	if currentEpoch, ok := c.controlStore.CurrentEpoch(); ok {
+		latestEpochID = currentEpoch.ID
+	}
+	decision := c.startEpochDecision(args, latestEpochID)
+	if decision.err != nil {
+		return coordinatorWireError(decision.err)
+	}
+	shardConfig, err := activeShardConfig(c.controlStore)
+	if err != nil {
+		return fmt.Errorf("get shard config: %w", err)
+	}
+
+	startArgs := db.StartEpochArgs{
+		DurationSeconds: args.DurationSeconds,
+		EpochID:         decision.nextEpochID,
+		StartUnix:       decision.startTime.Unix(),
+	}
+
+	started := make([]int, 0, len(shardConfig.Shards))
+	var expected db.StartEpochReply
+	for i, shard := range shardConfig.Shards {
+		client := c.clients[shard.ID]
+		if client == nil {
+			c.abortStarted(started, decision.nextEpochID)
+			return fmt.Errorf("missing shard client for shard %d", shard.ID)
+		}
+		var shardReply db.StartEpochReply
+		if err := client.StartEpoch(&startArgs, &shardReply); err != nil {
+			c.abortStarted(started, decision.nextEpochID)
+			return fmt.Errorf("start epoch on shard %d: %w", shard.ID, err)
+		}
+		if i == 0 {
+			expected = shardReply
+		} else if !sameEpochReply(expected, shardReply) {
+			c.abortStarted(started, decision.nextEpochID)
+			return fmt.Errorf("shard %d returned mismatched epoch metadata", shard.ID)
+		}
+		started = append(started, shard.ID)
+	}
+
+	if err := c.requireCoordinatorLease(); err != nil {
+		c.abortStarted(started, decision.nextEpochID)
+		return coordinatorWireError(errCoordinatorNotActive)
+	}
+
+	epoch := db.EpochMeta{
+		ID:              expected.EpochID,
+		State:           db.EpochStateActive,
+		StartTime:       time.Unix(expected.StartUnix, 0).UTC(),
+		EndTime:         time.Unix(expected.EndUnix, 0).UTC(),
+		DurationSeconds: expected.DurationSecs,
+	}
+	controlStore := c.controlStore
+	shardConfigVersion := shardConfig.Version
+	if err := controlStore.PutEpochShardConfig(epoch.ID, epochShardConfigRecord(shardConfig, epoch.ID)); err != nil {
+		c.abortStarted(started, decision.nextEpochID)
+		return fmt.Errorf("write epoch shard config: %w", err)
+	}
+
+	if err := controlStore.StartEpoch(epoch, shardConfigVersion); err != nil {
+		c.abortStarted(started, decision.nextEpochID)
+		return fmt.Errorf("start epoch in control store: %w", err)
+	}
+	if err := transitionEpochCycleStarted(controlStore, epoch.ID, shardConfigVersion); err != nil {
+		c.abortStarted(started, decision.nextEpochID)
+		return fmt.Errorf("start epoch cycle: %w", err)
+	}
+
+	c.commitStartedEpoch(epoch, shardConfig.ShardCount)
+
+	*reply = expected
+	return nil
+}
+
+func (c *Coordinator) abortStarted(started []int, epochID int64) {
+	for _, shardID := range started {
+		client := c.clients[shardID]
+		if client == nil {
+			continue
+		}
+		var reply db.AbortEpochReply
+		if err := client.AbortEpoch(&db.AbortEpochArgs{EpochID: epochID}, &reply); err != nil {
+			log.Printf("Abort epoch %d on shard %d failed: %v", epochID, shardID, err)
+		}
+	}
+}
+
+func (c *Coordinator) completeEpoch() {
+	decision := c.completeEpochDecision()
+	if decision.epochID == 0 {
+		return
+	}
+
+	if err := c.requireCoordinatorLease(); err != nil {
+		log.Printf("Coordinator lease unavailable; skipping epoch %d completion: %v", decision.epochID, err)
+		return
+	}
+
+	controlStore := c.controlStore
+	metrics, recommendation, completed := c.commitCompletedEpoch(decision.epochID)
+	if !completed {
+		return
+	}
+
+	if _, err := controlStore.CompleteEpoch(decision.epochID); err != nil {
+		log.Printf("Complete epoch %d in control store failed: %v", decision.epochID, err)
+		return
+	}
+	shardConfigVersion := currentShardConfigVersion(controlStore)
+	if metrics.EpochID == decision.epochID {
+		record := scalingRecommendationRecord(metrics, recommendation, shardConfigVersion, time.Now().UTC())
+		if err := controlStore.PutScalingRecommendation(record); err != nil {
+			log.Printf("Persist scaling recommendation for epoch %d failed: %v", decision.epochID, err)
+			transitionEpochCycleFailed(controlStore, controlstore.EpochCycleStateActive, decision.epochID, shardConfigVersion, err.Error())
+			return
+		}
+		if err := transitionEpochCycleRecommendationReady(controlStore, decision.epochID, shardConfigVersion); err != nil {
+			log.Printf("Recommendation-ready epoch %d cycle transition failed: %v", decision.epochID, err)
+			return
+		}
+		if recommendation.Action == scalingActionKeep {
+			if err := transitionEpochCycleScalingSkipped(controlStore, decision.epochID, shardConfigVersion, "scaling recommendation keep; no topology change"); err != nil {
+				log.Printf("Keep-skip epoch %d cycle transition failed: %v", decision.epochID, err)
+			}
+		}
+	}
+}
+
+func (c *Coordinator) EpochStatus(_ *db.EpochStatusArgs, reply *db.EpochStatusReply) error {
+	var epoch db.EpochMeta
+	c.actorCall(func() {
+		epoch = c.epoch
+	})
+	controlStore := c.controlStore
+
+	reply.EpochID = epoch.ID
+	reply.State = epoch.State.String()
+	reply.StartUnix = epoch.StartTime.Unix()
+	reply.EndUnix = epoch.EndTime.Unix()
+	reply.DurationSecs = epoch.DurationSeconds
+	reply.Accepting = acceptingFromControlStore(controlStore, epoch)
+	return nil
+}
+
+func acceptingFromControlStore(controlStore ControlStore, epoch db.EpochMeta) bool {
+	if epoch.ID <= 0 {
+		return epoch.State == db.EpochStateActive
+	}
+	if _, ok := controlStore.CurrentEpoch(); !ok {
+		return epoch.State == db.EpochStateActive
+	}
+	accepting, err := controlStore.Accepting(epoch.ID)
+	if err != nil {
+		return false
+	}
+	return accepting
+}
+
+func populateCoordinatorLeaseStatus(reply *db.CoordinatorStatusReply, lease CoordinatorLease, now time.Time) {
+	reply.LeaseHolder = lease.Holder
+	reply.LeaseFencingToken = lease.FencingToken
+	if !lease.ExpiresAt.IsZero() {
+		reply.LeaseExpiresUnixMs = lease.ExpiresAt.UnixMilli()
+	}
+	reply.LeaseActive = lease.Holder != "" && now.Before(lease.ExpiresAt)
+}
+
+func activeHolderFromControlStore(controlStore ControlStore, now time.Time) string {
+	lease, ok := controlStore.CurrentLease(now)
+	if !ok {
+		return ""
+	}
+	return lease.Holder
+}
+
+func populateScalingApplyStatus(reply *db.CoordinatorStatusReply, evaluation scalingApplyEvaluation) {
+	reply.LatestScalingEpochID = evaluation.recommendation.EpochID
+	reply.LatestScalingAction = evaluation.recommendation.Action
+	reply.LatestScalingRecommendedShards = evaluation.recommendation.RecommendedShardCount
+	reply.ScalingApplyStatus = evaluation.status
+	reply.ScalingApplyReason = evaluation.reason
+}
+
+func populateApplyScalingRecommendationReply(reply *db.ApplyScalingRecommendationReply, evaluation scalingApplyEvaluation, applied bool) {
+	reply.Applied = applied
+	reply.RecommendationEpochID = evaluation.recommendation.EpochID
+	reply.PreviousVersion = evaluation.current.Version
+	reply.NewVersion = evaluation.proposed.Version
+	reply.PreviousShardCount = evaluation.current.ShardCount
+	reply.NewShardCount = evaluation.proposed.ShardCount
+	reply.PreviousGlobalTableHeight = evaluation.current.GlobalTableHeight
+	reply.NewGlobalTableHeight = evaluation.proposed.GlobalTableHeight
+	reply.Status = evaluation.status
+	reply.Reason = evaluation.reason
+}
+
+func (c *Coordinator) ApplyScalingRecommendation(args *db.ApplyScalingRecommendationArgs, reply *db.ApplyScalingRecommendationReply) error {
+	if err := c.requireCoordinatorLease(); err != nil {
+		return coordinatorWireError(errCoordinatorNotActive)
+	}
+	evaluation, err := evaluateScalingApply(c.controlStore, c.availableShards)
+	if err != nil {
+		return err
+	}
+	if err := requireScalingApplyApplicable(evaluation); err != nil {
+		return err
+	}
+	if args != nil && args.DryRun {
+		populateApplyScalingRecommendationReply(reply, evaluation, false)
+		return nil
+	}
+	cycleState := epochCycleState(c.controlStore)
+	if cycleState == controlstore.EpochCycleStateRecommendationReady {
+		if err := putEpochCycleTransition(c.controlStore, controlstore.EpochCycleStateRecommendationReady, controlstore.EpochCycleStateScalingInProgress, EpochCycleRecord{
+			EpochID:                      evaluation.recommendation.EpochID,
+			ShardConfigVersion:           evaluation.current.Version,
+			ScalingRecommendationEpochID: evaluation.recommendation.EpochID,
+			Reason:                       "scaling apply started",
+		}); err != nil {
+			return err
+		}
+	} else if cycleState != controlstore.EpochCycleStateScalingInProgress {
+		return fmt.Errorf("epoch cycle state %s does not allow scaling apply", cycleState)
+	}
+	if err := c.connectShardConfig(evaluation.proposed); err != nil {
+		transitionEpochCycleFailed(c.controlStore, controlstore.EpochCycleStateScalingInProgress, evaluation.recommendation.EpochID, evaluation.current.Version, err.Error())
+		return err
+	}
+	if err := c.controlStore.PutShardConfig(evaluation.proposed); err != nil {
+		transitionEpochCycleFailed(c.controlStore, controlstore.EpochCycleStateScalingInProgress, evaluation.recommendation.EpochID, evaluation.current.Version, err.Error())
+		return err
+	}
+	if err := putEpochCycleTransition(c.controlStore, controlstore.EpochCycleStateScalingInProgress, controlstore.EpochCycleStateScalingApplied, EpochCycleRecord{
+		EpochID:                      evaluation.recommendation.EpochID,
+		ShardConfigVersion:           evaluation.proposed.Version,
+		ScalingRecommendationEpochID: evaluation.recommendation.EpochID,
+		Reason:                       "scaling recommendation applied",
+	}); err != nil {
+		return err
+	}
+	populateApplyScalingRecommendationReply(reply, evaluation, true)
+	return nil
+}
+
+func (c *Coordinator) SkipScalingRecommendation(_ *db.SkipScalingRecommendationArgs, reply *db.SkipScalingRecommendationReply) error {
+	if err := c.requireCoordinatorLease(); err != nil {
+		return coordinatorWireError(errCoordinatorNotActive)
+	}
+	if cycleState := epochCycleState(c.controlStore); cycleState != controlstore.EpochCycleStateRecommendationReady {
+		return fmt.Errorf("epoch cycle state %s does not allow scaling skip", cycleState)
+	}
+	epoch, ok := c.controlStore.CurrentEpoch()
+	if ok {
+		accepting, err := c.controlStore.Accepting(epoch.ID)
+		if err != nil {
+			return err
+		}
+		if epoch.State == db.EpochStateActive || accepting {
+			return errors.New("cannot skip scaling recommendation while epoch is active")
+		}
+	}
+	recommendation, ok, err := c.controlStore.GetLatestScalingRecommendation()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("missing scaling recommendation")
+	}
+	shardConfigVersion := currentShardConfigVersion(c.controlStore)
+	reason := fmt.Sprintf("operator skipped %s recommendation", recommendation.Action)
+	if err := transitionEpochCycleScalingSkipped(c.controlStore, recommendation.EpochID, shardConfigVersion, reason); err != nil {
+		return err
+	}
+	*reply = db.SkipScalingRecommendationReply{
+		Skipped:               true,
+		RecommendationEpochID: recommendation.EpochID,
+		ShardConfigVersion:    shardConfigVersion,
+		Action:                recommendation.Action,
+		Reason:                reason,
+	}
+	return nil
+}
+
+func (c *Coordinator) Status(args *db.CoordinatorStatusArgs, reply *db.CoordinatorStatusReply) error {
+	timeout := defaultShardStatusTimeout
+	if args != nil && args.ShardTimeoutMs > 0 {
+		timeout = time.Duration(args.ShardTimeoutMs) * time.Millisecond
+	}
+	if c.needsShardHealthRefresh() {
+		c.refreshShardHealth(timeout)
+	}
+
+	controlStore := c.controlStore
+	sessionStoreBackend := c.sessionStoreBackend
+	shardConfig := shardConfigForStatus(controlStore, c.availableShards)
+	shards := append([]ShardConfig(nil), shardConfig.Shards...)
+	snapshot := c.coordinatorStatusSnapshot(shardConfig.ShardCount)
+	scalingApply, err := evaluateScalingApply(controlStore, c.availableShards)
+	if err != nil {
+		scalingApply = scalingApplyEvaluation{
+			status: scalingApplyStatusNotApplicable,
+			reason: err.Error(),
+		}
+	}
+
+	reply.Healthy = true
+	reply.Role = snapshot.role
+	reply.LeaderAddr = ""
+	reply.SessionStoreBackend = sessionStoreBackend
+	reply.GlobalTableHeight = shardConfig.GlobalTableHeight
+	reply.EpochID = snapshot.epoch.ID
+	reply.State = snapshot.epoch.State.String()
+	reply.StartUnix = snapshot.epoch.StartTime.Unix()
+	reply.EndUnix = snapshot.epoch.EndTime.Unix()
+	reply.DurationSecs = snapshot.epoch.DurationSeconds
+	reply.Accepting = acceptingFromControlStore(controlStore, snapshot.epoch)
+	now := time.Now().UTC()
+	populateCoordinatorLeaseStatus(reply, snapshot.lease, now)
+	reply.ActiveHolder = activeHolderFromControlStore(controlStore, now)
+	reply.CurrentShardCount = shardConfig.ShardCount
+	reply.RecommendedNextShardCount = snapshot.scaling.RecommendedShardCount
+	reply.TargetRowsPerShard = snapshot.scaling.TargetRowsPerShard
+	reply.ScalingAction = snapshot.scaling.Action
+	reply.ScalingReason = snapshot.scaling.Reason
+	reply.RequestDensity = snapshot.scaling.RequestDensity
+	reply.ScalingEpochID = snapshot.scalingMetrics.EpochID
+	reply.ScalingAcceptedRequests = snapshot.scalingMetrics.AcceptedRequestCount
+	reply.ScalingDurationSecs = snapshot.scalingMetrics.DurationSeconds
+	populateScalingApplyStatus(reply, scalingApply)
+	if cycle, ok, err := controlStore.GetEpochCycle(); err == nil && ok {
+		reply.EpochCycleState = cycle.State
+		reply.EpochCycleEpochID = cycle.EpochID
+		reply.EpochCycleReason = cycle.Reason
+	} else {
+		reply.EpochCycleState = controlstore.EpochCycleStateIdle
+	}
+	reply.Shards = make([]db.CoordinatorShardStatus, len(shards))
+
+	for i, shard := range shards {
+		entry := db.CoordinatorShardStatus{
+			ID:                 shard.ID,
+			StartRow:           shard.StartRow,
+			EndRow:             shard.EndRow,
+			ActiveLeaderAddr:   shard.Active.LeaderAddr,
+			ActiveFollowerAddr: shard.Active.FollowerAddr,
+		}
+		if shard.Standby != nil {
+			entry.HasStandby = true
+			entry.StandbyLeaderAddr = shard.Standby.LeaderAddr
+			entry.StandbyFollowerAddr = shard.Standby.FollowerAddr
+		}
+
+		shardHealth := snapshot.health[shard.ID]
+		entry.ActiveReachable = shardHealth.Active.Reachable
+		entry.ActiveStatus = shardHealth.Active.Status
+		entry.ActiveStatusError = shardHealth.Active.Error
+		entry.ActiveLastChecked = lastCheckedUnix(shardHealth.Active.CheckedAt)
+		entry.StandbyReachable = shardHealth.Standby.Reachable
+		entry.StandbyStatus = shardHealth.Standby.Status
+		entry.StandbyStatusError = shardHealth.Standby.Error
+		entry.StandbyLastChecked = lastCheckedUnix(shardHealth.Standby.CheckedAt)
+		populateStandbyPromotionReadiness(&entry)
+		populateAutoPromotionStatus(&entry, snapshot.autoPromotion[shard.ID])
+		entry.Reachable = entry.ActiveReachable
+		entry.Status = entry.ActiveStatus
+		entry.StatusError = entry.ActiveStatusError
+		reply.Shards[i] = entry
+	}
+
+	return nil
+}
