@@ -10,8 +10,46 @@ require_cmd aws
 
 TF_DIR="$SCRIPT_DIR/terraform"
 TFVARS_FILE="$STATE_DIR/terraform.tfvars.json"
+TERRAFORM_BIN="${TERRAFORM_BIN:-terraform}"
 
 defensive_state_cleanup() {
+  if [[ -n "${READ_SERVER_ASG_NAME:-}" ]]; then
+    info "deleting readserver Auto Scaling group: $READ_SERVER_ASG_NAME"
+    aws_region autoscaling update-auto-scaling-group \
+      --auto-scaling-group-name "$READ_SERVER_ASG_NAME" \
+      --min-size 0 \
+      --desired-capacity 0 >/dev/null 2>&1 || true
+    aws_region autoscaling delete-auto-scaling-group \
+      --auto-scaling-group-name "$READ_SERVER_ASG_NAME" \
+      --force-delete >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${READ_ALB_LISTENER_ARN:-}" ]]; then
+    info "deleting read ALB listener: $READ_ALB_LISTENER_ARN"
+    aws_region elbv2 delete-listener --listener-arn "$READ_ALB_LISTENER_ARN" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${READ_ALB_ARN:-}" ]]; then
+    info "deleting read ALB: $READ_ALB_ARN"
+    aws_region elbv2 delete-load-balancer --load-balancer-arn "$READ_ALB_ARN" >/dev/null 2>&1 || true
+    aws_region elbv2 wait load-balancers-deleted --load-balancer-arns "$READ_ALB_ARN" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${READ_ALB_TARGET_GROUP_ARN:-}" ]]; then
+    info "deleting read ALB target group: $READ_ALB_TARGET_GROUP_ARN"
+    for _ in $(seq 1 20); do
+      if aws_region elbv2 delete-target-group --target-group-arn "$READ_ALB_TARGET_GROUP_ARN" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 5
+    done
+  fi
+
+  if [[ -n "${READ_SERVER_LAUNCH_TEMPLATE_ID:-}" ]]; then
+    info "deleting readserver launch template: $READ_SERVER_LAUNCH_TEMPLATE_ID"
+    aws_region ec2 delete-launch-template --launch-template-id "$READ_SERVER_LAUNCH_TEMPLATE_ID" >/dev/null 2>&1 || true
+  fi
+
   if [[ -n "${NLB_LISTENER_ARN:-}" ]]; then
     info "deleting NLB listener: $NLB_LISTENER_ARN"
     aws_region elbv2 delete-listener --listener-arn "$NLB_LISTENER_ARN" >/dev/null 2>&1 || true
@@ -109,11 +147,47 @@ defensive_state_cleanup() {
       sleep 2
     done
   fi
+
+  if [[ -n "${READ_SERVER_IAM_INSTANCE_PROFILE_NAME:-}" && -n "${READ_SERVER_IAM_ROLE_NAME:-}" ]]; then
+    info "deleting readserver IAM instance profile: $READ_SERVER_IAM_INSTANCE_PROFILE_NAME"
+    aws_base iam remove-role-from-instance-profile \
+      --instance-profile-name "$READ_SERVER_IAM_INSTANCE_PROFILE_NAME" \
+      --role-name "$READ_SERVER_IAM_ROLE_NAME" >/dev/null 2>&1 || true
+
+    for _ in $(seq 1 30); do
+      if aws_base iam delete-instance-profile \
+        --instance-profile-name "$READ_SERVER_IAM_INSTANCE_PROFILE_NAME" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 2
+    done
+  fi
+
+  if [[ -n "${READ_SERVER_IAM_ROLE_NAME:-}" ]]; then
+    info "deleting readserver IAM role: $READ_SERVER_IAM_ROLE_NAME"
+    if [[ -n "${READ_SERVER_IAM_POLICY_NAME:-}" ]]; then
+      aws_base iam delete-role-policy \
+        --role-name "$READ_SERVER_IAM_ROLE_NAME" \
+        --policy-name "$READ_SERVER_IAM_POLICY_NAME" >/dev/null 2>&1 || true
+    fi
+
+    for _ in $(seq 1 30); do
+      if aws_base iam delete-role --role-name "$READ_SERVER_IAM_ROLE_NAME" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 2
+    done
+  fi
+
+  if [[ -n "${RESULT_TABLE_S3_BUCKET:-}" ]]; then
+    info "emptying result table bucket: $RESULT_TABLE_S3_BUCKET"
+    aws_region s3 rm "s3://$RESULT_TABLE_S3_BUCKET" --recursive >/dev/null 2>&1 || true
+    aws_region s3api delete-bucket --bucket "$RESULT_TABLE_S3_BUCKET" >/dev/null 2>&1 || true
+  fi
 }
 
 if [[ -f "$STATE_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$STATE_FILE"
+  load_state
 fi
 
 if [[ ! -f "$TFVARS_FILE" ]]; then
@@ -124,15 +198,15 @@ if [[ ! -f "$TFVARS_FILE" ]]; then
     die "Terraform variable file not found: $TFVARS_FILE. Cannot safely destroy Terraform-managed AWS eval resources."
   fi
 else
-  require_cmd terraform
+  require_cmd "$TERRAFORM_BIN"
   destroy_args=(-var-file="$TFVARS_FILE")
   if [[ "${TERRAFORM_AUTO_APPROVE:-1}" != "0" ]]; then
     destroy_args+=(-auto-approve)
   fi
 
   info "destroying Terraform-managed AWS eval infrastructure"
-  terraform -chdir="$TF_DIR" init
-  terraform -chdir="$TF_DIR" destroy "${destroy_args[@]}"
+  "$TERRAFORM_BIN" -chdir="$TF_DIR" init
+  "$TERRAFORM_BIN" -chdir="$TF_DIR" destroy "${destroy_args[@]}"
 fi
 
 if [[ -n "${PROJECT_TAG:-}" ]]; then

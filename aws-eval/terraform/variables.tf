@@ -66,6 +66,10 @@ variable "client_instance_type" {
   type = string
 }
 
+variable "read_server_instance_type" {
+  type = string
+}
+
 variable "server_threads" {
   type = string
 }
@@ -116,6 +120,30 @@ variable "client_exit_grace_seconds" {
 
 variable "coordinator_port" {
   type = string
+}
+
+variable "read_server_port" {
+  type = string
+}
+
+variable "read_alb_port" {
+  type = string
+}
+
+variable "read_server_desired_capacity" {
+  type = string
+}
+
+variable "read_server_min_size" {
+  type = string
+}
+
+variable "read_server_max_size" {
+  type = string
+}
+
+variable "read_alb_subnet_ids" {
+  type = list(string)
 }
 
 variable "coordinator_standby_port" {
@@ -301,4 +329,29 @@ variable "server_ingestion_iam_instance_profile_name" {
 variable "server_ingestion_iam_policy_name" {
   type    = string
   default = "RiposteCompletedUploadIngestion"
+}
+
+variable "result_table_s3_bucket" {
+  type    = string
+  default = ""
+}
+
+variable "result_table_s3_prefix" {
+  type    = string
+  default = ""
+}
+
+variable "read_server_iam_role_name" {
+  type    = string
+  default = "riposte-readserver"
+}
+
+variable "read_server_iam_instance_profile_name" {
+  type    = string
+  default = "riposte-readserver"
+}
+
+variable "read_server_iam_policy_name" {
+  type    = string
+  default = "RiposteReadServerS3"
 }

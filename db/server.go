@@ -738,12 +738,21 @@ func (t *Server) sendMergeRequest() (string, error) {
 	}
 
 	epoch := t.currentEpochMeta()
-	resultPath, err := t.writePublishedResult(parg.Plaintext, epoch, time.Now())
+	completedAt := time.Now().UTC()
+	resultPath, err := t.writePublishedResult(parg.Plaintext, epoch, completedAt)
 	if err != nil {
 		return "", err
 	}
 	if resultPath != "" {
 		log.Printf("Published epoch result to %s", resultPath)
+	}
+	if t.tablePublisher != nil {
+		publication, err := t.tablePublisher.PublishTable(context.Background(), parg.Plaintext, epoch, completedAt)
+		if err != nil {
+			return "", fmt.Errorf("publish table to s3: %w", err)
+		}
+		t.setLastTablePublication(publication)
+		log.Printf("Published epoch table to %s manifest=%s", publication.TableURI, publication.ManifestURI)
 	}
 
 	log.Printf("Done MERGE")
@@ -942,6 +951,7 @@ func (t *Server) Status(_ *StatusArgs, reply *StatusReply) error {
 	reply.DurationSecs = snapshot.epoch.DurationSeconds
 	reply.Accepting = snapshot.accepting
 	reply.LastResult = snapshot.lastResult
+	reply.LastTableS3URI, reply.LastManifestS3URI = t.lastTablePublicationURIs()
 	reply.PeerState = snapshot.peerState.String()
 	reply.PeerError = snapshot.peerError
 	if snapshot.peerState == PeerConnectionsFailed {

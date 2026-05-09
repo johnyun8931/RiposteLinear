@@ -30,6 +30,7 @@ VPC_ID="${VPC_ID:-${TF_VAR_vpc_id:-}}"
 SUBNET_ID="${SUBNET_ID:-${TF_VAR_subnet_id:-}}"
 
 IFS=$'\t' read -r SELECTED_VPC_ID SELECTED_SUBNET_ID SELECTED_AZ <<<"$(resolve_network_selection)"
+READ_ALB_SUBNET_IDS_RESOLVED="$(resolve_read_alb_subnet_ids "$SELECTED_VPC_ID" "$SELECTED_SUBNET_ID" "$SELECTED_AZ")"
 AMI_ID="${AMI_ID:-$(aws_region ssm get-parameter --name "$AMI_SSM_PARAM" --query 'Parameter.Value' --output text)}"
 
 TF_DIR="$SCRIPT_DIR/terraform"
@@ -43,6 +44,7 @@ chmod 400 "$KEY_FILE"
 
 info "launch run id: $RUN_ID"
 info "selected network: vpc=$SELECTED_VPC_ID subnet=$SELECTED_SUBNET_ID az=$SELECTED_AZ"
+info "read ALB subnets: $READ_ALB_SUBNET_IDS_RESOLVED"
 info "writing Terraform variables: $TFVARS_FILE"
 
 export DYNAMODB_CONTROL_REGION_RESOLVED="$(dynamodb_control_region)"
@@ -53,6 +55,8 @@ export COORDINATOR_IAM_ROLE_NAME_RESOLVED="$(coordinator_iam_role_name)"
 export COORDINATOR_IAM_INSTANCE_PROFILE_NAME_RESOLVED="$(coordinator_iam_instance_profile_name)"
 export SERVER_INGESTION_IAM_ROLE_NAME_RESOLVED="$(server_ingestion_iam_role_name)"
 export SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME_RESOLVED="$(server_ingestion_iam_instance_profile_name)"
+export READ_SERVER_IAM_ROLE_NAME_RESOLVED="$(read_server_iam_role_name)"
+export READ_SERVER_IAM_INSTANCE_PROFILE_NAME_RESOLVED="$(read_server_iam_instance_profile_name)"
 CREATE_DYNAMODB_CONTROL_TABLE=false
 CREATE_DYNAMODB_SESSION_TABLE=false
 if dynamodb_runtime_enabled; then
@@ -75,6 +79,7 @@ if dynamodb_runtime_enabled; then
 fi
 export AWS_REGION PROJECT_TAG RUN_ID AMI_ID AMI_SSM_PARAM SELECTED_VPC_ID SELECTED_SUBNET_ID SELECTED_AZ
 export SSH_CIDR SSH_USER KEY_NAME KEY_FILE SG_NAME COORDINATOR_INSTANCE_TYPE SERVER_INSTANCE_TYPE CLIENT_INSTANCE_TYPE
+export READ_SERVER_INSTANCE_TYPE READ_SERVER_PORT READ_ALB_PORT READ_SERVER_DESIRED_CAPACITY READ_SERVER_MIN_SIZE READ_SERVER_MAX_SIZE READ_ALB_SUBNET_IDS_RESOLVED
 export SERVER_THREADS CLIENT_THREADS CLIENT_CONCURRENCY CLIENT_RETRY_OVERLOAD CLIENT_OVERLOAD_BACKOFF_INITIAL_MS CLIENT_OVERLOAD_BACKOFF_MAX_MS
 export WARMUP_EPOCH_SECONDS MEASURED_EPOCH_SECONDS START_EPOCH_RETRY_TIMEOUT START_EPOCH_RETRY_INTERVAL POST_EPOCH_FLUSH_SECONDS CLIENT_EXIT_GRACE_SECONDS
 export COORDINATOR_PORT COORDINATOR_STANDBY_PORT SHARD0_LEADER_PORT SHARD0_FOLLOWER_PORT SHARD1_LEADER_PORT SHARD1_FOLLOWER_PORT
@@ -84,6 +89,8 @@ export COORDINATOR_LEASE_TTL_SECONDS COORDINATOR_LEASE_RENEW_SECONDS COORDINATOR
 export INGESTION_QUEUE_BACKEND HOT_STANDBY_INGESTION INGESTION_S3_BUCKET INGESTION_RECEIVE_BATCH_SIZE INGESTION_SQS_WAIT_SECONDS INGESTION_SQS_VISIBILITY_TIMEOUT_SECONDS INGESTION_WORKER_ERROR_BACKOFF_MS
 export COMPLETED_UPLOAD_LEDGER_BACKEND COMPLETED_UPLOAD_LEDGER_TABLE COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS SERVER_INGESTION_IAM_POLICY_NAME
 export SERVER_INGESTION_IAM_ROLE_NAME_RESOLVED SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME_RESOLVED
+export RESULT_TABLE_S3_BUCKET RESULT_TABLE_S3_PREFIX READ_SERVER_IAM_POLICY_NAME
+export READ_SERVER_IAM_ROLE_NAME_RESOLVED READ_SERVER_IAM_INSTANCE_PROFILE_NAME_RESOLVED
 export CREATE_DYNAMODB_CONTROL_TABLE CREATE_DYNAMODB_SESSION_TABLE
 
 python3 - "$TFVARS_FILE" <<'PY'
@@ -109,6 +116,7 @@ payload = {
     "coordinator_instance_type": os.environ["COORDINATOR_INSTANCE_TYPE"],
     "server_instance_type": os.environ["SERVER_INSTANCE_TYPE"],
     "client_instance_type": os.environ["CLIENT_INSTANCE_TYPE"],
+    "read_server_instance_type": os.environ["READ_SERVER_INSTANCE_TYPE"],
     "server_threads": os.environ["SERVER_THREADS"],
     "client_threads": os.environ["CLIENT_THREADS"],
     "client_concurrency": os.environ["CLIENT_CONCURRENCY"],
@@ -122,6 +130,12 @@ payload = {
     "post_epoch_flush_seconds": os.environ["POST_EPOCH_FLUSH_SECONDS"],
     "client_exit_grace_seconds": os.environ["CLIENT_EXIT_GRACE_SECONDS"],
     "coordinator_port": os.environ["COORDINATOR_PORT"],
+    "read_server_port": os.environ["READ_SERVER_PORT"],
+    "read_alb_port": os.environ["READ_ALB_PORT"],
+    "read_server_desired_capacity": os.environ["READ_SERVER_DESIRED_CAPACITY"],
+    "read_server_min_size": os.environ["READ_SERVER_MIN_SIZE"],
+    "read_server_max_size": os.environ["READ_SERVER_MAX_SIZE"],
+    "read_alb_subnet_ids": [part for part in os.environ["READ_ALB_SUBNET_IDS_RESOLVED"].split(",") if part],
     "coordinator_standby_port": os.environ["COORDINATOR_STANDBY_PORT"],
     "shard0_leader_port": os.environ["SHARD0_LEADER_PORT"],
     "shard0_follower_port": os.environ["SHARD0_FOLLOWER_PORT"],
@@ -164,6 +178,11 @@ payload = {
     "server_ingestion_iam_role_name": os.environ["SERVER_INGESTION_IAM_ROLE_NAME_RESOLVED"],
     "server_ingestion_iam_instance_profile_name": os.environ["SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME_RESOLVED"],
     "server_ingestion_iam_policy_name": os.environ["SERVER_INGESTION_IAM_POLICY_NAME"],
+    "result_table_s3_bucket": os.environ["RESULT_TABLE_S3_BUCKET"],
+    "result_table_s3_prefix": os.environ["RESULT_TABLE_S3_PREFIX"],
+    "read_server_iam_role_name": os.environ["READ_SERVER_IAM_ROLE_NAME_RESOLVED"],
+    "read_server_iam_instance_profile_name": os.environ["READ_SERVER_IAM_INSTANCE_PROFILE_NAME_RESOLVED"],
+    "read_server_iam_policy_name": os.environ["READ_SERVER_IAM_POLICY_NAME"],
 }
 
 with open(sys.argv[1], "w") as fh:

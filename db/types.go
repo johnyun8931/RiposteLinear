@@ -235,6 +235,8 @@ type StatusReply struct {
 	DurationSecs                        int64  `json:"duration_secs"`
 	Accepting                           bool   `json:"accepting"`
 	LastResult                          string `json:"last_result"`
+	LastTableS3URI                      string `json:"last_table_s3_uri"`
+	LastManifestS3URI                   string `json:"last_manifest_s3_uri"`
 	PeerState                           string `json:"peer_state"`
 	PeerError                           string `json:"peer_error"`
 	ReplicaID                           string `json:"replica_id"`
@@ -571,10 +573,14 @@ type Server struct {
 
 	rpcClients [NUM_SERVERS + 1]*rpc.Client
 
-	resultsDir     string
-	globalRowStart int
-	controlCh      chan leaderControlCommand
-	mergeFn        func() (string, error)
+	resultsDir        string
+	tablePublisher    TablePublisher
+	tablePublishMu    sync.Mutex
+	lastTableS3URI    string
+	lastManifestS3URI string
+	globalRowStart    int
+	controlCh         chan leaderControlCommand
+	mergeFn           func() (string, error)
 
 	ingestionQueue               completedUploadQueue
 	ingestionQueueBackend        string
@@ -635,6 +641,10 @@ func (t *Server) SetResultsDir(resultsDir string) {
 	t.resultsDir = resultsDir
 }
 
+func (t *Server) SetTablePublisher(publisher TablePublisher) {
+	t.tablePublisher = publisher
+}
+
 func (t *Server) SetShardID(shardID int) {
 	t.ShardID = shardID
 }
@@ -670,6 +680,19 @@ func (t *Server) acceptingWrites() bool {
 
 func (t *Server) getLastResultPath() string {
 	return t.currentControlSnapshot().lastResult
+}
+
+func (t *Server) setLastTablePublication(publication TablePublication) {
+	t.tablePublishMu.Lock()
+	defer t.tablePublishMu.Unlock()
+	t.lastTableS3URI = publication.TableURI
+	t.lastManifestS3URI = publication.ManifestURI
+}
+
+func (t *Server) lastTablePublicationURIs() (string, string) {
+	t.tablePublishMu.Lock()
+	defer t.tablePublishMu.Unlock()
+	return t.lastTableS3URI, t.lastManifestS3URI
 }
 
 func (t *Server) stopEpochTimer() {

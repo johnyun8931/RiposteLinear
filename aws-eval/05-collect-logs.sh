@@ -12,6 +12,7 @@ if [[ -f "$BENCHMARK_STATE_FILE" ]]; then
 fi
 
 require_cmd scp
+require_cmd ssh
 require_cmd git
 require_cmd python3
 require_cmd aws
@@ -22,9 +23,38 @@ mkdir -p "$OUT_DIR/remotes" "$OUT_DIR/leader-results"
 if public_entry_enabled; then
   capture_nlb_artifacts "$OUT_DIR/aws/nlb"
 fi
+capture_read_alb_artifacts "$OUT_DIR/aws/read-alb"
 if sqs_ingestion_enabled; then
   capture_ingestion_artifacts "$OUT_DIR/aws/ingestion"
 fi
+
+collect_readserver_artifacts() {
+  local output_dir="$1"
+  mkdir -p "$output_dir"
+  aws_region autoscaling describe-auto-scaling-groups \
+    --auto-scaling-group-names "${READ_SERVER_ASG_NAME:-}" \
+    --output json >"$output_dir/asg.json" 2>/dev/null || true
+  aws_region ec2 describe-instances \
+    --filters Name=tag:Project,Values="$PROJECT_TAG" Name=tag:Role,Values=readserver \
+    --output json >"$output_dir/instances.json" || true
+  local id public_ip private_ip dst
+  while IFS=$'\t' read -r id public_ip private_ip; do
+    [[ -n "${id:-}" && "$id" != "None" ]] || continue
+    dst="$output_dir/$id"
+    mkdir -p "$dst"
+    printf '%s\n' "$public_ip" >"$dst/public-ip.txt"
+    printf '%s\n' "$private_ip" >"$dst/private-ip.txt"
+    if [[ -n "$public_ip" && "$public_ip" != "None" ]]; then
+      remote_cmd "$public_ip" "journalctl -u readserver --no-pager -n 1000" >"$dst/readserver-journal.log" 2>"$dst/readserver-journal.err" || true
+      remote_cmd "$public_ip" "curl -fsS 'http://127.0.0.1:${READ_SERVER_PORT:-8080}/status'" >"$dst/status.json" 2>"$dst/status.err" || true
+    fi
+  done < <(aws_region ec2 describe-instances \
+    --filters Name=tag:Project,Values="$PROJECT_TAG" Name=tag:Role,Values=readserver Name=instance-state-name,Values=pending,running,stopping,stopped \
+    --query 'Reservations[].Instances[].[InstanceId,PublicIpAddress,PrivateIpAddress]' \
+    --output text)
+}
+
+collect_readserver_artifacts "$OUT_DIR/aws/readservers"
 
 copy_role_tree() {
   local label="$1"
@@ -71,7 +101,10 @@ AMI_ID="$AMI_ID" \
 COORDINATOR_INSTANCE_TYPE="$COORDINATOR_INSTANCE_TYPE" \
 SERVER_INSTANCE_TYPE="$SERVER_INSTANCE_TYPE" \
 CLIENT_INSTANCE_TYPE="$CLIENT_INSTANCE_TYPE" \
+READ_SERVER_INSTANCE_TYPE="${READ_SERVER_INSTANCE_TYPE:-}" \
 COORDINATOR_PORT="$COORDINATOR_PORT" \
+READ_SERVER_PORT="${READ_SERVER_PORT:-8080}" \
+READ_ALB_PORT="${READ_ALB_PORT:-80}" \
 COORDINATOR_STANDBY_PORT="${COORDINATOR_STANDBY_PORT:-8631}" \
 SHARD0_LEADER_PORT="$SHARD0_LEADER_PORT" \
 SHARD0_FOLLOWER_PORT="$SHARD0_FOLLOWER_PORT" \
@@ -124,6 +157,17 @@ NLB_ARN="${NLB_ARN:-}" \
 NLB_TARGET_GROUP_NAME="${NLB_TARGET_GROUP_NAME:-}" \
 NLB_TARGET_GROUP_ARN="${NLB_TARGET_GROUP_ARN:-}" \
 NLB_LISTENER_ARN="${NLB_LISTENER_ARN:-}" \
+READ_ALB_NAME="${READ_ALB_NAME:-}" \
+READ_ALB_DNS_NAME="${READ_ALB_DNS_NAME:-}" \
+READ_ALB_ARN="${READ_ALB_ARN:-}" \
+READ_ALB_TARGET_GROUP_ARN="${READ_ALB_TARGET_GROUP_ARN:-}" \
+READ_ALB_LISTENER_ARN="${READ_ALB_LISTENER_ARN:-}" \
+READ_SERVER_ASG_NAME="${READ_SERVER_ASG_NAME:-}" \
+READ_SERVER_DESIRED_CAPACITY="${READ_SERVER_DESIRED_CAPACITY:-0}" \
+READ_SERVER_MIN_SIZE="${READ_SERVER_MIN_SIZE:-0}" \
+READ_SERVER_MAX_SIZE="${READ_SERVER_MAX_SIZE:-0}" \
+RESULT_TABLE_S3_BUCKET="${RESULT_TABLE_S3_BUCKET:-}" \
+RESULT_TABLE_S3_PREFIX="${RESULT_TABLE_S3_PREFIX:-}" \
 COORDINATOR_ID="$COORDINATOR_ID" \
 COORDINATOR_PUBLIC_IP="$COORDINATOR_PUBLIC_IP" \
 COORDINATOR_PRIVATE_IP="$COORDINATOR_PRIVATE_IP" \
@@ -166,9 +210,12 @@ payload = {
         "coordinator": os.environ["COORDINATOR_INSTANCE_TYPE"],
         "server": os.environ["SERVER_INSTANCE_TYPE"],
         "client": os.environ["CLIENT_INSTANCE_TYPE"],
+        "read_server": os.environ["READ_SERVER_INSTANCE_TYPE"],
     },
     "ports": {
         "coordinator": int(os.environ["COORDINATOR_PORT"]),
+        "read_server": int(os.environ["READ_SERVER_PORT"]),
+        "read_alb": int(os.environ["READ_ALB_PORT"]),
         "coordinator_standby": int(os.environ["COORDINATOR_STANDBY_PORT"]),
         "shard0_leader": int(os.environ["SHARD0_LEADER_PORT"]),
         "shard0_follower": int(os.environ["SHARD0_FOLLOWER_PORT"]),
@@ -224,6 +271,19 @@ payload = {
             "target_group_name": os.environ["NLB_TARGET_GROUP_NAME"],
             "target_group_arn": os.environ["NLB_TARGET_GROUP_ARN"],
             "listener_arn": os.environ["NLB_LISTENER_ARN"],
+        },
+        "read_path": {
+            "alb_name": os.environ["READ_ALB_NAME"],
+            "alb_dns_name": os.environ["READ_ALB_DNS_NAME"],
+            "alb_arn": os.environ["READ_ALB_ARN"],
+            "target_group_arn": os.environ["READ_ALB_TARGET_GROUP_ARN"],
+            "listener_arn": os.environ["READ_ALB_LISTENER_ARN"],
+            "asg_name": os.environ["READ_SERVER_ASG_NAME"],
+            "desired_capacity": int(os.environ["READ_SERVER_DESIRED_CAPACITY"]),
+            "min_size": int(os.environ["READ_SERVER_MIN_SIZE"]),
+            "max_size": int(os.environ["READ_SERVER_MAX_SIZE"]),
+            "result_table_s3_bucket": os.environ["RESULT_TABLE_S3_BUCKET"],
+            "result_table_s3_prefix": os.environ["RESULT_TABLE_S3_PREFIX"],
         },
     },
     "instances": {

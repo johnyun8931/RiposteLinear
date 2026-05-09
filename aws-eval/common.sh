@@ -49,6 +49,17 @@ COMPLETED_UPLOAD_LEDGER_BACKEND="${COMPLETED_UPLOAD_LEDGER_BACKEND:-memory}"
 COMPLETED_UPLOAD_LEDGER_TABLE="${COMPLETED_UPLOAD_LEDGER_TABLE:-$DYNAMODB_CONTROL_TABLE}"
 COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS="${COMPLETED_UPLOAD_PROCESSING_TTL_SECONDS:-900}"
 SERVER_INGESTION_IAM_POLICY_NAME="${SERVER_INGESTION_IAM_POLICY_NAME:-RiposteCompletedUploadIngestion}"
+READ_SERVER_INSTANCE_TYPE="${READ_SERVER_INSTANCE_TYPE:-c7i.large}"
+READ_SERVER_PORT="${READ_SERVER_PORT:-8080}"
+READ_ALB_PORT="${READ_ALB_PORT:-80}"
+READ_SERVER_DESIRED_CAPACITY="${READ_SERVER_DESIRED_CAPACITY:-2}"
+READ_SERVER_MIN_SIZE="${READ_SERVER_MIN_SIZE:-1}"
+READ_SERVER_MAX_SIZE="${READ_SERVER_MAX_SIZE:-4}"
+RESULT_TABLE_S3_BUCKET="${RESULT_TABLE_S3_BUCKET:-}"
+RESULT_TABLE_S3_PREFIX="${RESULT_TABLE_S3_PREFIX:-}"
+READ_SERVER_IAM_ROLE_NAME="${READ_SERVER_IAM_ROLE_NAME:-}"
+READ_SERVER_IAM_INSTANCE_PROFILE_NAME="${READ_SERVER_IAM_INSTANCE_PROFILE_NAME:-}"
+READ_SERVER_IAM_POLICY_NAME="${READ_SERVER_IAM_POLICY_NAME:-RiposteReadServerS3}"
 
 COORDINATOR_PORT="${COORDINATOR_PORT:-8630}"
 COORDINATOR_STANDBY_PORT="${COORDINATOR_STANDBY_PORT:-8631}"
@@ -70,7 +81,7 @@ ROWS_PER_SHARD=256
 STATE_DIR="$SCRIPT_DIR/.state"
 STATE_FILE="$STATE_DIR/env.sh"
 BENCHMARK_STATE_FILE="$STATE_DIR/benchmark-env.sh"
-KEY_DIR="$SCRIPT_DIR/keys"
+KEY_DIR="${KEY_DIR:-$HOME/.riposte-aws-eval-keys}"
 BIN_DIR="$SCRIPT_DIR/bin"
 RESULTS_DIR="$SCRIPT_DIR/results"
 
@@ -111,6 +122,18 @@ load_state() {
   [[ -f "$STATE_FILE" ]] || die "state file not found: $STATE_FILE. Run 01-launch.sh first."
   # shellcheck disable=SC1090
   source "$STATE_FILE"
+  local name
+  while IFS= read -r name; do
+    [[ -n "${name:-}" ]] || continue
+    [[ -v "$name" ]] || continue
+    printf -v "$name" '%s' "${!name//$'\r'/}"
+  done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$STATE_FILE")
+  if [[ -n "${RUN_ID:-}" ]]; then
+    local wsl_key="$HOME/.riposte-aws-eval-keys/riposte-aws-eval-$RUN_ID.pem"
+    if [[ -f "$wsl_key" ]]; then
+      KEY_FILE="$wsl_key"
+    fi
+  fi
 }
 
 ssh_opts() {
@@ -299,6 +322,51 @@ resolve_network_selection() {
   die "could not find a default subnet with public IP mapping in a single AZ that offers $COORDINATOR_INSTANCE_TYPE, $SERVER_INSTANCE_TYPE, and $CLIENT_INSTANCE_TYPE"
 }
 
+resolve_read_alb_subnet_ids() {
+  local vpc_id="$1"
+  local primary_subnet_id="$2"
+  local primary_az="$3"
+  local requested="${READ_ALB_SUBNET_IDS:-}"
+  local subnets=()
+  local seen_azs=()
+  local row candidate_id candidate_az public_flag
+
+  if [[ -n "$requested" ]]; then
+    printf '%s' "$requested"
+    return 0
+  fi
+
+  subnets+=("$primary_subnet_id")
+  seen_azs+=("$primary_az")
+  while IFS=$'\t' read -r candidate_id candidate_az public_flag; do
+    [[ -n "${candidate_id:-}" ]] || continue
+    [[ "$candidate_id" != "$primary_subnet_id" ]] || continue
+    [[ "$public_flag" == "True" ]] || continue
+    if contains_line "$candidate_az" "${seen_azs[@]}"; then
+      continue
+    fi
+    subnets+=("$candidate_id")
+    seen_azs+=("$candidate_az")
+    if [[ "${#subnets[@]}" -ge 2 ]]; then
+      break
+    fi
+  done < <(aws_region ec2 describe-subnets \
+    --filters \
+      Name=vpc-id,Values="$vpc_id" \
+      Name=default-for-az,Values=true \
+      Name=state,Values=available \
+    --query 'Subnets[].[SubnetId,AvailabilityZone,MapPublicIpOnLaunch]' \
+    --output text)
+
+  if [[ "${#subnets[@]}" -lt 2 ]]; then
+    printf '%s' "$primary_subnet_id"
+    return 0
+  fi
+  local joined
+  joined="$(IFS=,; printf '%s' "${subnets[*]}")"
+  printf '%s' "$joined"
+}
+
 server_pair_csv() {
   local leader_ip="$1"
   local leader_port="$2"
@@ -370,6 +438,14 @@ server_ingestion_iam_role_name() {
 
 server_ingestion_iam_instance_profile_name() {
   printf '%s' "${SERVER_INGESTION_IAM_INSTANCE_PROFILE_NAME:-$(server_ingestion_iam_role_name)}"
+}
+
+read_server_iam_role_name() {
+  printf '%s' "${READ_SERVER_IAM_ROLE_NAME:-${PROJECT_TAG}-${RUN_ID:-local}-readserver}"
+}
+
+read_server_iam_instance_profile_name() {
+  printf '%s' "${READ_SERVER_IAM_INSTANCE_PROFILE_NAME:-$(read_server_iam_role_name)}"
 }
 
 dynamodb_control_table() {
@@ -584,6 +660,52 @@ server_ingestion_queue_args() {
       die "unknown INGESTION_QUEUE_BACKEND: $INGESTION_QUEUE_BACKEND"
       ;;
   esac
+}
+
+readserver_binary_s3_key() {
+  local prefix="${RESULT_TABLE_S3_PREFIX:-}"
+  prefix="${prefix#/}"
+  prefix="${prefix%/}"
+  if [[ -n "$prefix" ]]; then
+    printf '%s/bin/readserver' "$prefix"
+  else
+    printf 'bin/readserver'
+  fi
+}
+
+server_result_table_args() {
+  if [[ -z "${RESULT_TABLE_S3_BUCKET:-}" ]]; then
+    return
+  fi
+  printf -- " -result-s3-bucket %s -result-s3-prefix %s -aws-region %s" \
+    "$(quote "$RESULT_TABLE_S3_BUCKET")" \
+    "$(quote "$RESULT_TABLE_S3_PREFIX")" \
+    "$(quote "$AWS_REGION")"
+}
+
+capture_read_alb_artifacts() {
+  local output_dir="$1"
+  mkdir -p "$output_dir"
+  [[ -n "${READ_ALB_ARN:-}" && -n "${READ_ALB_TARGET_GROUP_ARN:-}" && -n "${READ_ALB_LISTENER_ARN:-}" ]] || return 0
+  aws_region elbv2 describe-load-balancers \
+    --load-balancer-arns "$READ_ALB_ARN" \
+    --output json >"$output_dir/load-balancer.json" || true
+  aws_region elbv2 describe-target-groups \
+    --target-group-arns "$READ_ALB_TARGET_GROUP_ARN" \
+    --output json >"$output_dir/target-group.json" || true
+  aws_region elbv2 describe-listeners \
+    --listener-arns "$READ_ALB_LISTENER_ARN" \
+    --output json >"$output_dir/listener.json" || true
+  aws_region elbv2 describe-target-health \
+    --target-group-arn "$READ_ALB_TARGET_GROUP_ARN" \
+    --output json >"$output_dir/target-health.json" || true
+}
+
+readserver_instance_ids() {
+  aws_region ec2 describe-instances \
+    --filters Name=tag:Project,Values="$PROJECT_TAG" Name=tag:Role,Values=readserver Name=instance-state-name,Values=pending,running,stopping,stopped \
+    --query 'Reservations[].Instances[].InstanceId' \
+    --output text | tr '\t' '\n' | sed '/^$/d'
 }
 
 capture_ingestion_artifacts() {
@@ -864,9 +986,10 @@ start_remote_server() {
   local log_path="$6"
   local replica_id="${7:-active}"
   local global_row_start=$((shard_id * ROWS_PER_SHARD))
-  local ingestion_args
+  local ingestion_args result_args
   ingestion_args="$(server_ingestion_queue_args "$shard_id" "$replica_id")"
-  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -global-row-start '$global_row_start' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv'$ingestion_args > '${log_path}.nohup' 2>&1 &"
+  result_args="$(server_result_table_args)"
+  remote_cmd "$host" "mkdir -p '$(dirname "$log_path")' '$results_dir'; nohup ~/server -idx '$idx' -threads '$SERVER_THREADS' -shard-id '$shard_id' -global-row-start '$global_row_start' -results-dir '$results_dir' -log '$log_path' -servers '$servers_csv'$ingestion_args$result_args > '${log_path}.nohup' 2>&1 &"
 }
 
 start_remote_coordinator() {

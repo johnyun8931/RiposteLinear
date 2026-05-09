@@ -7,9 +7,10 @@ output "state_env" {
     AMI_ID        = var.ami_id
     AMI_SSM_PARAM = var.ami_ssm_param
 
-    SELECTED_VPC_ID    = var.vpc_id
-    SELECTED_SUBNET_ID = var.subnet_id
-    SELECTED_AZ        = var.availability_zone
+    SELECTED_VPC_ID     = var.vpc_id
+    SELECTED_SUBNET_ID  = var.subnet_id
+    SELECTED_AZ         = var.availability_zone
+    READ_ALB_SUBNET_IDS = join(",", local.read_alb_subnet_ids)
 
     KEY_NAME = aws_key_pair.eval.key_name
     KEY_FILE = var.key_file
@@ -21,6 +22,7 @@ output "state_env" {
     COORDINATOR_INSTANCE_TYPE = var.coordinator_instance_type
     SERVER_INSTANCE_TYPE      = var.server_instance_type
     CLIENT_INSTANCE_TYPE      = var.client_instance_type
+    READ_SERVER_INSTANCE_TYPE = var.read_server_instance_type
 
     COORDINATOR_ID     = aws_instance.coordinator.id
     SHARD0_LEADER_ID   = aws_instance.shard0_leader.id
@@ -59,6 +61,8 @@ output "state_env" {
     CLIENT_EXIT_GRACE_SECONDS          = var.client_exit_grace_seconds
 
     COORDINATOR_PORT             = var.coordinator_port
+    READ_SERVER_PORT             = var.read_server_port
+    READ_ALB_PORT                = var.read_alb_port
     COORDINATOR_STANDBY_PORT     = var.coordinator_standby_port
     SHARD0_LEADER_PORT           = var.shard0_leader_port
     SHARD0_FOLLOWER_PORT         = var.shard0_follower_port
@@ -96,6 +100,23 @@ output "state_env" {
     NLB_TARGET_GROUP_NAME          = local.public_entry_enabled ? aws_lb_target_group.coordinator[0].name : ""
     NLB_TARGET_GROUP_ARN           = local.public_entry_enabled ? aws_lb_target_group.coordinator[0].arn : ""
     NLB_LISTENER_ARN               = local.public_entry_enabled ? aws_lb_listener.coordinator[0].arn : ""
+
+    READ_ALB_NAME                         = aws_lb.read.name
+    READ_ALB_ARN                          = aws_lb.read.arn
+    READ_ALB_DNS_NAME                     = aws_lb.read.dns_name
+    READ_ALB_LISTENER_ARN                 = aws_lb_listener.read.arn
+    READ_ALB_TARGET_GROUP_ARN             = aws_lb_target_group.read.arn
+    READ_SERVER_ASG_NAME                  = aws_autoscaling_group.readserver.name
+    READ_SERVER_LAUNCH_TEMPLATE_ID        = aws_launch_template.readserver.id
+    READ_SERVER_DESIRED_CAPACITY          = var.read_server_desired_capacity
+    READ_SERVER_MIN_SIZE                  = var.read_server_min_size
+    READ_SERVER_MAX_SIZE                  = var.read_server_max_size
+    READSERVER_BINARY_S3_KEY              = local.readserver_binary_key
+    RESULT_TABLE_S3_BUCKET                = aws_s3_bucket.result_tables.bucket
+    RESULT_TABLE_S3_PREFIX                = local.result_table_prefix
+    READ_SERVER_IAM_ROLE_NAME             = var.read_server_iam_role_name
+    READ_SERVER_IAM_INSTANCE_PROFILE_NAME = var.read_server_iam_instance_profile_name
+    READ_SERVER_IAM_POLICY_NAME           = var.read_server_iam_policy_name
 
     INGESTION_QUEUE_BACKEND                    = var.ingestion_queue_backend
     HOT_STANDBY_INGESTION                      = var.hot_standby_ingestion

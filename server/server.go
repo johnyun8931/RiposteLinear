@@ -31,6 +31,8 @@ var flagIndex = flag.Int("idx", -1, "Server index")
 var flagLog = flag.String("log", "", "Log file")
 var flagThreads = flag.Int("threads", -1, "Number of threads to use")
 var flagResultsDir = flag.String("results-dir", "", "Directory for epoch result files on the leader")
+var flagResultS3Bucket = flag.String("result-s3-bucket", "", "S3 bucket for current merged table publication")
+var flagResultS3Prefix = flag.String("result-s3-prefix", "", "S3 key prefix for current merged table publication")
 var flagShardID = flag.Int("shard-id", 0, "Shard identifier for result publication metadata")
 var flagGlobalRowStart = flag.Int("global-row-start", 0, "First global row represented by this server's local row 0")
 var flagReplicaID = flag.String("replica-id", "active", "Completed upload replica identity: active or standby")
@@ -160,6 +162,7 @@ func main() {
 		log.Fatal(err)
 	}
 	slotTable.SetResultsDir(*flagResultsDir)
+	configureResultTablePublisher(slotTable)
 	slotTable.Initialize(&a, &a)
 	rpc.Register(slotTable)
 
@@ -175,6 +178,18 @@ func main() {
 	log.Printf("Server %d is listening at %s", idx, serverList[idx])
 
 	//http.ListenAndServe(addr, nil)
+}
+
+func configureResultTablePublisher(slotTable *db.Server) {
+	if *flagResultS3Bucket == "" {
+		return
+	}
+	cfg := loadAWSConfig("S3 result table publication")
+	publisher, err := db.NewS3TablePublisher(s3.NewFromConfig(cfg), *flagResultS3Bucket, *flagResultS3Prefix, *flagShardID, *flagGlobalRowStart)
+	if err != nil {
+		log.Fatal(err)
+	}
+	slotTable.SetTablePublisher(publisher)
 }
 
 func validateIngestionFlags() error {
