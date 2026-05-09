@@ -304,6 +304,35 @@ Expected proof row for `shard0-active`:
 - `ingestion_queue_depth = 0`
 - `ingestion_inflight_count = 0`
 
+
+## Reads:
+for the demo for reads please look into the [from-failover-add-read-servers](https://github.com/johnyun8931/RiposteLinear/tree/from-failover-add-read-servers) branch. 
+
+### overview:
+The [from-failover-add-read-servers](https://github.com/johnyun8931/RiposteLinear/tree/from-failover-add-read-servers) branch extends the AWS evaluation system with a new stateless read-serving path. The write path still uses the existing coordinator and shard-server flow, but after each epoch merge, shard leaders can publish the merged table artifact to S3. Read servers then load the latest S3-published table into memory and serve client reads through an HTTP API.
+
+This branch adds:
+
+- S3 publication of merged shard tables after epoch completion
+- a new `readserver` binary for serving reads from in-memory table snapshots
+- HTTP read endpoints:
+  - `GET /healthz`
+  - `GET /status`
+  - `GET /read?x=<column>&y=<global_row>`
+- a public Application Load Balancer for read traffic
+- a readserver Auto Scaling Group for crash replacement
+- a `readload` tool for generating read traffic
+- AWS scripts for read load, read failover, CloudWatch graph collection, and report-ready result artifacts
+
+The read path is designed so every read server can answer any `(x,y)` read. This makes the read tier stateless and easy to scale horizontally. If one read server crashes, the ALB removes it from rotation, the remaining read servers continue serving reads, and the Auto Scaling Group launches a replacement that reloads the latest table from S3.
+
+Useful scripts added or updated in this branch include:
+
+```bash
+./aws-eval/12-validate-read-failover.sh
+./aws-eval/13-run-read-load.sh
+./aws-eval/14-run-read-load-profile.sh
+
 ## Collect AWS Logs and Artifacts
 
 After any AWS demo:
